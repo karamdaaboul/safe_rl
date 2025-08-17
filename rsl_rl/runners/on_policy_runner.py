@@ -13,9 +13,11 @@ from collections import deque
 
 import rsl_rl
 from rsl_rl.algorithms import PPO, Distillation
+from rsl_rl.algorithms.p3o import P3O
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
+    ActorCriticCost,
     ActorCriticRecurrent,
     EmpiricalNormalization,
     StudentTeacher,
@@ -40,6 +42,8 @@ class OnPolicyRunner:
         # resolve training type depending on the algorithm
         if self.alg_cfg["class_name"] == "PPO":
             self.training_type = "rl"
+        elif self.alg_cfg["class_name"] == "P3O":
+            self.training_type = "saferl"  # P3O is also RL but with cost constraints
         elif self.alg_cfg["class_name"] == "Distillation":
             self.training_type = "distillation"
         else:
@@ -50,7 +54,7 @@ class OnPolicyRunner:
         num_obs = obs.shape[1]
 
         # resolve type of privileged observations
-        if self.training_type == "rl":
+        if self.training_type == "rl" or self.training_type == "saferl":
             if "critic" in extras["observations"]:
                 self.privileged_obs_type = "critic"  # actor-critic reinforcement learnig, e.g., PPO
             else:
@@ -68,8 +72,14 @@ class OnPolicyRunner:
             num_privileged_obs = num_obs
 
         # evaluate the policy class
-        policy_class = eval(self.policy_cfg.pop("class_name"))
-        policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
+        policy_class_name = self.policy_cfg.pop("class_name")
+        
+        # For P3O algorithm, use ActorCriticCost if ActorCritic is specified
+        if self.alg_cfg["class_name"] == "P3O" and policy_class_name == "ActorCritic":
+            policy_class_name = "ActorCriticCost"
+        
+        policy_class = eval(policy_class_name)
+        policy: ActorCritic | ActorCriticCost | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 
@@ -93,7 +103,7 @@ class OnPolicyRunner:
 
         # initialize algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))
-        self.alg: PPO | Distillation = alg_class(
+        self.alg: PPO | P3O | Distillation = alg_class(
             policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
 
@@ -109,7 +119,7 @@ class OnPolicyRunner:
         else:
             self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
             self.privileged_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
-
+        
         # init storage and model
         self.alg.init_storage(
             self.training_type,
@@ -178,6 +188,12 @@ class OnPolicyRunner:
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
+        # Cost tracking for SafeRL
+        is_saferl = isinstance(self.alg, P3O)
+        if is_saferl:
+            costbuffer = deque(maxlen=100)
+            cur_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+
         # create buffers for logging extrinsic and intrinsic rewards
         if self.alg.rnd:
             erewbuffer = deque(maxlen=100)
@@ -206,6 +222,11 @@ class OnPolicyRunner:
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    
+                    # Extract costs for SafeRL (if available)
+                    if is_saferl:
+                        costs = infos.get("costs", torch.zeros_like(rewards))
+                        costs = costs.to(self.device)
                     # perform normalization
                     obs = self.obs_normalizer(obs)
                     if self.privileged_obs_type is not None:
@@ -216,7 +237,10 @@ class OnPolicyRunner:
                         privileged_obs = obs
 
                     # process the step
-                    self.alg.process_env_step(rewards, dones, infos)
+                    if is_saferl:
+                        self.alg.process_env_step(rewards, costs, dones, infos)
+                    else:
+                        self.alg.process_env_step(rewards, dones, infos)
 
                     # Extract intrinsic rewards (only for logging)
                     intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
@@ -234,6 +258,9 @@ class OnPolicyRunner:
                             cur_reward_sum += rewards + intrinsic_rewards
                         else:
                             cur_reward_sum += rewards
+                        # Update costs for SafeRL
+                        if is_saferl:
+                            cur_cost_sum += costs
                         # Update episode length
                         cur_episode_length += 1
                         # Clear data for completed episodes
@@ -243,6 +270,10 @@ class OnPolicyRunner:
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
+                        # -- costs for SafeRL
+                        if is_saferl:
+                            costbuffer.extend(cur_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
+                            cur_cost_sum[new_ids] = 0
                         # -- intrinsic and extrinsic rewards
                         if self.alg.rnd:
                             erewbuffer.extend(cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
@@ -255,8 +286,11 @@ class OnPolicyRunner:
                 start = stop
 
                 # compute returns
-                if self.training_type == "rl":
+                if self.training_type == "rl" or self.training_type == "saferl":
                     self.alg.compute_returns(privileged_obs)
+                    # compute cost returns for SafeRL
+                    if is_saferl:
+                        self.alg.compute_cost_returns(privileged_obs)
 
             # update policy
             loss_dict = self.alg.update()
@@ -265,7 +299,7 @@ class OnPolicyRunner:
             learn_time = stop - start
             self.current_learning_iteration = it
             # log info
-            if self.log_dir is not None and not self.disable_logs:
+            if self.log_dir is not None and not self.disable_logs: 
                 # Log information
                 self.log(locals())
                 # Save model
@@ -341,6 +375,18 @@ class OnPolicyRunner:
                 self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(locs["erewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
+            # SafeRL cost logging
+            if "costbuffer" in locs and len(locs["costbuffer"]) > 0:
+                mean_cost = statistics.mean(locs["costbuffer"])
+                self.writer.add_scalar("SafeRL/mean_cost", mean_cost, locs["it"])
+                # Log penalty information if available
+                if hasattr(self.alg, "get_penalty_info"):
+                    penalty_info = self.alg.get_penalty_info()
+                    self.writer.add_scalar("SafeRL/penalty_factor", penalty_info["kappa"], locs["it"])
+                    self.writer.add_scalar("SafeRL/cost_limit", penalty_info["cost_limit"], locs["it"])
+                    # Check for constraint violations
+                    violation = mean_cost > penalty_info["cost_limit"]
+                    self.writer.add_scalar("SafeRL/constraint_violation", float(violation), locs["it"])
             # everything else
             self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
@@ -370,6 +416,16 @@ class OnPolicyRunner:
                     f"""{'Mean intrinsic reward:':>{pad}} {statistics.mean(locs['irewbuffer']):.2f}\n"""
                 )
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+            # -- SafeRL costs
+            if "costbuffer" in locs and len(locs["costbuffer"]) > 0:
+                mean_cost = statistics.mean(locs["costbuffer"])
+                log_string += f"""{'Mean cost:':>{pad}} {mean_cost:.2f}\n"""
+                # Show constraint violation status
+                if hasattr(self.alg, "get_penalty_info"):
+                    penalty_info = self.alg.get_penalty_info()
+                    violation_status = "VIOLATION" if mean_cost > penalty_info["cost_limit"] else "OK"
+                    log_string += f"""{'Constraint status:':>{pad}} {violation_status} (limit: {penalty_info["cost_limit"]:.2f})\n"""
+                    log_string += f"""{'Penalty factor κ:':>{pad}} {penalty_info["kappa"]:.3f}\n"""
             # -- episode info
             log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
         else:
