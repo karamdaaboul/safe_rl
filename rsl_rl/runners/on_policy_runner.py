@@ -75,9 +75,12 @@ class OnPolicyRunner:
         policy_class_name = self.policy_cfg.pop("class_name")
         
         # For P3O algorithm, use ActorCriticCost if ActorCritic is specified
-        if self.alg_cfg["class_name"] == "P3O" and policy_class_name == "ActorCritic":
-            policy_class_name = "ActorCriticCost"
+        if self.alg_cfg["class_name"] == "P3O":
+            if policy_class_name == "ActorCritic":
+                policy_class_name = "ActorCriticCost"
+            # Set cost_limits and num_costs for P3O algorithm
             self.alg_cfg["cost_limits"] = self.env.cost_limits
+            self.policy_cfg["num_costs"] = len(self.env.cost_limits)
         
         policy_class = eval(policy_class_name)
         policy: ActorCritic | ActorCriticCost | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
