@@ -36,7 +36,7 @@ class P3O:
         device="cpu",
         normalize_advantage_per_mini_batch=False,
         # P3O specific parameters - FIXED
-        cost_thresholds: Optional[List[float]] = None,  # Multiple thresholds
+        cost_limits: Optional[List[float]] = None,  # Multiple thresholds
         kappa: Optional[List[float]] = None,             # Multiple penalty factors  
         cost_loss_coef=1.0,
         use_clipped_cost_loss=True,
@@ -56,9 +56,9 @@ class P3O:
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
         # FIXED: Handle multiple costs properly
-        if cost_thresholds is not None:
-            self.cost_thresholds = cost_thresholds
-            self.num_costs = len(cost_thresholds)
+        if cost_limits is not None:
+            self.cost_limits = cost_limits
+            self.num_costs = len(cost_limits)
 
         # Handle kappa (penalty factors)
         if kappa is not None:
@@ -176,14 +176,14 @@ class P3O:
                 self.cost_history[cost_idx].pop(0)
             
             # Primary condition: direct violation
-            if current_cost > self.cost_thresholds[cost_idx]:
+            if current_cost > self.cost_limits[cost_idx]:
                 violations.append(True)
                 continue
             
             # Secondary condition: approaching limit with positive cost trend
             if cost_advantages_batch is not None:
                 mean_cost_advantage = cost_advantages_batch[cost_idx].mean().item()
-                if (current_cost > self.constraint_margin * self.cost_thresholds[cost_idx] and 
+                if (current_cost > self.constraint_margin * self.cost_limits[cost_idx] and 
                     mean_cost_advantage > 0.1):
                     violations.append(True)
                     continue
@@ -193,7 +193,7 @@ class P3O:
                 recent_trend = sum(self.cost_history[cost_idx][-3:]) / 3
                 older_trend = sum(self.cost_history[cost_idx][-6:-3]) / 3
                 if (recent_trend > older_trend and 
-                    current_cost > self.constraint_margin * self.cost_thresholds[cost_idx]):
+                    current_cost > self.constraint_margin * self.cost_limits[cost_idx]):
                     violations.append(True)
                     continue
             
@@ -280,7 +280,8 @@ class P3O:
             surrogate_cost_clipped = torch.squeeze(cost_advantages_batch[:, cost_idx]) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            surrogate_cost_loss = torch.max(surrogate_cost, surrogate_cost_clipped).mean()
+            #  P3O extends PPO's clipped surrogate to costs, which means minimizing the cost advantage
+            surrogate_cost_loss = torch.min(surrogate_cost, surrogate_cost_clipped).mean()
             
             # Calculate the cost constraint term
             if current_costs is None:
@@ -289,9 +290,9 @@ class P3O:
                 mean_cost = current_costs[cost_idx]
             current_costs_computed.append(mean_cost)
             
-            Jc = mean_cost - self.cost_thresholds[cost_idx]
+            Jc = mean_cost - self.cost_limits[cost_idx]
             
-            # P3O penalty loss for this cost
+            # P3O penalty loss for this cost equation (3)
             cost_penalty = self.kappa[cost_idx] * F.relu(surrogate_cost_loss + (1.0 - self.gamma) * Jc)
             total_cost_loss += cost_penalty
 
@@ -449,11 +450,11 @@ class P3O:
         return {
             # For logging: convert lists to scalars (mean for multiple costs)
             "kappa": torch.tensor(self.kappa).mean().item() if isinstance(self.kappa, list) else self.kappa,
-            "cost_limit": torch.tensor(self.cost_thresholds).mean().item() if isinstance(self.cost_thresholds, list) else self.cost_thresholds,
+            "cost_limit": torch.tensor(self.cost_limits).mean().item() if isinstance(self.cost_limits, list) else self.cost_limits,
             
             # Keep original lists for detailed analysis
             "kappa_list": self.kappa,
-            "cost_thresholds": self.cost_thresholds,
+            "cost_limits": self.cost_limits,
             "constraint_margin": self.constraint_margin,
             "recent_costs": [
                 self.cost_history[i][-5:] if len(self.cost_history[i]) >= 5 else self.cost_history[i]
@@ -486,7 +487,3 @@ class P3O:
             print(f"WARNING: Cost critic outputs {current_outputs} values but P3O expects {self.num_costs}.")
             print("This mismatch will cause runtime errors. Please configure ActorCriticCost with num_costs parameter.")
             print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")
-            
-            # For now, we'll just warn. In production, you might want to:
-            # 1. Automatically recreate the cost critic layer
-            # 2. Or raise an error to force proper configuration
