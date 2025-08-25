@@ -222,22 +222,22 @@ class RolloutStorageCMDP:
 
     def get_mean_episode_costs(self) -> torch.Tensor:
         """
-        Get the mean episode costs from the rollout buffer.
+        Get the mean episode costs using GAE cost returns.
         Returns tensor of shape (num_costs,) with mean costs for each constraint.
-        This matches the behavior of statistics.mean(cost_buffer) in on_policy_runner.
+        Uses cost_returns which represent bias-corrected estimates of total episode costs.
         """
         if self.training_type not in ["rl", "saferl"]:
             raise ValueError("Episode costs are only available for reinforcement learning training.")
         
-        # Calculate mean costs from the rollout buffer (all steps, all environments)
+        # Use GAE cost returns for constraint violation detection
         if self.cost_shape is not None:
-            # Multiple costs case - shape: (num_transitions_per_env, num_envs, num_costs)
-            costs_flattened = self.costs[:self.step].flatten(0, 1)  # Shape: (total_steps, num_costs)
-            return costs_flattened.mean(dim=0)  # Shape: (num_costs,)
+            # Multiple costs case - use cost returns (GAE estimates of episode costs)
+            cost_returns_flattened = self.cost_returns.flatten(0, 1)  # Shape: (total_steps, num_costs)
+            return cost_returns_flattened.mean(dim=0)  # Shape: (num_costs,)
         else:
-            # Single cost case - shape: (num_transitions_per_env, num_envs, 1)
-            costs_flattened = self.costs[:self.step].flatten(0, 1)  # Shape: (total_steps, 1)
-            return costs_flattened.mean(dim=0)  # Shape: (1,)
+            # Single cost case
+            cost_returns_flattened = self.cost_returns.flatten(0, 1)  # Shape: (total_steps, 1)
+            return cost_returns_flattened.mean(dim=0)  # Shape: (1,)
 
     def compute_returns(self, last_values, gamma, lam, normalize_advantage: bool = True):
         advantage = 0
@@ -301,6 +301,7 @@ class RolloutStorageCMDP:
         else:
             # Single cost case - backward compatibility
             cost_advantage = 0
+            
             for step in reversed(range(self.num_transitions_per_env)):
                 if step == self.num_transitions_per_env - 1:
                     next_cost_values = last_cost_values
@@ -308,6 +309,7 @@ class RolloutStorageCMDP:
                     next_cost_values = self.cost_values[step + 1]
                     
                 next_is_not_terminal = 1.0 - self.dones[step].float()
+                
                 cost_delta = self.costs[step] + next_is_not_terminal * gamma * next_cost_values - self.cost_values[step]
                 cost_advantage = cost_delta + next_is_not_terminal * gamma * lam * cost_advantage
                 self.cost_returns[step] = cost_advantage + self.cost_values[step]
