@@ -9,6 +9,7 @@ import torch
 
 from rsl_rl.utils import split_and_pad_trajectories
 
+
 class RolloutStorageCMDP:
     class Transition:
         def __init__(self):
@@ -80,6 +81,7 @@ class RolloutStorageCMDP:
             
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
+
 
         # For distillation
         if training_type == "distillation":
@@ -217,6 +219,25 @@ class RolloutStorageCMDP:
 
     def clear(self):
         self.step = 0
+
+    def get_mean_episode_costs(self) -> torch.Tensor:
+        """
+        Get the mean episode costs from the rollout buffer.
+        Returns tensor of shape (num_costs,) with mean costs for each constraint.
+        This matches the behavior of statistics.mean(cost_buffer) in on_policy_runner.
+        """
+        if self.training_type not in ["rl", "saferl"]:
+            raise ValueError("Episode costs are only available for reinforcement learning training.")
+        
+        # Calculate mean costs from the rollout buffer (all steps, all environments)
+        if self.cost_shape is not None:
+            # Multiple costs case - shape: (num_transitions_per_env, num_envs, num_costs)
+            costs_flattened = self.costs[:self.step].flatten(0, 1)  # Shape: (total_steps, num_costs)
+            return costs_flattened.mean(dim=0)  # Shape: (num_costs,)
+        else:
+            # Single cost case - shape: (num_transitions_per_env, num_envs, 1)
+            costs_flattened = self.costs[:self.step].flatten(0, 1)  # Shape: (total_steps, 1)
+            return costs_flattened.mean(dim=0)  # Shape: (1,)
 
     def compute_returns(self, last_values, gamma, lam, normalize_advantage: bool = True):
         advantage = 0

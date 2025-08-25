@@ -291,6 +291,8 @@ class OnPolicyRunner:
                                     if cost_idx < cost_tensor.shape[1]:  # Ensure we don't exceed dimensions
                                         constraint_costs = cost_tensor[:, cost_idx]
                                         costbuffers[cost_idx].extend(constraint_costs.tolist())
+                                        if cost_idx == 1:  # Debug constraint 1
+                                            print(f"DEBUG: Constraint 1 episode costs: {constraint_costs.tolist()}")
                             cur_cost_sum[new_ids] = 0
                         # -- intrinsic and extrinsic rewards
                         if self.alg.rnd:

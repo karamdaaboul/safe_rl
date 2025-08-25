@@ -158,8 +158,10 @@ class P3O:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = self.learning_rate
 
-    def constraint_violation_detected(self, current_costs: List[torch.Tensor],
-                                       cost_advantages_batch: Optional[List[torch.Tensor]] = None) -> List[bool]:
+    def constraint_violation_detected(
+        self, current_costs: List[torch.Tensor],
+        cost_advantages_batch: Optional[List[torch.Tensor]] = None
+    ) -> List[bool]:
         """
         Detect constraint violations for each cost constraint.
         
@@ -206,8 +208,10 @@ class P3O:
         
         return violations
 
-    def update_penalty_factor(self, current_costs: List[torch.Tensor],
-                               cost_advantages_batch: Optional[List[torch.Tensor]] = None) -> None:
+    def update_penalty_factor(
+        self, current_costs: List[torch.Tensor],
+        cost_advantages_batch: Optional[List[torch.Tensor]] = None
+    ) -> None:
         """
         Update penalty factors for each cost constraint based on violations.
         """
@@ -288,13 +292,13 @@ class P3O:
             # P3O extends PPO's clipped surrogate to costs
             surrogate_cost_loss = torch.min(surrogate_cost, surrogate_cost_clipped).mean()
             
-            # Calculate the cost constraint term
+            # Calculate the cost constraint term using mean episode costs
             if current_costs is None:
-                mean_cost = returns_cost_batch[:, cost_idx].mean()
+                # Use mean episode costs from storage (like statistics.mean(cost_buffer) in runner)
+                mean_cost = self.storage.get_mean_episode_costs()[cost_idx]
             else:
                 mean_cost = current_costs[cost_idx]
             current_costs_computed.append(mean_cost)
-            
             Jc = mean_cost - self.cost_limits[cost_idx]
             
             # P3O penalty loss for this cost (Equation 3)
@@ -417,7 +421,6 @@ class P3O:
                 cost_bootstrap = self.gamma * self.transition.cost_values * timeout_mask
                 self.transition.costs += cost_bootstrap
 
-
         # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
@@ -434,10 +437,6 @@ class P3O:
             if self.num_costs == 1:
                 return costs.unsqueeze(1).clone()
             else:
-                # WARNING: Environment should return tensor of shape [batch_size, num_costs]
-                # This is a temporary fix that duplicates the single cost across all constraints
-                print(f"WARNING: Expected costs tensor shape [{costs.shape[0]}, {self.num_costs}], got {costs.shape}")
-                print("Environment should return separate costs for each constraint!")
                 return costs.unsqueeze(1).expand(-1, self.num_costs).clone()
         
         return costs.clone()
