@@ -195,8 +195,15 @@ class OnPolicyRunner:
         # Cost tracking for SafeRL
         is_saferl = isinstance(self.alg, P3O)
         if is_saferl:
-            costbuffer = deque(maxlen=100)
-            cur_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+            # Initialize separate cost buffers for each constraint
+            num_costs = len(self.env.cost_limits) if hasattr(self.env, 'cost_limits') else 1
+            if num_costs > 1:
+                # Create separate buffers for each constraint
+                costbuffers = [deque(maxlen=100) for _ in range(num_costs)]
+                cur_cost_sum = torch.zeros(self.env.num_envs, num_costs, dtype=torch.float, device=self.device)
+            else:
+                costbuffers = [deque(maxlen=100)]
+                cur_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         # create buffers for logging extrinsic and intrinsic rewards
         if self.alg.rnd:
@@ -207,7 +214,6 @@ class OnPolicyRunner:
 
         # Ensure all parameters are in-synced
         if self.is_distributed:
-            print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
             self.alg.broadcast_parameters()
             # TODO: Do we need to synchronize empirical normalizers?
             #   Right now: No, because they all should converge to the same values "asymptotically".
@@ -229,7 +235,8 @@ class OnPolicyRunner:
                     
                     # Extract costs for SafeRL (if available)
                     if is_saferl:
-                        costs = infos.get("costs", torch.zeros_like(rewards))
+                        # Support both "cost" (singular) and "costs" (plural) keys
+                        costs = infos.get("costs", infos.get("cost", torch.zeros_like(rewards)))
                         costs = costs.to(self.device)
                     # perform normalization
                     obs = self.obs_normalizer(obs)
@@ -269,19 +276,26 @@ class OnPolicyRunner:
                         cur_episode_length += 1
                         # Clear data for completed episodes
                         # -- common
-                        new_ids = (dones > 0).nonzero(as_tuple=False)
-                        rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                        lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+                        new_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)  # Flatten to 1D
+                        rewbuffer.extend(cur_reward_sum[new_ids].cpu().numpy().tolist())
+                        lenbuffer.extend(cur_episode_length[new_ids].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
                         # -- costs for SafeRL
                         if is_saferl:
-                            costbuffer.extend(cur_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
+                            if len(new_ids) > 0:  # Only process if there are finished episodes
+                                cost_tensor = cur_cost_sum[new_ids].cpu().numpy()  # Shape: (n_finished_episodes, n_costs)
+                                
+                                # Log each constraint separately
+                                for cost_idx in range(num_costs):
+                                    if cost_idx < cost_tensor.shape[1]:  # Ensure we don't exceed dimensions
+                                        constraint_costs = cost_tensor[:, cost_idx]
+                                        costbuffers[cost_idx].extend(constraint_costs.tolist())
                             cur_cost_sum[new_ids] = 0
                         # -- intrinsic and extrinsic rewards
                         if self.alg.rnd:
-                            erewbuffer.extend(cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                            irewbuffer.extend(cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                            erewbuffer.extend(cur_ereward_sum[new_ids].cpu().numpy().tolist())
+                            irewbuffer.extend(cur_ireward_sum[new_ids].cpu().numpy().tolist())
                             cur_ereward_sum[new_ids] = 0
                             cur_ireward_sum[new_ids] = 0
 
@@ -379,18 +393,43 @@ class OnPolicyRunner:
                 self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(locs["erewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
-            # SafeRL cost logging
-            if "costbuffer" in locs and len(locs["costbuffer"]) > 0:
-                mean_cost = statistics.mean(locs["costbuffer"])
-                self.writer.add_scalar("SafeRL/mean_cost", mean_cost, locs["it"])
-                # Log penalty information if available
-                if hasattr(self.alg, "get_penalty_info"):
-                    penalty_info = self.alg.get_penalty_info()
-                    self.writer.add_scalar("SafeRL/penalty_factor", penalty_info["kappa"], locs["it"])
-                    self.writer.add_scalar("SafeRL/cost_limit", penalty_info["cost_limit"], locs["it"])
-                    # Check for constraint violations
-                    violation = mean_cost > penalty_info["cost_limit"]
-                    self.writer.add_scalar("SafeRL/constraint_violation", float(violation), locs["it"])
+            # SafeRL cost logging - individual constraints
+            is_saferl = isinstance(self.alg, P3O)
+            if is_saferl and "costbuffers" in locs:
+                penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
+                
+                # Log each constraint separately
+                total_violations = 0
+                for cost_idx, cost_buffer in enumerate(locs["costbuffers"]):
+                    if len(cost_buffer) > 0:
+                        mean_cost = statistics.mean(cost_buffer)
+                        
+                        # Log individual constraint metrics
+                        self.writer.add_scalar(f"SafeRL/mean_cost_constraint_{cost_idx}", mean_cost, locs["it"])
+                        
+                        if penalty_info:
+                            cost_limit = penalty_info["cost_limits"][cost_idx]
+                            kappa = penalty_info["kappa_list"][cost_idx]
+                            
+                            # Log individual constraint parameters
+                            self.writer.add_scalar(f"SafeRL/cost_limit_constraint_{cost_idx}", cost_limit, locs["it"])
+                            self.writer.add_scalar(f"SafeRL/penalty_factor_constraint_{cost_idx}", kappa, locs["it"])
+                            
+                            # Constraint violation for this specific constraint
+                            violation = mean_cost > cost_limit
+                            self.writer.add_scalar(f"SafeRL/violation_constraint_{cost_idx}", float(violation), locs["it"])
+                            
+                            # Normalized cost ratio (cost/limit) - more meaningful than absolute values
+                            cost_ratio = mean_cost / cost_limit if cost_limit > 0 else 0
+                            self.writer.add_scalar(f"SafeRL/cost_ratio_constraint_{cost_idx}", cost_ratio, locs["it"])
+                            
+                            if violation:
+                                total_violations += 1
+                
+                # Log overall constraint violation status
+                if penalty_info:
+                    self.writer.add_scalar("SafeRL/total_violations", total_violations, locs["it"])
+                    self.writer.add_scalar("SafeRL/penalty_factor_avg", penalty_info["kappa"], locs["it"])
             # everything else
             self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
@@ -420,16 +459,27 @@ class OnPolicyRunner:
                     f"""{'Mean intrinsic reward:':>{pad}} {statistics.mean(locs['irewbuffer']):.2f}\n"""
                 )
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-            # -- SafeRL costs
-            if "costbuffer" in locs and len(locs["costbuffer"]) > 0:
-                mean_cost = statistics.mean(locs["costbuffer"])
-                log_string += f"""{'Mean cost:':>{pad}} {mean_cost:.2f}\n"""
-                # Show constraint violation status
-                if hasattr(self.alg, "get_penalty_info"):
-                    penalty_info = self.alg.get_penalty_info()
-                    violation_status = "VIOLATION" if mean_cost > penalty_info["cost_limit"] else "OK"
-                    log_string += f"""{'Constraint status:':>{pad}} {violation_status} (limit: {penalty_info["cost_limit"]:.2f})\n"""
-                    log_string += f"""{'Penalty factor κ:':>{pad}} {penalty_info["kappa"]:.3f}\n"""
+            # -- SafeRL costs (individual constraints)
+            is_saferl = isinstance(self.alg, P3O)
+            if is_saferl and "costbuffers" in locs:
+                penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
+                
+                # Display each constraint separately
+                for cost_idx, cost_buffer in enumerate(locs["costbuffers"]):
+                    if len(cost_buffer) > 0:
+                        mean_cost = statistics.mean(cost_buffer)
+                        
+                        if penalty_info:
+                            cost_limit = penalty_info["cost_limits"][cost_idx]
+                            kappa = penalty_info["kappa_list"][cost_idx]
+                            violation_status = "VIOLATION" if mean_cost > cost_limit else "OK"
+                            cost_ratio = mean_cost / cost_limit if cost_limit > 0 else 0
+                            
+                            log_string += f"""{'Constraint %d cost:' % cost_idx:>{pad}} {mean_cost:.3f} (ratio: {cost_ratio:.2f})\n"""
+                            log_string += f"""{'Constraint %d status:' % cost_idx:>{pad}} {violation_status} (limit: {cost_limit:.2f})\n"""
+                            log_string += f"""{'Constraint %d κ:' % cost_idx:>{pad}} {kappa:.3f}\n"""
+                        else:
+                            log_string += f"""{'Constraint %d cost:' % cost_idx:>{pad}} {mean_cost:.3f}\n"""
             # -- episode info
             log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
         else:

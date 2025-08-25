@@ -171,7 +171,6 @@ class P3O:
             List[bool]: True if constraint violation is detected for each cost
         """
         violations = []
-        
         for cost_idx in range(self.num_costs):
             current_cost = current_costs[cost_idx]
             
@@ -221,8 +220,8 @@ class P3O:
             if violation_detected:
                 old_kappa = self.kappa[cost_idx]
                 self.kappa[cost_idx] = min(self.rho * self.kappa[cost_idx], self.kappa_max)
-                print(f"Constraint violation detected for cost {cost_idx}! "
-                      f"Updated κ_{cost_idx}: {old_kappa:.3f} → {self.kappa[cost_idx]:.3f}")
+                #print(f"Constraint violation detected for cost {cost_idx}! "
+                #      f"Updated κ_{cost_idx}: {old_kappa:.3f} → {self.kappa[cost_idx]:.3f}")
 
     def _update_policy(self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None) -> Tuple[float, float, float]:
         """
@@ -435,6 +434,10 @@ class P3O:
             if self.num_costs == 1:
                 return costs.unsqueeze(1).clone()
             else:
+                # WARNING: Environment should return tensor of shape [batch_size, num_costs]
+                # This is a temporary fix that duplicates the single cost across all constraints
+                print(f"WARNING: Expected costs tensor shape [{costs.shape[0]}, {self.num_costs}], got {costs.shape}")
+                print("Environment should return separate costs for each constraint!")
                 return costs.unsqueeze(1).expand(-1, self.num_costs).clone()
         
         return costs.clone()
