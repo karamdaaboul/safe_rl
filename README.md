@@ -27,9 +27,8 @@ We welcome contributions from the community. Please check our contribution guide
 information.
 
 **Built on**: [rsl_rl](https://github.com/leggedrobotics/rsl_rl) by Robotic Systems Lab, ETH Zurich & NVIDIA <br/>
-**Extended for**: Safe Reinforcement Learning with constraint handling capabilities
+**Extended for**: Safe Reinforcement Learning with multiple constraints handling capabilities
 
-> **Note:** The `algorithms` branch supports additional algorithms (SAC, DDPG, DSAC, and more). However, it isn't currently actively maintained.
 
 
 ## Setup
@@ -37,7 +36,7 @@ information.
 Clone this repository and installing it with:
 
 ```bash
-git clone <your-safe-rl-repository-url>
+git clone git@git.algoryx.se:algoryx/external/xscave/safe-rl.git
 cd safe_rl
 pip install -e .
 ```
