@@ -1,7 +1,7 @@
 # Quick PPO sweep for initial hyperparameter exploration
 # Focuses on the most impactful parameters with fewer options for faster results
 program: safe_rl_train.py
-method: random
+method: grid
 metric:
   goal: maximize
   name: "Train/mean_reward"
@@ -12,19 +12,15 @@ parameters:
   seed:
     value: 1
   max_iterations:
-    value: 200  # Shorter training for quick results
+    value: 3000
   logger:
     value: "wandb"
     
   # Core PPO parameters - most impactful
-  learning_rate:
-    values: [3e-4, 1e-3, 3e-3]
   num_learning_epochs:
     values: [3, 5, 8]
   num_mini_batches:
-    values: [4, 8]
-  clip_param:
-    values: [0.1, 0.2, 0.3]
+    values: [4, 8, 16]
   
   # Discount and advantage
   gamma:
@@ -38,31 +34,18 @@ parameters:
   value_loss_coef:
     values: [0.5, 1.0]
   
-  # Network architecture - simplified
-  actor_hidden_dims_0:
-    values: [128, 256]
-  actor_hidden_dims_1:
-    values: [128, 256]
-  critic_hidden_dims_0:
-    values: [128, 256] 
-  critic_hidden_dims_1:
-    values: [128, 256]
-    
   # Runner parameters
   num_steps_per_env:
     values: [16, 24, 32]
-  
+
+  num_envs:
+    values: [1024, 2048, 4096, 8192]
+    
   # Environment reward parameters 
   track_lin_vel_xy_weight:
     values: [1.0, 1.5, 2.0]
   track_ang_vel_z_weight:
     values: [0.5, 0.75, 1.0]
-  base_linear_velocity_weight:
-    values: [-1.0, -2.0, -3.0]
-  base_angular_velocity_weight:
-    values: [-0.025, -0.05, -0.1]
-  flat_orientation_l2_weight:
-    values: [-1.0, -2.5, -5.0]
     
 command:
   - ${env}
