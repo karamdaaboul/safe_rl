@@ -1,5 +1,5 @@
-# Quick PPO sweep for initial hyperparameter exploration
-# Focuses on the most impactful parameters with fewer options for faster results
+# Safe PPO sweep for comprehensive hyperparameter exploration
+# Focuses on safety-critical parameters and performance optimization
 program: safe_rl_train.py
 method: grid
 metric:
@@ -37,7 +37,7 @@ parameters:
   # Runner parameters
   num_steps_per_env:
     values: [16, 24, 32]
-
+ 
   num_envs:
     values: [1024, 2048, 4096, 8192]
     
@@ -46,10 +46,10 @@ parameters:
     values: [1.0, 1.5, 2.0]
   track_ang_vel_z_weight:
     values: [0.5, 0.75, 1.0]
-    
+        
 command:
   - ${env}
   - python
   - ${program}
   - --headless
-  - ${args}
+  - ${args} 

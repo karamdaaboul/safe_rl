@@ -15,6 +15,5 @@ __pycache__
 
 # wandb
 wandb/*
-sweeps/*
 outputs/*
 logs/*
