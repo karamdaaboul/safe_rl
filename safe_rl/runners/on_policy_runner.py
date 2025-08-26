@@ -11,11 +11,12 @@ import time
 import torch
 from collections import deque
 
-import rsl_rl
-from rsl_rl.algorithms import PPO, Distillation
-from rsl_rl.algorithms.p3o import P3O
-from rsl_rl.env import VecEnv
-from rsl_rl.modules import (
+import safe_rl
+from safe_rl.algorithms import PPO, Distillation
+from safe_rl.algorithms.p3o import P3O
+from safe_rl.algorithms.ppol_pid import PPOL_PID
+from safe_rl.env import VecEnv
+from safe_rl.modules import (
     ActorCritic,
     ActorCriticCost,
     ActorCriticRecurrent,
@@ -23,7 +24,7 @@ from rsl_rl.modules import (
     StudentTeacher,
     StudentTeacherRecurrent,
 )
-from rsl_rl.utils import store_code_state
+from safe_rl.utils import store_code_state
 
 
 class OnPolicyRunner:
@@ -44,6 +45,8 @@ class OnPolicyRunner:
             self.training_type = "rl"
         elif self.alg_cfg["class_name"] == "P3O":
             self.training_type = "saferl"  # P3O is also RL but with cost constraints
+        elif self.alg_cfg["class_name"] == "PPOL_PID":
+            self.training_type = "saferl"  # PPOL_PID is also safe RL with cost constraints
         elif self.alg_cfg["class_name"] == "Distillation":
             self.training_type = "distillation"
         else:
@@ -75,7 +78,7 @@ class OnPolicyRunner:
         policy_class_name = self.policy_cfg.pop("class_name")
         
         # For P3O algorithm, use ActorCriticCost if ActorCritic is specified
-        if self.alg_cfg["class_name"] == "P3O":
+        if self.alg_cfg["class_name"] == "P3O" or self.alg_cfg["class_name"] == "PPOL_PID":
             if policy_class_name == "ActorCritic":
                 policy_class_name = "ActorCriticCost"
             # Set cost_limits and num_costs for P3O algorithm
@@ -107,7 +110,7 @@ class OnPolicyRunner:
 
         # initialize algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))
-        self.alg: PPO | P3O | Distillation = alg_class(
+        self.alg: PPO | P3O | PPOL_PID | Distillation = alg_class(
             policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
 
@@ -143,7 +146,7 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
-        self.git_status_repos = [rsl_rl.__file__]
+        self.git_status_repos = [safe_rl.__file__]
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         # initialize writer
@@ -153,12 +156,12 @@ class OnPolicyRunner:
             self.logger_type = self.logger_type.lower()
 
             if self.logger_type == "neptune":
-                from rsl_rl.utils.neptune_utils import NeptuneSummaryWriter
+                from safe_rl.utils.neptune_utils import NeptuneSummaryWriter
 
                 self.writer = NeptuneSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
                 self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
             elif self.logger_type == "wandb":
-                from rsl_rl.utils.wandb_utils import WandbSummaryWriter
+                from safe_rl.utils.wandb_utils import WandbSummaryWriter
 
                 self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
                 self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
@@ -193,7 +196,7 @@ class OnPolicyRunner:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         # Cost tracking for SafeRL
-        is_saferl = isinstance(self.alg, P3O)
+        is_saferl = isinstance(self.alg, P3O) or isinstance(self.alg, PPOL_PID)
         if is_saferl:
             # Initialize separate cost buffers for each constraint
             num_costs = len(self.env.cost_limits) if hasattr(self.env, 'cost_limits') else 1
@@ -395,7 +398,7 @@ class OnPolicyRunner:
                 self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # SafeRL cost logging - individual constraints
-            is_saferl = isinstance(self.alg, P3O)
+            is_saferl = isinstance(self.alg, P3O) or isinstance(self.alg, PPOL_PID)
             if is_saferl and "costbuffers" in locs:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
                 
@@ -461,7 +464,6 @@ class OnPolicyRunner:
                 )
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
             # -- SafeRL costs (individual constraints)
-            is_saferl = isinstance(self.alg, P3O)
             if is_saferl and "costbuffers" in locs:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
                 

@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# rsl-rl
-from rsl_rl.modules import StudentTeacher, StudentTeacherRecurrent
-from rsl_rl.storage import RolloutStorage
+# safe-rl
+from safe_rl.modules import StudentTeacher, StudentTeacherRecurrent
+from safe_rl.storage import RolloutStorage
 
 
 class Distillation:

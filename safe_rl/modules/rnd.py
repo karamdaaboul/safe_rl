@@ -8,8 +8,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from rsl_rl.modules.normalizer import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
-from rsl_rl.utils import resolve_nn_activation
+from safe_rl.modules.normalizer import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
+from safe_rl.utils import resolve_nn_activation
 
 
 class RandomNetworkDistillation(nn.Module):

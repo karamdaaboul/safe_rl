@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from rsl_rl.utils import split_and_pad_trajectories
+from safe_rl.utils import split_and_pad_trajectories
 
 
 class RolloutStorage:
@@ -292,25 +292,25 @@ class RolloutStorage:
                 # then take only time steps after dones (flattens num envs and time dimensions),
                 # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
                 last_was_done = last_was_done.permute(1, 0)
-                hid_a_batch = [
-                    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
-                    .transpose(1, 0)
-                    .contiguous()
-                    for saved_hidden_states in self.saved_hidden_states_a
-                ]
-                hid_c_batch = [
-                    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
-                    .transpose(1, 0)
-                    .contiguous()
-                    for saved_hidden_states in self.saved_hidden_states_c
-                ]
-                # remove the tuple for GRU
-                hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
-                hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
+                #hid_a_batch = [
+                #    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                #    .transpose(1, 0)
+                #    .contiguous()
+                #    for saved_hidden_states in self.saved_hidden_states_a
+                #]
+                #hid_c_batch = [
+                #    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                #    .transpose(1, 0)
+                #    .contiguous()
+                #    for saved_hidden_states in self.saved_hidden_states_c
+                #]
+                ## remove the tuple for GRU
+                #hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
+                #hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
 
                 yield obs_batch, privileged_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
-                    hid_a_batch,
-                    hid_c_batch,
+                    None,
+                    None,
                 ), masks_batch, rnd_state_batch
 
                 first_traj = last_traj

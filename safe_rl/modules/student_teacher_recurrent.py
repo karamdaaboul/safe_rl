@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import warnings
 
-from rsl_rl.modules import StudentTeacher
-from rsl_rl.networks import Memory
-from rsl_rl.utils import resolve_nn_activation
+from safe_rl.modules import StudentTeacher
+from safe_rl.networks import Memory
+from safe_rl.utils import resolve_nn_activation
 
 
 class StudentTeacherRecurrent(StudentTeacher):
