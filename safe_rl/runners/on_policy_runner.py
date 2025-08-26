@@ -434,6 +434,22 @@ class OnPolicyRunner:
                 if penalty_info:
                     self.writer.add_scalar("SafeRL/total_violations", total_violations, locs["it"])
                     self.writer.add_scalar("SafeRL/penalty_factor_avg", penalty_info["kappa"], locs["it"])
+                    
+                    # PPOL_PID specific logging
+                    if isinstance(self.alg, PPOL_PID) and "pid_gains" in penalty_info:
+                        kp, ki, kd = penalty_info["pid_gains"]
+                        self.writer.add_scalar("SafeRL/PID_Kp", kp, locs["it"])
+                        self.writer.add_scalar("SafeRL/PID_Ki", ki, locs["it"])
+                        self.writer.add_scalar("SafeRL/PID_Kd", kd, locs["it"])
+                        
+                        # Log lambda statistics
+                        self.writer.add_scalar("SafeRL/lambda_mean", penalty_info["lambda_mean"], locs["it"])
+                        self.writer.add_scalar("SafeRL/lambda_max", penalty_info["lambda_max"], locs["it"])
+                        self.writer.add_scalar("SafeRL/lambda_min", penalty_info["lambda_min"], locs["it"])
+                        
+                        # Log integral errors for PID
+                        for cost_idx, integral_error in enumerate(penalty_info["integral_errors"]):
+                            self.writer.add_scalar(f"SafeRL/integral_error_constraint_{cost_idx}", integral_error, locs["it"])
             # everything else
             self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
@@ -480,9 +496,26 @@ class OnPolicyRunner:
                             
                             log_string += f"""{'Constraint %d cost:' % cost_idx:>{pad}} {mean_cost:.3f} (ratio: {cost_ratio:.2f})\n"""
                             log_string += f"""{'Constraint %d status:' % cost_idx:>{pad}} {violation_status} (limit: {cost_limit:.2f})\n"""
-                            log_string += f"""{'Constraint %d κ:' % cost_idx:>{pad}} {kappa:.3f}\n"""
+                            
+                            # Display kappa (penalty factor for P3O, lambda for PPOL_PID)
+                            if isinstance(self.alg, PPOL_PID):
+                                log_string += f"""{'Constraint %d λ:' % cost_idx:>{pad}} {kappa:.3f}\n"""
+                            else:  # P3O
+                                log_string += f"""{'Constraint %d κ:' % cost_idx:>{pad}} {kappa:.3f}\n"""
                         else:
                             log_string += f"""{'Constraint %d cost:' % cost_idx:>{pad}} {mean_cost:.3f}\n"""
+                
+                # PPOL_PID specific console logging
+                if isinstance(self.alg, PPOL_PID) and penalty_info and "pid_gains" in penalty_info:
+                    kp, ki, kd = penalty_info["pid_gains"]
+                    log_string += f"""{'PID gains (Kp,Ki,Kd):':>{pad}} ({kp:.4f}, {ki:.6f}, {kd:.3f})\n"""
+                    log_string += f"""{'Lambda (λ) stats:':>{pad}} mean={penalty_info['lambda_mean']:.3f}, max={penalty_info['lambda_max']:.3f}, min={penalty_info['lambda_min']:.3f}\n"""
+                    
+                    # Show integral errors if available
+                    if "integral_errors" in penalty_info and penalty_info["integral_errors"]:
+                        integral_str = ", ".join([f"{err:.3f}" for err in penalty_info["integral_errors"]])
+                        log_string += f"""{'Integral errors:':>{pad}} [{integral_str}]\n"""
+            
             # -- episode info
             log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
         else:

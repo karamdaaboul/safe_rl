@@ -420,18 +420,35 @@ class PPOL_PID:
             normalize_cost_advantage=not self.normalize_advantage_per_mini_batch
         )
 
-    def get_lagrangian_info(self) -> Dict[str, Any]:
-        """Get Lagrangian multiplier information for logging."""
+    def get_penalty_info(self) -> Dict[str, Any]:
+        """
+        Get Lagrangian multiplier information for logging.
+        Uses same interface as P3O for compatibility with runner logging.
+        """
         return {
+            # Convert lists to scalars for logging (compatible with P3O interface)
+            "kappa": torch.tensor(self.lambdas).mean().item(),  # Use lambda as "kappa" for logging compatibility
+            "cost_limit": torch.tensor(self.cost_limits).mean().item(),
+            
+            # Original lists for detailed analysis
+            "kappa_list": self.lambdas,  # Lambdas mapped to kappa_list for logging compatibility
+            "cost_limits": self.cost_limits,
+            "constraint_margin": self.constraint_margin,
+            "recent_costs": [hist[-5:] if len(hist) >= 5 else hist for hist in self.error_history],
+            
+            # PPOL-PID specific information
             "lambda_mean": torch.tensor(self.lambdas).mean().item(),
             "lambda_max": max(self.lambdas),
             "lambda_min": min(self.lambdas),
             "lambda_list": self.lambdas,
-            "cost_limits": self.cost_limits,
             "pid_gains": (self.kp, self.ki, self.kd),
             "integral_errors": self.integral_errors,
             "recent_errors": [hist[-3:] if len(hist) >= 3 else hist for hist in self.error_history]
         }
+
+    def get_lagrangian_info(self) -> Dict[str, Any]:
+        """Get Lagrangian multiplier information for logging (legacy method)."""
+        return self.get_penalty_info()
 
     def _validate_and_fix_cost_critic(self) -> None:
         """Validate cost critic output dimensions."""
