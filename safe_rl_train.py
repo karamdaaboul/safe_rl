@@ -113,6 +113,18 @@ parser.add_argument("--ppol_pid_ki", type=float, help="PPOL_PID integral gain")
 parser.add_argument("--ppol_pid_kd", type=float, help="PPOL_PID derivative gain")
 parser.add_argument("--ppol_pid_cost_limit", type=float, help="PPOL_PID cost limit")
 
+# Environment reward weight parameters
+parser.add_argument("--track_lin_vel_xy_weight", type=float, help="Linear velocity tracking reward weight")
+parser.add_argument("--track_ang_vel_z_weight", type=float, help="Angular velocity tracking reward weight")
+parser.add_argument("--base_linear_velocity_weight", type=float, help="Base linear velocity penalty weight")
+parser.add_argument("--base_angular_velocity_weight", type=float, help="Base angular velocity penalty weight")
+parser.add_argument("--flat_orientation_l2_weight", type=float, help="Flat orientation penalty weight")
+parser.add_argument("--joint_torques_weight", type=float, help="Joint torques penalty weight")
+parser.add_argument("--action_rate_weight", type=float, help="Action rate penalty weight")
+parser.add_argument("--energy_weight", type=float, help="Energy penalty weight")
+parser.add_argument("--feet_air_time_weight", type=float, help="Feet air time reward weight")
+parser.add_argument("--air_time_variance_weight", type=float, help="Air time variance penalty weight")
+
 # Configuration file (fallback)
 parser.add_argument("--config", type=str, default="config/dummy_config.yaml", help="Path to config file")
 
@@ -347,6 +359,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | ManagerBasedSafeRLEnvCfg, agent_cfg: Rs
         # set the environment seed
         env_cfg.seed = agent_cfg.seed if args_cli.seed is None else args_cli.seed
         env_cfg.sim.device = args_cli.device if hasattr(args_cli, 'device') and args_cli.device is not None else env_cfg.sim.device
+
+        # Update environment reward weights from CLI args and wandb sweep
+        if WANDB_AVAILABLE and wandb.run is not None:
+            wandb_config = dict(wandb.config)
+            # Update reward weights from wandb config
+            if "track_lin_vel_xy_weight" in wandb_config and wandb_config["track_lin_vel_xy_weight"] is not None:
+                env_cfg.rewards.track_lin_vel_xy.weight = wandb_config["track_lin_vel_xy_weight"]
+            if "track_ang_vel_z_weight" in wandb_config and wandb_config["track_ang_vel_z_weight"] is not None:
+                env_cfg.rewards.track_ang_vel_z.weight = wandb_config["track_ang_vel_z_weight"]
+            if "base_linear_velocity_weight" in wandb_config and wandb_config["base_linear_velocity_weight"] is not None:
+                env_cfg.rewards.base_linear_velocity.weight = wandb_config["base_linear_velocity_weight"]
+            if "base_angular_velocity_weight" in wandb_config and wandb_config["base_angular_velocity_weight"] is not None:
+                env_cfg.rewards.base_angular_velocity.weight = wandb_config["base_angular_velocity_weight"]
+            if "flat_orientation_l2_weight" in wandb_config and wandb_config["flat_orientation_l2_weight"] is not None:
+                env_cfg.rewards.flat_orientation_l2.weight = wandb_config["flat_orientation_l2_weight"]
+            if "joint_torques_weight" in wandb_config and wandb_config["joint_torques_weight"] is not None:
+                env_cfg.rewards.joint_torques.weight = wandb_config["joint_torques_weight"]
+            if "action_rate_weight" in wandb_config and wandb_config["action_rate_weight"] is not None:
+                env_cfg.rewards.action_rate.weight = wandb_config["action_rate_weight"]
+            if "energy_weight" in wandb_config and wandb_config["energy_weight"] is not None:
+                env_cfg.rewards.energy.weight = wandb_config["energy_weight"]
+            if "feet_air_time_weight" in wandb_config and wandb_config["feet_air_time_weight"] is not None:
+                env_cfg.rewards.feet_air_time.weight = wandb_config["feet_air_time_weight"]
+            if "air_time_variance_weight" in wandb_config and wandb_config["air_time_variance_weight"] is not None:
+                env_cfg.rewards.air_time_variance.weight = wandb_config["air_time_variance_weight"]
+
+        # Update reward weights from CLI args (these take precedence)
+        if hasattr(args_cli, 'track_lin_vel_xy_weight') and args_cli.track_lin_vel_xy_weight is not None:
+            env_cfg.rewards.track_lin_vel_xy.weight = args_cli.track_lin_vel_xy_weight
+        if hasattr(args_cli, 'track_ang_vel_z_weight') and args_cli.track_ang_vel_z_weight is not None:
+            env_cfg.rewards.track_ang_vel_z.weight = args_cli.track_ang_vel_z_weight
+        if hasattr(args_cli, 'base_linear_velocity_weight') and args_cli.base_linear_velocity_weight is not None:
+            env_cfg.rewards.base_linear_velocity.weight = args_cli.base_linear_velocity_weight
+        if hasattr(args_cli, 'base_angular_velocity_weight') and args_cli.base_angular_velocity_weight is not None:
+            env_cfg.rewards.base_angular_velocity.weight = args_cli.base_angular_velocity_weight
+        if hasattr(args_cli, 'flat_orientation_l2_weight') and args_cli.flat_orientation_l2_weight is not None:
+            env_cfg.rewards.flat_orientation_l2.weight = args_cli.flat_orientation_l2_weight
+        if hasattr(args_cli, 'joint_torques_weight') and args_cli.joint_torques_weight is not None:
+            env_cfg.rewards.joint_torques.weight = args_cli.joint_torques_weight
+        if hasattr(args_cli, 'action_rate_weight') and args_cli.action_rate_weight is not None:
+            env_cfg.rewards.action_rate.weight = args_cli.action_rate_weight
+        if hasattr(args_cli, 'energy_weight') and args_cli.energy_weight is not None:
+            env_cfg.rewards.energy.weight = args_cli.energy_weight
+        if hasattr(args_cli, 'feet_air_time_weight') and args_cli.feet_air_time_weight is not None:
+            env_cfg.rewards.feet_air_time.weight = args_cli.feet_air_time_weight
+        if hasattr(args_cli, 'air_time_variance_weight') and args_cli.air_time_variance_weight is not None:
+            env_cfg.rewards.air_time_variance.weight = args_cli.air_time_variance_weight
 
         # multi-gpu training configuration
         if args_cli.distributed:
