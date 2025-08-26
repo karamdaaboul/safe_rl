@@ -48,3 +48,35 @@ The package supports the following logging frameworks which can be configured th
 * Neptune: https://docs.neptune.ai/
 
 For a demo configuration of PPO, please check the [dummy_config.yaml](config/dummy_config.yaml) file.
+
+
+## Hyperparameter sweeps with Weights & Biases
+
+Quick start (minimal PPO sweep):
+
+```bash
+# 1) Create the sweep and copy the returned SWEEP_ID
+wandb sweep sweeps/quick_ppo_sweep.yaml
+
+# 2) Launch one or more agents
+wandb agent USERNAME/PROJECT/SWEEP_ID
+```
+
+Full PPO sweep:
+
+```bash
+wandb sweep sweeps/ppo_sweep.yaml
+wandb agent USERNAME/PROJECT/SWEEP_ID
+```
+
+Safe RL sweep:
+
+```bash
+wandb sweep sweeps/safe_ppo_sweep.yaml
+wandb agent USERNAME/PROJECT/SWEEP_ID
+```
+
+Notes:
+- Ensure you are logged in: `wandb login`
+- Replace `USERNAME/PROJECT` with your W&B entity and project.
+- Run multiple `wandb agent` processes (or on multiple machines) for parallel sweeps.
