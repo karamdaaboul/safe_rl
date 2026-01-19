@@ -1,0 +1,56 @@
+algorithm:
+  class_name: P3O
+  # training parameters
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.02
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 40.0
+  learning_rate: 0.0003
+  num_learning_epochs: 10
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # P3O specific parameters
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: true
+  rho: 1.5
+  kappa_max: 1000.0
+  adaptive_penalty: true
+  constraint_margin: 0.85
+  kappa: [1.0]  # Start low to allow exploration; will adapt up as needed
+
+  # Disable extra features by default
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCritic
+  activation: elu
+  actor_hidden_dims: [128, 128, 128]
+  critic_hidden_dims: [128, 128, 128]
+  init_noise_std: 1.0
+  noise_std_type: "scalar"
+
+runner:
+  num_steps_per_env: 24
+  max_iterations: 1500
+  empirical_normalization: false
+  save_interval: 250
+  experiment_name: safety_gymnasium_p3o
+  run_name: ""
+  logger: wandb
+  neptune_project: legged_gym
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1
+

@@ -29,10 +29,10 @@ class WandbSummaryWriter(SummaryWriter):
         except KeyError:
             raise KeyError("Please specify wandb_project in the runner config, e.g. legged_gym.")
 
-        try:
-            entity = os.environ["WANDB_USERNAME"]
-        except KeyError:
-            entity = None
+        # Try to get entity from config first, then fall back to environment variable
+        entity = cfg.get("wandb_entity")
+        if entity is None:
+            entity = os.environ.get("WANDB_USERNAME")
 
         # Initialize wandb
         wandb.init(project=project, entity=entity, name=run_name)
@@ -49,6 +49,9 @@ class WandbSummaryWriter(SummaryWriter):
         wandb.config.update({"runner_cfg": runner_cfg})
         wandb.config.update({"policy_cfg": policy_cfg})
         wandb.config.update({"alg_cfg": alg_cfg})
+        if isinstance(env_cfg, dict):
+            wandb.config.update({"env_cfg": env_cfg})
+            return
         try:
             wandb.config.update({"env_cfg": env_cfg.to_dict()})
         except Exception:

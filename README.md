@@ -49,6 +49,48 @@ The package supports the following logging frameworks which can be configured th
 
 For a demo configuration of PPO, please check the [dummy_config.yaml](config/dummy_config.yaml) file.
 
+## Safety-Gymnasium usage
+
+This repo includes a minimal wrapper and scripts to train/evaluate on
+[Safety-Gymnasium](https://safety-gymnasium.readthedocs.io/en/latest/).
+
+Install Safety-Gymnasium:
+
+```bash
+pip install safety-gymnasium
+```
+
+Train PPO (standard RL):
+
+```bash
+python scripts/train_safety_gymnasium.py \
+  --env_id SafetyCarGoal1-v0 \
+  --num_envs 8 \
+  --config config/dummy_config.yaml
+```
+
+Train P3O (safe RL with costs):
+
+```bash
+python scripts/train_safety_gymnasium.py \
+  --env_id SafetyCarGoal1-v0 \
+  --num_envs 36 \
+  --config config/safety_gymnasium_p3o.yaml \
+  --cost_limits 25.0
+```
+
+Evaluate a trained policy (single env, rendered):
+
+```bash
+python scripts/eval_safety_gymnasium.py \
+  --env_id SafetyCarGoal1-v0 \
+  --num_envs 1 \
+  --render_mode human \
+  --config config/dummy_config.yaml \
+  --checkpoint logs/safety_gymnasium/SafetyCarGoal1-v0/<run>/model_<iter>.pt \
+  --episodes 5
+```
+
 
 ## Hyperparameter sweeps with Weights & Biases
 

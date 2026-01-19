@@ -250,7 +250,9 @@ class P3O:
             #print(f"Cost {cost_idx}: ratio={current_cost / self.cost_limits[cost_idx]:.3f}, "
             #      f"κ: {old_kappa:.3f} → {self.kappa[cost_idx]:.3f}")
 
-    def _update_policy(self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None) -> Tuple[float, float, float]:
+    def _update_policy(
+        self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None
+    ) -> Tuple[float, float, float, float]:
         """
         Handle multiple costs with single cost critic having n output neurons.
         """
@@ -313,7 +315,7 @@ class P3O:
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             # P3O extends PPO's clipped surrogate to costs
-            surrogate_cost_loss = torch.min(surrogate_cost, surrogate_cost_clipped).mean()
+            surrogate_cost_loss = torch.max(surrogate_cost, surrogate_cost_clipped).mean()
             
             # Calculate the cost constraint term using mean episode costs
             if current_costs is None:
@@ -376,11 +378,9 @@ class P3O:
         nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
-        # Update penalty factors after optimization step
-        cost_advantages_per_cost = [cost_advantages_batch[:, i] for i in range(self.num_costs)]
-        self.update_penalty_factor(current_costs_computed, cost_advantages_per_cost)
+        # Don't update penalty factors here - moved to update() method to avoid too frequent updates
 
-        return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item()
+        return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item(), entropy_batch.mean().item()
 
     def update(self, current_costs: Optional[List[torch.Tensor]] = None) -> Dict[str, float]:
         """
@@ -389,24 +389,31 @@ class P3O:
         mean_value_loss = 0
         mean_cost_loss = 0
         mean_surrogate_loss = 0
-    
+        mean_entropy = 0
+
         # Determine the appropriate generator based on whether the model is recurrent
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        
+
         for batch in generator:
-            value_loss, cost_loss, surrogate_loss = self._update_policy(batch, current_costs)
+            value_loss, cost_loss, surrogate_loss, entropy = self._update_policy(batch, current_costs)
             mean_value_loss += value_loss
             mean_cost_loss += cost_loss
             mean_surrogate_loss += surrogate_loss
+            mean_entropy += entropy
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_cost_loss /= num_updates
         mean_surrogate_loss /= num_updates
-        
+        mean_entropy /= num_updates
+
+        # Update penalty factors once per iteration (not per mini-batch)
+        if current_costs is not None:
+            self.update_penalty_factor(current_costs, cost_advantages_batch=None)
+
         self.storage.clear()
 
         # Construct the loss dictionary (similar to PPO)
@@ -414,6 +421,7 @@ class P3O:
             "value_function": mean_value_loss,
             "cost_function": mean_cost_loss,
             "surrogate": mean_surrogate_loss,
+            "entropy": mean_entropy,
         }
 
         return loss_dict

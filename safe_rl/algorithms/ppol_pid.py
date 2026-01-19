@@ -334,22 +334,30 @@ class PPOL_PID:
         nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
-        # Update Lagrangian multipliers after optimization
-        self.update_lagrangian_multipliers(current_costs_computed)
+        # Don't update Lagrangian multipliers here - moved to update() method to avoid too frequent updates
 
         return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item()
 
     def update(self, current_costs: Optional[List[torch.Tensor]] = None) -> Dict[str, float]:
         """Main update function."""
+        # Update Lagrangian multipliers ONCE per iteration BEFORE policy updates
+        # This matches OmniSafe's approach and prevents multipliers from jumping to extremes
+        if current_costs is not None:
+            self.update_lagrangian_multipliers(current_costs)
+        elif self.storage is not None:
+            # Fall back to storage costs if not provided
+            current_costs_from_storage = self.storage.get_mean_episode_costs()
+            self.update_lagrangian_multipliers(current_costs_from_storage)
+
         mean_value_loss = 0
         mean_cost_loss = 0
         mean_surrogate_loss = 0
-    
+
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        
+
         for batch in generator:
             value_loss, cost_loss, surrogate_loss = self._update_policy(batch, current_costs)
             mean_value_loss += value_loss
@@ -360,7 +368,7 @@ class PPOL_PID:
         mean_value_loss /= num_updates
         mean_cost_loss /= num_updates
         mean_surrogate_loss /= num_updates
-        
+
         self.storage.clear()
 
         loss_dict = {

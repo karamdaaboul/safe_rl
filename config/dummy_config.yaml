@@ -83,9 +83,9 @@ runner:
     experiment_name: walking_experiment
     run_name: ""
     # -- logging writer
-    logger: tensorboard  # tensorboard, neptune, wandb
+    logger: wandb  # tensorboard, neptune, wandb
     neptune_project: legged_gym
-    wandb_project: legged_gym
+    wandb_project: safe_rl
     # -- load and resuming
     load_run: -1  # -1 means load latest run
     resume_path: null  # updated from load_run and checkpoint

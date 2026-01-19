@@ -287,7 +287,9 @@ class OnPolicyRunner:
                         # -- costs for SafeRL
                         if is_saferl:
                             if len(new_ids) > 0:  # Only process if there are finished episodes
-                                cost_tensor = cur_cost_sum[new_ids].cpu().numpy()  # Shape: (n_finished_episodes, n_costs)
+                                cost_tensor = cur_cost_sum[new_ids].cpu().numpy()
+                                if cost_tensor.ndim == 1:
+                                    cost_tensor = cost_tensor[:, None]
                                 
                                 # Log each constraint separately
                                 for cost_idx in range(num_costs):
@@ -315,7 +317,13 @@ class OnPolicyRunner:
                         self.alg.compute_cost_returns(privileged_obs)
 
             # update policy
-            loss_dict = self.alg.update()
+            if is_saferl:
+                current_costs = None
+                if "costbuffers" in locals() and all(len(buf) > 0 for buf in costbuffers):
+                    current_costs = [statistics.mean(buf) for buf in costbuffers]
+                loss_dict = self.alg.update(current_costs=current_costs)
+            else:
+                loss_dict = self.alg.update()
 
             stop = time.time()
             learn_time = stop - start
@@ -403,10 +411,12 @@ class OnPolicyRunner:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
                 
                 # Log each constraint separately
+                mean_costs = []
                 total_violations = 0
                 for cost_idx, cost_buffer in enumerate(locs["costbuffers"]):
                     if len(cost_buffer) > 0:
                         mean_cost = statistics.mean(cost_buffer)
+                        mean_costs.append(mean_cost)
                         
                         # Log individual constraint metrics
                         self.writer.add_scalar(f"SafeRL/mean_cost_constraint_{cost_idx}", mean_cost, locs["it"])
@@ -434,6 +444,10 @@ class OnPolicyRunner:
                 if penalty_info:
                     self.writer.add_scalar("SafeRL/total_violations", total_violations, locs["it"])
                     self.writer.add_scalar("SafeRL/penalty_factor_avg", penalty_info["kappa"], locs["it"])
+                
+                # Log overall mean cost under Train/ (average across constraints)
+                if mean_costs:
+                    self.writer.add_scalar("Train/mean_cost", statistics.mean(mean_costs), locs["it"])
                     
                     # PPOL_PID specific logging
                     if isinstance(self.alg, PPOL_PID) and "pid_gains" in penalty_info:
