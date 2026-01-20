@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=36
 #SBATCH --gres=gpu:1
 #SBATCH --time=08:00:00
-#SBATCH --output=/p/scratch1/hai_1075/safe_rl/logs/%x-%j.out
-#SBATCH --error=/p/scratch1/hai_1075/safe_rl/logs/%x-%j.err
+#SBATCH --output=/p/scratch/hai_1075/safe_rl/logs/%x-%j.out
+#SBATCH --error=/p/scratch/hai_1075/safe_rl/logs/%x-%j.err
 
 set -euo pipefail
 
@@ -32,10 +32,9 @@ export WANDB_SILENT=true
 # (Optional) if your code reads this:
 export GIT_PYTHON_REFRESH=quiet
 
-# ---- dirs ----
-RUNS_DIR=/p/scratch1/hai_1075/safe_rl/runs
-LOGS_DIR=/p/scratch1/hai_1075/safe_rl/logs
-mkdir -p "$RUNS_DIR" "$LOGS_DIR"
+# log dirs
+SCR=/p/scratch/hai_1075
+mkdir -p $SCR/safe_rl/logs $SCR/safe_rl/runs
 
 cd /p/project1/hai_1075/workspaces/safe_rl
 
