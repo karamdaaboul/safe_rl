@@ -28,6 +28,7 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int]:
         "empirical_normalization": runner_cfg.get("empirical_normalization", False),
         "logger": runner_cfg.get("logger", "tensorboard"),
         "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
+        "wandb_entity": runner_cfg.get("wandb_entity"),
     }
     symmetry_cfg = algorithm_cfg.get("symmetry_cfg")
     if symmetry_cfg is not None:
