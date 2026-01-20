@@ -37,10 +37,10 @@ policy:
   noise_std_type: "scalar"
 
 runner:
-  num_steps_per_env: 24
-  max_iterations: 1500
+  num_steps_per_env: 2048
+  max_iterations: 500
   empirical_normalization: false
-  save_interval: 250
+  save_interval: 100
   experiment_name: safety_gymnasium_p3o
   run_name: ""
   logger: wandb
