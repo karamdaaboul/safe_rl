@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
-import git
+try:
+    import git
+except Exception:
+    # GitPython requires a git executable; keep optional to allow cluster runs.
+    git = None
 import importlib
 import os
 import pathlib
@@ -84,6 +88,9 @@ def unpad_trajectories(trajectories, masks):
 
 
 def store_code_state(logdir, repositories) -> list:
+    if git is None:
+        print("GitPython not available or git executable missing. Skipping git diff logging.")
+        return []
     git_log_dir = os.path.join(logdir, "git")
     os.makedirs(git_log_dir, exist_ok=True)
     file_paths = []

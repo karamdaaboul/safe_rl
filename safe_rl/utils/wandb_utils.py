@@ -30,8 +30,11 @@ class WandbSummaryWriter(SummaryWriter):
             raise KeyError("Please specify wandb_project in the runner config, e.g. legged_gym.")
 
         # Try to get entity from config first, then fall back to environment variable
-        entity = cfg.get("wandb_entity")
-        if entity is None:
+        # If wandb_entity is explicitly set in config (even to null), use that value
+        # Only fall back to env var if wandb_entity key doesn't exist in config
+        if "wandb_entity" in cfg:
+            entity = cfg["wandb_entity"]  # Can be None if set to null in yaml
+        else:
             entity = os.environ.get("WANDB_USERNAME")
 
         # Initialize wandb
