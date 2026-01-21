@@ -26,7 +26,7 @@ export MUJOCO_GL=egl
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Disable wandb interactive prompt + internet
-export WANDB_MODE=disabled
+export WANDB_MODE=offline
 export WANDB_SILENT=true
 
 # (Optional) if your code reads this:
