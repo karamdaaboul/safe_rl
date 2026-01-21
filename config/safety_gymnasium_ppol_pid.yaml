@@ -15,12 +15,15 @@ algorithm:
   num_mini_batches: 4
   schedule: adaptive
 
-  # PPOL-PID specific parameters (mapped from OmniSafe lagrange_cfgs)
-  lagrangian_pid: [0.1, 0.01, 0.01]
-  pid_scale: 1.0
-  constraint_margin: 0.95
+  # PPOL-PID specific parameters (aligned with OmniSafe CPPOPID)
+  lagrangian_pid: [0.1, 0.01, 0.01]  # [Kp, Ki, Kd]
   lambda_init: [0.001]
   lambda_max: 100.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
 
   # Cost critic loss
   cost_loss_coef: 1.0
@@ -39,14 +42,13 @@ policy:
   noise_std_type: "scalar"
 
 runner:
-  num_steps_per_env: 24
-  max_iterations: 1500
+  num_steps_per_env: 2048
+  max_iterations: 500
   empirical_normalization: false
-  save_interval: 50
+  save_interval: 100
   experiment_name: safety_gymnasium_ppol_pid
   run_name: ""
   logger: wandb
-  neptune_project: legged_gym
   wandb_project: SafeRL
   wandb_entity: uqerh-kit
   load_run: -1

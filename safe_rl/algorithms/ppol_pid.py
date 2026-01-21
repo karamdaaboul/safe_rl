@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,11 +15,19 @@ from safe_rl.storage import RolloutStorageCMDP
 class PPOL_PID:
     """
     PPO Lagrangian with PID Controller for Safe Reinforcement Learning
-    
+
     Combines PPO with Lagrangian constraint handling using PID controllers
     to adaptively update Lagrangian multipliers based on constraint violations.
-    
-    Based on the approach from SKRL PPOL but adapted to the P3O infrastructure.
+
+    Based on OmniSafe's CPPOPID implementation:
+    "Responsive Safety in Reinforcement Learning by PID Lagrangian Methods"
+    https://arxiv.org/abs/2007.03964
+
+    Key features (aligned with OmniSafe):
+    - EMA smoothing on proportional and derivative terms for stability
+    - Delayed derivative calculation to reduce noise
+    - PID output directly sets lambda (not accumulated)
+    - Normalized surrogate: (adv_r - λ * adv_c) / (1 + λ)
     """
     policy: ActorCriticCost
 
@@ -38,15 +48,20 @@ class PPOL_PID:
         desired_kl: float = 0.01,
         device: str = "cpu",
         normalize_advantage_per_mini_batch: bool = False,
-        # PPOL-PID specific parameters
+        # PPOL-PID specific parameters (aligned with OmniSafe CPPOPID)
         cost_limits: Optional[List[float]] = None,
-        lagrangian_pid: Tuple[float, float, float] = (0.05, 0.0005, 0.1),  # (Kp, Ki, Kd)
+        lagrangian_pid: Tuple[float, float, float] = (0.1, 0.01, 0.01),  # (Kp, Ki, Kd) OmniSafe defaults
         cost_loss_coef: float = 1.0,
         use_clipped_cost_loss: bool = True,
-        constraint_margin: float = 0.95,  # Margin for constraint activation
-        pid_scale: float = 1.0,  # Scaling factor for PID output
+        # PID EMA smoothing parameters (OmniSafe defaults)
+        pid_delta_p_ema_alpha: float = 0.95,  # EMA alpha for proportional term
+        pid_delta_d_ema_alpha: float = 0.95,  # EMA alpha for derivative term
+        pid_d_delay: int = 10,  # Delay steps for derivative calculation
+        # Constraint parameters
         lambda_init: Optional[List[float]] = None,  # Initial Lagrangian multipliers
         lambda_max: float = 100.0,  # Maximum Lagrangian multiplier value
+        sum_norm: bool = True,  # Apply sum normalization (OmniSafe default)
+        diff_norm: bool = False,  # Apply diff normalization (clips to [0, 1])
         # Backward compatibility
         rnd_cfg: Optional[Dict[str, Any]] = None,
         symmetry_cfg: Optional[Dict[str, Any]] = None,
@@ -61,32 +76,45 @@ class PPOL_PID:
         # Initialize cost constraints
         if cost_limits is None:
             raise ValueError("cost_limits must be provided")
-        
+
         self.cost_limits = cost_limits
         self.num_costs = len(cost_limits)
 
-        # Initialize Lagrangian multipliers
-        if lambda_init is None:
-            self.lambdas = [0.1] * self.num_costs  # Small initial values
-        elif len(lambda_init) == 1 and self.num_costs > 1:
-            self.lambdas = lambda_init * self.num_costs
-        else:
-            self.lambdas = lambda_init
-
-        # PID controller parameters
+        # PID controller parameters (OmniSafe-style)
         self.kp, self.ki, self.kd = lagrangian_pid
-        self.pid_scale = pid_scale
         self.lambda_max = lambda_max
-        self.constraint_margin = constraint_margin
+        self.sum_norm = sum_norm
+        self.diff_norm = diff_norm
 
-        # PID state variables for each cost
-        self.integral_errors = [0.0] * self.num_costs
-        self.previous_errors = [0.0] * self.num_costs
-        self.error_history = [[] for _ in range(self.num_costs)]
-        self.history_length = 10
+        # EMA smoothing parameters
+        self.pid_delta_p_ema_alpha = pid_delta_p_ema_alpha
+        self.pid_delta_d_ema_alpha = pid_delta_d_ema_alpha
+        self.pid_d_delay = pid_d_delay
 
-        print(f"PPOL-PID initialized with {self.num_costs} cost constraints")
+        # Initialize Lagrangian multipliers (these are the PID outputs, not accumulated)
+        if lambda_init is None:
+            init_val = 0.001  # OmniSafe default
+            self.lambdas = [init_val] * self.num_costs
+        elif len(lambda_init) == 1 and self.num_costs > 1:
+            self.lambdas = list(lambda_init) * self.num_costs
+        else:
+            self.lambdas = list(lambda_init)
+
+        # PID state variables for each cost (OmniSafe-style)
+        # Integral term: accumulates Ki * delta directly
+        self.pid_i = [self.lambdas[i] for i in range(self.num_costs)]
+        # EMA-smoothed proportional term (delta_p)
+        self.delta_p = [0.0] * self.num_costs
+        # EMA-smoothed cost for derivative calculation
+        self.cost_ema = [0.0] * self.num_costs
+        # Delay queue for derivative calculation
+        self.cost_delay_queue: List[deque] = [
+            deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)
+        ]
+
+        print(f"PPOL-PID initialized with {self.num_costs} cost constraints (OmniSafe-style)")
         print(f"PID gains: Kp={self.kp}, Ki={self.ki}, Kd={self.kd}")
+        print(f"EMA alphas: P={self.pid_delta_p_ema_alpha}, D={self.pid_delta_d_ema_alpha}, delay={self.pid_d_delay}")
         print(f"Initial lambdas: {self.lambdas}")
 
         # PPO components
@@ -159,71 +187,83 @@ class PPOL_PID:
 
     def update_lagrangian_multipliers(self, current_costs: List[torch.Tensor]) -> None:
         """
-        Update Lagrangian multipliers using PID controller.
-        
-        The PID controller adjusts lambda based on constraint violation:
-        - P (Proportional): Responds to current constraint violation
-        - I (Integral): Responds to accumulated violations over time  
-        - D (Derivative): Responds to rate of change in violations
+        Update Lagrangian multipliers using PID controller (OmniSafe-style).
+
+        Based on: "Responsive Safety in Reinforcement Learning by PID Lagrangian Methods"
+        https://arxiv.org/abs/2007.03964
+
+        The PID controller computes lambda directly (not accumulated):
+        λ = Kp * delta_p + pid_i + Kd * pid_d
+
+        Where:
+        - delta_p: EMA-smoothed error (proportional term)
+        - pid_i: Accumulated Ki * delta (integral term)
+        - pid_d: Delayed difference of EMA-smoothed costs (derivative term)
         """
         for cost_idx in range(self.num_costs):
-            current_cost = current_costs[cost_idx]
-            cost_limit = self.cost_limits[cost_idx]
-            
-            # Calculate constraint violation (error)
-            error = float(current_cost - cost_limit)  # Positive if violation
-            
-            # Update error history
-            self.error_history[cost_idx].append(error)
-            if len(self.error_history[cost_idx]) > self.history_length:
-                self.error_history[cost_idx].pop(0)
-            
-            # PID components
-            # Proportional term: current error
-            p_term = self.kp * max(0.0, error)  # Only positive violations matter
-            
-            # Integral term: accumulated error over time
-            self.integral_errors[cost_idx] += error
-            # Prevent integral windup
-            self.integral_errors[cost_idx] = max(-10.0, min(10.0, self.integral_errors[cost_idx]))
-            i_term = self.ki * self.integral_errors[cost_idx]
-            
-            # Derivative term: rate of change of error
-            if len(self.error_history[cost_idx]) >= 2:
-                error_derivative = error - self.previous_errors[cost_idx]
-                d_term = self.kd * error_derivative
+            # Get current cost value
+            if isinstance(current_costs[cost_idx], torch.Tensor):
+                current_cost = float(current_costs[cost_idx].item())
             else:
-                d_term = 0.0
-                
-            self.previous_errors[cost_idx] = error
-            
-            # PID output (change in lambda)
-            pid_output = (p_term + i_term + d_term) * self.pid_scale
-            
-            # Update Lagrangian multiplier
+                current_cost = float(current_costs[cost_idx])
+
+            cost_limit = self.cost_limits[cost_idx]
+
+            # Calculate error (delta): positive means violation
+            delta = current_cost - cost_limit
+
+            # === Integral term (I) ===
+            # Accumulate Ki * delta directly (OmniSafe style)
+            self.pid_i[cost_idx] = max(0.0, self.pid_i[cost_idx] + delta * self.ki)
+            # Apply diff_norm clipping if enabled
+            if self.diff_norm:
+                self.pid_i[cost_idx] = max(0.0, min(1.0, self.pid_i[cost_idx]))
+
+            # === Proportional term (P) with EMA smoothing ===
+            alpha_p = self.pid_delta_p_ema_alpha
+            self.delta_p[cost_idx] = alpha_p * self.delta_p[cost_idx] + (1 - alpha_p) * delta
+
+            # === Derivative term (D) with EMA smoothing and delay ===
+            alpha_d = self.pid_delta_d_ema_alpha
+            self.cost_ema[cost_idx] = alpha_d * self.cost_ema[cost_idx] + (1 - alpha_d) * current_cost
+
+            # Derivative uses delayed cost difference (reduces noise)
+            if len(self.cost_delay_queue[cost_idx]) > 0:
+                pid_d = max(0.0, self.cost_ema[cost_idx] - self.cost_delay_queue[cost_idx][0])
+            else:
+                pid_d = 0.0
+
+            # === Compute PID output (this IS the new lambda, not added to it) ===
+            pid_output = self.kp * self.delta_p[cost_idx] + self.pid_i[cost_idx] + self.kd * pid_d
+
+            # Apply constraints
             old_lambda = self.lambdas[cost_idx]
-            self.lambdas[cost_idx] = max(0.0, min(
-                self.lambdas[cost_idx] + pid_output, 
-                self.lambda_max
-            ))
-            
-            # Optional: gradual decay when well within constraints
-            if error < -0.2 * cost_limit:  # Well within constraint
-                self.lambdas[cost_idx] *= 0.99  # Gradual decay
-                
-            #print(f"Cost {cost_idx}: error={error:.3f}, PID={pid_output:.3f}, "
-            #      f"λ: {old_lambda:.3f} → {self.lambdas[cost_idx]:.3f}")
+            self.lambdas[cost_idx] = max(0.0, pid_output)
+
+            if self.diff_norm:
+                self.lambdas[cost_idx] = min(1.0, self.lambdas[cost_idx])
+            elif not self.sum_norm:
+                self.lambdas[cost_idx] = min(self.lambdas[cost_idx], self.lambda_max)
+            else:
+                # sum_norm enabled: apply lambda_max
+                self.lambdas[cost_idx] = min(self.lambdas[cost_idx], self.lambda_max)
+
+            # Update delay queue for next iteration
+            self.cost_delay_queue[cost_idx].append(self.cost_ema[cost_idx])
 
     def _update_policy(self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None) -> Tuple[float, float, float]:
         """
-        PPO policy update with Lagrangian constraint handling.
+        PPO policy update with Lagrangian constraint handling (OmniSafe-style).
+
+        Uses normalized surrogate advantage: (adv_r - λ * adv_c) / (1 + λ)
+        This prevents the cost term from completely dominating when λ is large.
         """
         (obs_batch, critic_obs_batch, actions_batch, target_values_batch,
          advantages_batch, returns_batch, target_cost_values_batch, cost_advantages_batch,
          returns_cost_batch, old_actions_log_prob_batch,
          old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, rnd_state_batch) = batch
 
-        # Normalize advantages
+        # Normalize advantages per mini-batch if enabled
         if self.normalize_advantage_per_mini_batch:
             with torch.no_grad():
                 advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
@@ -242,7 +282,7 @@ class PPOL_PID:
         cost_value_batch_all = self.policy.evaluate_cost(
             critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
         )
-        
+
         mu_batch = self.policy.action_mean
         sigma_batch = self.policy.action_std
         entropy_batch = self.policy.entropy
@@ -262,44 +302,34 @@ class PPOL_PID:
 
         # Importance sampling ratio
         ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-        
-        # Standard PPO reward objective
-        surrogate = -torch.squeeze(advantages_batch) * ratio
-        surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
+
+        # === OmniSafe-style normalized surrogate computation ===
+        # Compute combined advantage: (adv_r - λ * adv_c) / (1 + λ)
+        # This is the key difference from standard PPO-Lagrangian
+
+        # Sum of Lagrangian multipliers for normalization
+        total_lambda = sum(self.lambdas)
+
+        # Compute weighted cost advantage
+        weighted_cost_advantage = torch.zeros_like(torch.squeeze(advantages_batch))
+        for cost_idx in range(self.num_costs):
+            cost_advantage = torch.squeeze(cost_advantages_batch[:, cost_idx])
+            weighted_cost_advantage += self.lambdas[cost_idx] * cost_advantage
+
+        # Combined normalized advantage (OmniSafe Equation)
+        # adv_combined = (adv_r - λ * adv_c) / (1 + λ)
+        combined_advantage = (torch.squeeze(advantages_batch) - weighted_cost_advantage) / (1.0 + total_lambda)
+
+        # PPO clipped surrogate with normalized advantage
+        surrogate = -combined_advantage * ratio
+        surrogate_clipped = -combined_advantage * torch.clamp(
             ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
         )
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-        
-        # Lagrangian constraint terms
-        total_constraint_loss = 0
-        current_costs_computed = []
-        
-        for cost_idx in range(self.num_costs):
-            # Cost advantage for this constraint
-            cost_advantage = torch.squeeze(cost_advantages_batch[:, cost_idx])
-            
-            # Cost surrogate (similar to reward surrogate)
-            cost_surrogate = cost_advantage * ratio
-            cost_surrogate_clipped = cost_advantage * torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            )
-            cost_surrogate_loss = torch.max(cost_surrogate, cost_surrogate_clipped).mean()
-            
-            # Current cost for Lagrangian update
-            if current_costs is None:
-                mean_cost = self.storage.get_mean_episode_costs()[cost_idx]
-            else:
-                mean_cost = current_costs[cost_idx]
-            current_costs_computed.append(mean_cost)
-            
-            # Lagrangian constraint loss: λ * (cost_surrogate)
-            # This penalizes policy changes that increase constraint violations
-            constraint_loss = self.lambdas[cost_idx] * cost_surrogate_loss
-            total_constraint_loss += constraint_loss
 
-        # Total policy loss: PPO objective + Lagrangian constraints
-        policy_loss = surrogate_loss + total_constraint_loss
-        
+        # Policy loss is just the normalized surrogate (no separate constraint term needed)
+        policy_loss = surrogate_loss
+
         # Value function loss
         if self.use_clipped_value_loss:
             value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
@@ -437,21 +467,20 @@ class PPOL_PID:
             # Convert lists to scalars for logging (compatible with P3O interface)
             "kappa": torch.tensor(self.lambdas).mean().item(),  # Use lambda as "kappa" for logging compatibility
             "cost_limit": torch.tensor(self.cost_limits).mean().item(),
-            
+
             # Original lists for detailed analysis
             "kappa_list": self.lambdas,  # Lambdas mapped to kappa_list for logging compatibility
             "cost_limits": self.cost_limits,
-            "constraint_margin": self.constraint_margin,
-            "recent_costs": [hist[-5:] if len(hist) >= 5 else hist for hist in self.error_history],
-            
+
             # PPOL-PID specific information
             "lambda_mean": torch.tensor(self.lambdas).mean().item(),
             "lambda_max": max(self.lambdas),
             "lambda_min": min(self.lambdas),
             "lambda_list": self.lambdas,
             "pid_gains": (self.kp, self.ki, self.kd),
-            "integral_errors": self.integral_errors,
-            "recent_errors": [hist[-3:] if len(hist) >= 3 else hist for hist in self.error_history]
+            "pid_i": self.pid_i,  # Integral term
+            "delta_p": self.delta_p,  # Smoothed proportional term
+            "integral_errors": self.pid_i,  # Alias for runner compatibility
         }
 
     def get_lagrangian_info(self) -> Dict[str, Any]:
