@@ -15,6 +15,7 @@ import safe_rl
 from safe_rl.algorithms import PPO, Distillation
 from safe_rl.algorithms.p3o import P3O
 from safe_rl.algorithms.ppol_pid import PPOL_PID
+from safe_rl.algorithms.cup import CUP
 from safe_rl.env import VecEnv
 from safe_rl.modules import (
     ActorCritic,
@@ -47,6 +48,8 @@ class OnPolicyRunner:
             self.training_type = "saferl"  # P3O is also RL but with cost constraints
         elif self.alg_cfg["class_name"] == "PPOL_PID":
             self.training_type = "saferl"  # PPOL_PID is also safe RL with cost constraints
+        elif self.alg_cfg["class_name"] == "CUP":
+            self.training_type = "saferl"  # CUP is safe RL with two-phase constraint projection
         elif self.alg_cfg["class_name"] == "Distillation":
             self.training_type = "distillation"
         else:
@@ -77,11 +80,11 @@ class OnPolicyRunner:
         # evaluate the policy class
         policy_class_name = self.policy_cfg.pop("class_name")
         
-        # For P3O algorithm, use ActorCriticCost if ActorCritic is specified
-        if self.alg_cfg["class_name"] == "P3O" or self.alg_cfg["class_name"] == "PPOL_PID":
+        # For safe RL algorithms, use ActorCriticCost if ActorCritic is specified
+        if self.alg_cfg["class_name"] in ["P3O", "PPOL_PID", "CUP"]:
             if policy_class_name == "ActorCritic":
                 policy_class_name = "ActorCriticCost"
-            # Set cost_limits and num_costs for P3O algorithm
+            # Set cost_limits and num_costs for safe RL algorithms
             self.alg_cfg["cost_limits"] = self.env.cost_limits
             self.policy_cfg["num_costs"] = len(self.env.cost_limits)
         
@@ -110,7 +113,9 @@ class OnPolicyRunner:
 
         # initialize algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))
-        self.alg: PPO | P3O | PPOL_PID | Distillation = alg_class(
+        # Avoid passing multi_gpu_cfg twice (config may include it as null).
+        self.alg_cfg.pop("multi_gpu_cfg", None)
+        self.alg: PPO | P3O | PPOL_PID | CUP | Distillation = alg_class(
             policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
 
@@ -196,7 +201,7 @@ class OnPolicyRunner:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         # Cost tracking for SafeRL
-        is_saferl = isinstance(self.alg, P3O) or isinstance(self.alg, PPOL_PID)
+        is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CUP))
         if is_saferl:
             # Initialize separate cost buffers for each constraint
             num_costs = len(self.env.cost_limits) if hasattr(self.env, 'cost_limits') else 1
@@ -406,7 +411,7 @@ class OnPolicyRunner:
                 self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # SafeRL cost logging - individual constraints
-            is_saferl = isinstance(self.alg, P3O) or isinstance(self.alg, PPOL_PID)
+            is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CUP))
             if is_saferl and "costbuffers" in locs:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
                 

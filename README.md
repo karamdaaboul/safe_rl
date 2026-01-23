@@ -11,10 +11,18 @@ This library implements several **on-policy reinforcement learning algorithms** 
 * **PPO** (Proximal Policy Optimization) - The foundation algorithm for policy optimization
 * **Student-Teacher Distillation** - Knowledge transfer from teacher to student policies
 
-### Safe RL Algorithms  
+### Safe RL Algorithms
 * **P3O** (Penalized Proximal Policy Optimization) - Safe RL using adaptive penalty methods for constraint handling
-* **CUP** (Constrained Policy Optimization) - Alternative constraint handling approach
+* **CUP** (Constrained Update Projection) - Two-phase safe RL with Lagrangian constraint projection ([Paper](https://arxiv.org/abs/2209.07089))
 * **PPOL_PID** (PPO Lagrangian with PID Controller) - Safe RL using Lagrangian multipliers updated via PID control
+
+### Algorithm Comparison
+
+| Algorithm | Constraint Method | Key Feature |
+|-----------|------------------|-------------|
+| **P3O** | Adaptive penalty | Simple, single-phase update with adaptive κ |
+| **CUP** | Lagrangian projection | Two-phase: PPO update → constraint projection |
+| **PPOL_PID** | PID-controlled Lagrangian | Smooth constraint tracking with PID controller |
 
 ### Additional Features
 * [Random Network Distillation (RND)](https://proceedings.mlr.press/v229/schwarke23a.html) - Encourages exploration by adding
@@ -69,13 +77,33 @@ python scripts/train_safety_gymnasium.py \
   --config config/dummy_config.yaml
 ```
 
-Train P3O (safe RL with costs):
+Train P3O (safe RL with adaptive penalty):
 
 ```bash
 python scripts/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 36 \
   --config config/safety_gymnasium_p3o.yaml \
+  --cost_limits 25.0
+```
+
+Train CUP (safe RL with Lagrangian constraint projection):
+
+```bash
+python scripts/train_safety_gymnasium.py \
+  --env_id SafetyCarGoal1-v0 \
+  --num_envs 36 \
+  --config config/safety_gymnasium_cup.yaml \
+  --cost_limits 25.0
+```
+
+Train PPOL-PID (safe RL with PID-controlled Lagrangian):
+
+```bash
+python scripts/train_safety_gymnasium.py \
+  --env_id SafetyCarGoal1-v0 \
+  --num_envs 36 \
+  --config config/safety_gymnasium_ppol_pid.yaml \
   --cost_limits 25.0
 ```
 

@@ -1,0 +1,63 @@
+algorithm:
+  class_name: CUP
+  # training parameters
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 40.0
+  learning_rate: 0.0003
+  num_learning_epochs: 40
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # CUP specific parameters (based on paper and OmniSafe)
+  # Lagrange multiplier parameters
+  nu_lr: 0.035                    # Learning rate for Lagrange multiplier (lambda_lr in OmniSafe)
+  nu_max: 2.0                     # Maximum value for nu (lagrangian_upper_bound in OmniSafe)
+  delta: 0.01                     # KL divergence threshold for Phase 2 early stopping
+
+  # Cost GAE parameters
+  c_gamma: 0.99                   # Discount factor for cost GAE (cost_gamma in OmniSafe)
+  c_gae_lam: 0.95                 # GAE lambda for costs (lam_c in OmniSafe)
+
+  # Cost critic loss
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: true
+
+  # Cost limits (per constraint) - aligned with OmniSafe default
+  cost_limits: [25.0]
+
+  # Disable extra features by default
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCriticCost
+  activation: elu
+  actor_hidden_dims: [64, 64]
+  critic_hidden_dims: [64, 64]
+  init_noise_std: 1.0
+  noise_std_type: "scalar"
+  num_costs: 1                    # Number of cost constraints
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 500
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: safety_gymnasium_cup
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1
