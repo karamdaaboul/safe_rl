@@ -28,7 +28,7 @@ parameters:
     value: "cuda:0"  # Will be overridden by CUDA_VISIBLE_DEVICES
 
   seed:
-    values: 42
+    value: 42
 
   # ========== Cost Limit (fixed) ==========
   cost_limits:
