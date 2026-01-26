@@ -5,14 +5,24 @@ import os
 import time
 from typing import Any, Dict, Tuple
 
-import torch
 import yaml
 
 from safe_rl.env import SafetyGymnasiumVecEnv
-from safe_rl.runners import OnPolicyRunner
+from safe_rl.runners import OffPolicyRunner, OnPolicyRunner
+
+# Algorithms that use off-policy training
+OFF_POLICY_ALGORITHMS = {"SAC", "DDPG", "TD3"}
+
+# Algorithms that use on-policy training
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "Distillation"}
 
 
-def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int]:
+def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str]:
+    """Load training configuration from YAML file.
+
+    Returns:
+        Tuple of (train_cfg dict, max_iterations, runner_class_name)
+    """
     with open(config_path, "r", encoding="utf-8") as file:
         cfg = yaml.safe_load(file)
 
@@ -20,22 +30,52 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int]:
     policy_cfg = cfg["policy"]
     runner_cfg = cfg.get("runner", {})
 
-    train_cfg = {
-        "algorithm": algorithm_cfg,
-        "policy": policy_cfg,
-        "num_steps_per_env": runner_cfg.get("num_steps_per_env", 24),
-        "save_interval": runner_cfg.get("save_interval", 50),
-        "empirical_normalization": runner_cfg.get("empirical_normalization", False),
-        "logger": runner_cfg.get("logger", "tensorboard"),
-        "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
-        "wandb_entity": runner_cfg.get("wandb_entity"),
-    }
-    symmetry_cfg = algorithm_cfg.get("symmetry_cfg")
-    if symmetry_cfg is not None:
-        if not symmetry_cfg.get("data_augmentation_func"):
-            algorithm_cfg["symmetry_cfg"] = None
+    # Determine runner class from config or algorithm type
+    algorithm_name = algorithm_cfg.get("class_name", "PPO")
+    if algorithm_name in OFF_POLICY_ALGORITHMS:
+        default_runner = "OffPolicyRunner"
+    else:
+        default_runner = "OnPolicyRunner"
+    runner_class_name = cfg.get("runner_class_name", default_runner)
+
+    # Build train_cfg based on runner type
+    if runner_class_name == "OffPolicyRunner":
+        train_cfg = {
+            "algorithm": algorithm_cfg,
+            "policy": policy_cfg,
+            "runner": {
+                "num_steps_per_env": runner_cfg.get("num_steps_per_env", 1),
+                "save_interval": runner_cfg.get("save_interval", 50),
+                "empirical_normalization": runner_cfg.get("empirical_normalization", False),
+                "logger": runner_cfg.get("logger", "tensorboard"),
+                "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
+                "wandb_entity": runner_cfg.get("wandb_entity"),
+                # Off-policy specific
+                "max_size": runner_cfg.get("max_size", 1_000_000),
+                "start_random_steps": runner_cfg.get("start_random_steps", 10000),
+                "update_after": runner_cfg.get("update_after", 1000),
+                "update_every": runner_cfg.get("update_every", 50),
+            },
+        }
+    else:
+        train_cfg = {
+            "algorithm": algorithm_cfg,
+            "policy": policy_cfg,
+            "num_steps_per_env": runner_cfg.get("num_steps_per_env", 24),
+            "save_interval": runner_cfg.get("save_interval", 50),
+            "empirical_normalization": runner_cfg.get("empirical_normalization", False),
+            "logger": runner_cfg.get("logger", "tensorboard"),
+            "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
+            "wandb_entity": runner_cfg.get("wandb_entity"),
+        }
+        # Handle symmetry config for on-policy algorithms
+        symmetry_cfg = algorithm_cfg.get("symmetry_cfg")
+        if symmetry_cfg is not None:
+            if not symmetry_cfg.get("data_augmentation_func"):
+                algorithm_cfg["symmetry_cfg"] = None
+
     max_iterations = runner_cfg.get("max_iterations", 1000)
-    return train_cfg, max_iterations
+    return train_cfg, max_iterations, runner_class_name
 
 
 def parse_cost_limits(cost_limits: str | None) -> list[float] | None:
@@ -58,11 +98,15 @@ def main() -> None:
     parser.add_argument("--disable_rnd", action="store_true", help="Disable RND even if configured.")
     args = parser.parse_args()
 
-    train_cfg, max_iterations = load_train_cfg(args.config)
+    train_cfg, max_iterations, runner_class_name = load_train_cfg(args.config)
     algorithm_cfg = train_cfg["algorithm"]
-    rnd_cfg = algorithm_cfg.get("rnd_cfg")
-    if args.disable_rnd or (rnd_cfg is not None and rnd_cfg.get("weight", 0.0) == 0.0):
-        algorithm_cfg["rnd_cfg"] = None
+
+    # Handle RND config (only for on-policy algorithms)
+    if runner_class_name == "OnPolicyRunner":
+        rnd_cfg = algorithm_cfg.get("rnd_cfg")
+        if args.disable_rnd or (rnd_cfg is not None and rnd_cfg.get("weight", 0.0) == 0.0):
+            algorithm_cfg["rnd_cfg"] = None
+
     if args.max_iterations is not None:
         max_iterations = args.max_iterations
 
@@ -79,7 +123,14 @@ def main() -> None:
     log_dir = os.path.join(args.log_dir, args.env_id, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(log_dir, exist_ok=True)
 
-    runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+    # Select runner based on algorithm type
+    if runner_class_name == "OffPolicyRunner":
+        print(f"[INFO] Using OffPolicyRunner for algorithm: {algorithm_cfg.get('class_name')}")
+        runner = OffPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+    else:
+        print(f"[INFO] Using OnPolicyRunner for algorithm: {algorithm_cfg.get('class_name')}")
+        runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+
     runner.learn(max_iterations)
     env.close()
 

@@ -6,8 +6,9 @@
 """Implementation of different RL agents."""
 
 from .distillation import Distillation
-from .ppo import PPO
 from .p3o import P3O
+from .ppo import PPO
 from .ppol_pid import PPOL_PID
+from .sac import SAC
 
-__all__ = ["PPO", "Distillation", "P3O", "PPOL_PID"]
+__all__ = ["Distillation", "P3O", "PPO", "PPOL_PID", "SAC"]

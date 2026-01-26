@@ -5,7 +5,8 @@
 
 """Implementation of transitions storage for RL-agent."""
 
-from .rollout_storage import RolloutStorage
 from .cost_rollout_storage import RolloutStorageCMDP
+from .replay_storage import ReplayStorage
+from .rollout_storage import RolloutStorage
 
-__all__ = ["RolloutStorage", "RolloutStorageCMDP"]
+__all__ = ["ReplayStorage", "RolloutStorage", "RolloutStorageCMDP"]

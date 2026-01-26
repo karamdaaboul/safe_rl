@@ -10,6 +10,7 @@ from .actor_critic_cost import ActorCriticCost
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .normalizer import EmpiricalNormalization
 from .rnd import RandomNetworkDistillation
+from .sac_actor_critic import SACActorCritic
 from .student_teacher import StudentTeacher
 from .student_teacher_recurrent import StudentTeacherRecurrent
 
@@ -19,6 +20,7 @@ __all__ = [
     "ActorCriticRecurrent",
     "EmpiricalNormalization",
     "RandomNetworkDistillation",
+    "SACActorCritic",
     "StudentTeacher",
     "StudentTeacherRecurrent",
 ]
