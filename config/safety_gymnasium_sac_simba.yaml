@@ -1,0 +1,96 @@
+# SAC with SimbaV2 architecture (holosoma-inspired configuration)
+# Reference: "Hyperspherical Normalization for Scalable Deep Reinforcement Learning" (ICML 2025)
+# Inspired by: https://github.com/amazon-far/holosoma
+
+algorithm:
+  class_name: SAC
+  # -- Discount and target update
+  gamma: 0.97  # holosoma default
+  tau: 0.125   # holosoma: faster target updates
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  alpha_lr: 0.0003
+
+  # -- Entropy regularization
+  alpha: 0.001  # holosoma: lower initial entropy coefficient
+  auto_entropy_tuning: true
+  target_entropy: 0.0  # holosoma uses target_entropy_ratio: 0.0
+
+  # -- Training
+  batch_size: 8192  # holosoma: large batch size
+  num_updates_per_step: 8  # holosoma: multiple updates per step
+  max_grad_norm: 1.0  # gradient clipping (holosoma uses 0.0 but we keep some clipping)
+
+policy:
+  class_name: SACActorCritic
+
+  # -- Actor/Critic types
+  actor_type: stochastic
+  critic_type: distributional
+  num_critics: 2
+
+  # -- Observation normalization (required for SimbaV2)
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+
+  # -- Actor configuration (StochasticActor)
+  actor_kwargs:
+    hidden_dims: [512, 512]  # holosoma: larger actor network
+    activation: relu
+    log_std_min: -5.0   # holosoma: tighter bounds
+    log_std_max: 0.0    # holosoma: tighter bounds
+
+  # -- Critic configuration (DistributionalCritic with SimbaV2)
+  critic_kwargs:
+    # Distributional critic settings (holosoma values)
+    num_atoms: 101      # holosoma: more atoms for finer value distribution
+    v_min: -20.0        # holosoma: tighter value bounds
+    v_max: 20.0         # holosoma: tighter value bounds
+
+    # Network type: "mlp" or "simba"
+    network_type: simba
+
+    # SimbaV2 network settings
+    network_kwargs:
+      hidden_dim: 768   # holosoma: larger critic network
+      num_blocks: 2
+      expansion: 4
+      c_shift: 3.0
+
+runner:
+  # -- Collection
+  num_steps_per_env: 1
+
+  # -- Training duration
+  max_iterations: 25000  # holosoma: num_learning_iterations
+
+  # -- Replay buffer
+  max_size: 1000000  # holosoma: buffer_size per env * num_envs
+
+  # -- Exploration (holosoma uses learning_starts: 10)
+  start_random_steps: 10
+
+  # -- Update schedule
+  update_after: 10
+  update_every: 1
+
+  # -- Checkpointing
+  save_interval: 10000
+  empirical_normalization: false  # handled by actor/critic normalizers
+
+  # -- Logging
+  experiment_name: safety_gymnasium_sac_simba
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+
+  # -- Load and resume
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OffPolicyRunner
+seed: 1

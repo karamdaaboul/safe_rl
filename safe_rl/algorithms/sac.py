@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from safe_rl.modules.sac_actor_critic import SACActorCritic
@@ -23,6 +24,7 @@ class SAC:
     - Twin Q-networks (double Q-learning)
     - Automatic entropy coefficient (alpha) tuning
     - Soft target updates (Polyak averaging)
+    - Optional distributional critics (C51-style)
     """
 
     policy: SACActorCritic
@@ -101,9 +103,7 @@ class SAC:
 
         # Optimizers
         # Actor optimizer (only actor network parameters)
-        actor_params = list(policy.actor_backbone.parameters()) + \
-                       list(policy.actor_mean.parameters()) + \
-                       list(policy.actor_log_std.parameters())
+        actor_params = list(policy.actor.parameters())
         self.actor_optimizer = optim.Adam(actor_params, lr=actor_lr)
 
         # Critic optimizer (both Q-networks)
@@ -240,6 +240,33 @@ class SAC:
         Returns:
             Critic loss value.
         """
+        if self.policy.is_distributional_critic:
+            critic_loss = self._update_critic_distributional(obs, actions, rewards, dones, next_obs)
+        else:
+            critic_loss = self._update_critic_standard(obs, actions, rewards, dones, next_obs)
+
+        return critic_loss
+
+    def _update_critic_standard(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+    ) -> float:
+        """Update Q-networks with standard MSE loss.
+
+        Args:
+            obs: Current observations.
+            actions: Actions taken.
+            rewards: Rewards received.
+            dones: Done flags.
+            next_obs: Next observations.
+
+        Returns:
+            Critic loss value.
+        """
         with torch.no_grad():
             # Sample next actions and compute log probs
             next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
@@ -256,7 +283,86 @@ class SAC:
         q1, q2 = self.policy.evaluate_q(obs, actions)
 
         # Critic loss (MSE)
-        critic_loss = nn.functional.mse_loss(q1, target_q) + nn.functional.mse_loss(q2, target_q)
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+
+        # Optimize critics
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        nn.utils.clip_grad_norm_(
+            list(self.policy.critic_1.parameters()) + list(self.policy.critic_2.parameters()),
+            self.max_grad_norm,
+        )
+        self.critic_optimizer.step()
+
+        return critic_loss.item()
+
+    def _update_critic_distributional(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+    ) -> float:
+        """Update Q-networks with distributional (C51) cross-entropy loss.
+
+        Args:
+            obs: Current observations.
+            actions: Actions taken.
+            rewards: Rewards received.
+            dones: Done flags.
+            next_obs: Next observations.
+
+        Returns:
+            Critic loss value.
+        """
+        # Squeeze to 1D for distributional critic: [batch, 1] -> [batch]
+        rewards = rewards.squeeze(-1)
+        bootstrap = (1.0 - dones).squeeze(-1)
+
+        with torch.no_grad():
+            # Sample next actions and compute log probs
+            next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
+            next_log_prob = next_log_prob.squeeze(-1)  # [batch, 1] -> [batch]
+
+            # Get target distributions for both critics
+            # Modify rewards to include entropy bonus: r - γ * α * log π(a'|s')
+            entropy_adjusted_rewards = rewards - self.gamma * bootstrap * self.alpha.detach() * next_log_prob
+
+            # Project target distributions for each critic
+            target_dist_1 = self.policy.critic_1_target.project(
+                next_dist=self.policy.critic_1_target.get_dist(
+                    self.policy.critic_1_target(
+                        self.policy.critic_obs_normalizer(next_obs), next_actions
+                    )
+                ),
+                rewards=entropy_adjusted_rewards,
+                bootstrap=bootstrap,
+                discount=self.gamma,
+            )
+            target_dist_2 = self.policy.critic_2_target.project(
+                next_dist=self.policy.critic_2_target.get_dist(
+                    self.policy.critic_2_target(
+                        self.policy.critic_obs_normalizer(next_obs), next_actions
+                    )
+                ),
+                rewards=entropy_adjusted_rewards,
+                bootstrap=bootstrap,
+                discount=self.gamma,
+            )
+
+        # Get current logits
+        obs_normalized = self.policy.critic_obs_normalizer(obs)
+        logits_1 = self.policy.critic_1(obs_normalized, actions)
+        logits_2 = self.policy.critic_2(obs_normalized, actions)
+
+        # Cross-entropy loss: -sum(target_dist * log_softmax(logits))
+        log_probs_1 = F.log_softmax(logits_1, dim=-1)
+        log_probs_2 = F.log_softmax(logits_2, dim=-1)
+
+        critic_loss_1 = -torch.sum(target_dist_1 * log_probs_1, dim=-1).mean()
+        critic_loss_2 = -torch.sum(target_dist_2 * log_probs_2, dim=-1).mean()
+        critic_loss = critic_loss_1 + critic_loss_2
 
         # Optimize critics
         self.critic_optimizer.zero_grad()
@@ -293,9 +399,7 @@ class SAC:
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         nn.utils.clip_grad_norm_(
-            list(self.policy.actor_backbone.parameters()) +
-            list(self.policy.actor_mean.parameters()) +
-            list(self.policy.actor_log_std.parameters()),
+            self.policy.actor.parameters(),
             self.max_grad_norm,
         )
         self.actor_optimizer.step()

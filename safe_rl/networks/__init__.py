@@ -6,5 +6,27 @@
 """Definitions for neural networks."""
 
 from .memory import Memory
+from .mlp import MLP
+from .simba import (
+    HyperDense,
+    HyperEmbedder,
+    HyperLERPBlock,
+    HyperMLP,
+    HyperPredictor,
+    Scaler,
+    SimbaV2,
+    l2normalize,
+)
 
-__all__ = ["Memory"]
+__all__ = [
+    "Memory",
+    "MLP",
+    "SimbaV2",
+    "HyperDense",
+    "HyperEmbedder",
+    "HyperLERPBlock",
+    "HyperMLP",
+    "HyperPredictor",
+    "Scaler",
+    "l2normalize",
+]
