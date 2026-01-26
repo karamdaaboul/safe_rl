@@ -13,7 +13,17 @@ source /p/project1/hai_1075/venvs/safe_rl311/bin/activate
 # ---- sync ----
 cd /p/project1/hai_1075/workspaces/safe_rl/wandb
 
-for d in offline-run-2026012*; do
-  rid="resync-$(basename "$d" | sed 's/offline-run-//')"
-  wandb sync --id "$rid" --clean "$d"
-done
+# Check if any directories exist to avoid errors if the glob matches nothing
+if compgen -G "offline-run-20260*" > /dev/null; then
+    for d in offline-run-20260*; do
+        echo "Syncing $d ..."
+        # Simply sync the directory; wandb will find the correct ID inside
+        wandb sync "$d"
+        
+        # Optional: Only delete if you are absolutely sure. 
+        # Better to do this manually after verifying the dashboard.
+        # rm -rf "$d" 
+    done
+else
+    echo "No offline runs found matching pattern."
+fi
