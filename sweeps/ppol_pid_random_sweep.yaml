@@ -1,0 +1,69 @@
+# PPOL-PID Random Sweep - Best for parallel/offline execution
+# Random search parallelizes perfectly (no agent coordination needed)
+#
+# Usage:
+#   wandb sweep sweeps/ppol_pid_random_sweep.yaml
+#   # Then run 3 agents in parallel (see scripts/slurm_ppol_pid_sweep.sh)
+
+program: scripts/train_safety_gymnasium.py
+method: random  # Random search parallelizes perfectly
+metric:
+  goal: maximize
+  name: "Train/mean_reward"
+
+# Total runs across all agents
+run_cap: 30
+
+parameters:
+  # ========== Fixed parameters ==========
+  env_id:
+    value: "SafetyCarGoal1-v0"
+  config:
+    value: "config/safety_gymnasium_ppol_pid.yaml"
+  num_envs:
+    value: 40
+  max_iterations:
+    value: 500
+  device:
+    value: "cuda:0"  # Will be overridden by CUDA_VISIBLE_DEVICES
+
+  seed:
+    values: 42
+
+  # ========== Cost Limit (fixed) ==========
+  cost_limits:
+    value: "25.0"
+
+  # ========== PID Controller Gains ==========
+  pid_kp:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 1.0
+
+  pid_ki:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.1
+
+  pid_kd:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.1
+
+  # ========== PPO Parameters ==========
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-2
+
+  num_learning_epochs:
+    values: [10, 30, 50]
+
+  entropy_coef:
+    values: [0.0, 0.001, 0.01]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
