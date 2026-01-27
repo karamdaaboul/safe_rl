@@ -1,0 +1,88 @@
+# Safe SAC with Action Shielding
+# Combines safety-aware Q-learning with runtime action filtering
+
+algorithm:
+  class_name: SafeSACShield
+
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005  # soft target update coefficient
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+  alpha_lr: 0.0003  # entropy coefficient learning rate
+
+  # -- Entropy regularization
+  alpha: 0.2  # initial entropy coefficient
+  auto_entropy_tuning: true  # automatically tune entropy coefficient
+  target_entropy: null  # if null, set to -dim(action_space)
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 1  # gradient steps per environment step
+  max_grad_norm: 1.0
+
+  # -- Safe RL parameters (PID Lagrangian)
+  # cost_limits: [25.0]  # Set by environment, don't override here
+  lagrangian_pid: [0.1, 0.01, 0.01]  # (Kp, Ki, Kd)
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  lambda_init: [0.001]
+  lambda_max: 100.0
+  sum_norm: true  # OmniSafe-style normalization
+  diff_norm: false
+
+  # -- Shield parameters
+  shield_threshold: 0.5  # Cost Q-value threshold for action rejection
+  shield_max_resample: 10  # Max resampling attempts
+  shield_cost_weight: 1.0  # Weight for cost penalty in Q-target: r - λ * c
+  shield_enabled_during_training: false  # Enable shielding during training (usually false for exploration)
+
+policy:
+  class_name: SafeSACActorCritic
+  # Network architecture
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  cost_critic_hidden_dims: [256, 256]
+  # SAC specific
+  log_std_min: -20
+  log_std_max: 2
+
+runner:
+  # -- Collection
+  num_steps_per_env: 1  # steps per environment per iteration
+  max_iterations: 1000000  # total environment steps
+
+  # -- Replay buffer
+  max_size: 1000000  # replay buffer size
+
+  # -- Exploration
+  start_random_steps: 1000  # random actions before training starts
+
+  # -- Update schedule
+  update_after: 500  # start training after this many steps
+  update_every: 1  # update policy every N iterations
+
+  # -- Checkpointing
+  save_interval: 10000  # save model every N iterations
+  empirical_normalization: false
+
+  # -- Logging
+  experiment_name: safety_gymnasium_safe_sac_shield
+  run_name: ""
+  logger: wandb  # tensorboard, neptune, wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+
+  # -- Load and resume
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OffPolicyRunner
+seed: 1

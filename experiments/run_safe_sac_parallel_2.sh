@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=safe_sac_pid_sweep
+#SBATCH --job-name=safe_sac_pid_sweep_2
 #SBATCH --account=hai_1075
 #SBATCH --partition=booster
 #SBATCH --nodes=1
@@ -42,50 +42,50 @@ NUM_ENVS=64
 MAX_ITERATIONS=100000
 
 echo "=========================================="
-echo "Safe SAC PID Parameter Sweep - Batch 1"
+echo "Safe SAC PID Parameter Sweep - Batch 2"
 echo "Cost Limit: 50.0 (all configs)"
 echo "Testing 3 configurations in parallel"
 echo "=========================================="
 
-# Config 1: PI Controller Only (no derivative - most stable)
+# Config 4: High Smoothing (slower, more stable lambda updates)
 python -u scripts/train_safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
-  --config config/safesac/safety_gymnasium_safe_sac_pi_only.yaml \
+  --config config/safesac/safety_gymnasium_safe_sac_high_smooth.yaml \
   --device cuda:0 \
   --max_iterations $MAX_ITERATIONS \
-  2>&1 | sed "s/^/[PI-Only] /" &
+  2>&1 | sed "s/^/[High-Smooth] /" &
 PID1=$!
 
-# Config 2: Low Kd (reduced derivative oscillations)
+# Config 5: Low Kp (gentler proportional control)
 python -u scripts/train_safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
-  --config config/safesac/safety_gymnasium_safe_sac_low_kd.yaml \
+  --config config/safesac/safety_gymnasium_safe_sac_low_kp.yaml \
   --device cuda:1 \
   --max_iterations $MAX_ITERATIONS \
-  2>&1 | sed "s/^/[Low-Kd] /" &
+  2>&1 | sed "s/^/[Low-Kp] /" &
 PID2=$!
 
-# Config 3: Baseline (current settings for comparison)
+# Config 6: No sum_norm (no cost normalization, lower lambda_max)
 python -u scripts/train_safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
-  --config config/safesac/safety_gymnasium_safe_sac_baseline.yaml \
+  --config config/safesac/safety_gymnasium_safe_sac_no_sumnorm.yaml \
   --device cuda:2 \
   --max_iterations $MAX_ITERATIONS \
-  2>&1 | sed "s/^/[Baseline] /" &
+  2>&1 | sed "s/^/[No-SumNorm] /" &
 PID3=$!
 
 echo "Started 3 configs in parallel:"
-echo "  cuda:0 - PI-Only      (PID: $PID1)"
-echo "  cuda:1 - Low-Kd       (PID: $PID2)"
-echo "  cuda:2 - Baseline     (PID: $PID3)"
+echo "  cuda:0 - High-Smooth  (PID: $PID1)"
+echo "  cuda:1 - Low-Kp       (PID: $PID2)"
+echo "  cuda:2 - No-SumNorm   (PID: $PID3)"
 
 # Wait for all to finish
 wait $PID1 $PID2 $PID3
 
 echo ""
 echo "=========================================="
-echo "Batch 1 completed!"
+echo "Batch 2 completed!"
 echo "=========================================="

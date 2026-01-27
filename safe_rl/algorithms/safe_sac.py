@@ -524,19 +524,21 @@ class SafeSAC:
         # which is equivalent to minimizing: α * log π - Q_r + λ * Q_c
         #
         # With sum_norm=True (default, OmniSafe-style):
-        #   Normalize by (1 + λ) to prevent cost from dominating when λ is very large
-        #   actor_loss = α * log π - (Q_r - λ * Q_c) / (1 + λ)
+        #   Normalize ONLY the cost penalty by (1 + λ) to prevent it from dominating when λ is very large
+        #   This keeps the reward signal strong while moderating the cost penalty
+        #   actor_loss = α * log π - Q_r + (λ * Q_c) / (1 + λ)
         #
         # With sum_norm=False:
         #   Use raw Lagrangian without normalization (stronger cost gradients)
         #   actor_loss = α * log π - Q_r + λ * Q_c
         if self.sum_norm and total_lambda > 0:
-            # OmniSafe-style normalization
-            normalized_q = (q_min - cost_penalty) / (1.0 + total_lambda)
+            # Normalize only the cost penalty, not the reward Q
+            normalized_cost_penalty = cost_penalty / (1.0 + total_lambda)
         else:
-            # No normalization - stronger cost signal
-            normalized_q = q_min - cost_penalty
+            # No normalization - full cost signal
+            normalized_cost_penalty = cost_penalty
 
+        normalized_q = q_min - normalized_cost_penalty
         actor_loss = (self.alpha.detach() * log_prob - normalized_q).mean()
 
         # Optimize actor
