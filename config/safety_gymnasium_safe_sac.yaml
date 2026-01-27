@@ -1,5 +1,8 @@
+# Safe SAC with PID Lagrangian constraint handling
+# Combines SAC with constrained RL using PID-based Lagrangian multiplier updates
+
 algorithm:
-  class_name: SAC
+  class_name: SafeSAC
   # -- Discount and target update
   gamma: 0.99
   tau: 0.005  # soft target update coefficient
@@ -7,6 +10,7 @@ algorithm:
   # -- Learning rates
   actor_lr: 0.0003
   critic_lr: 0.0003
+  cost_critic_lr: 0.0003
   alpha_lr: 0.0003  # entropy coefficient learning rate
 
   # -- Entropy regularization
@@ -17,12 +21,22 @@ algorithm:
   # -- Training
   batch_size: 256
   num_updates_per_step: 1  # gradient steps per environment step
+  max_grad_norm: 1.0
 
-  # -- Network
-  hidden_dims: [256, 256]
+  # -- PID Lagrangian parameters (aligned with PPOL_PID / OmniSafe)
+  lagrangian_pid: [0.1, 0.01, 0.01]  # [Kp, Ki, Kd]
+  lambda_init: [0.001]
+  lambda_max: 100.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # cost_limits will be set via command line or env wrapper
 
 policy:
-  class_name: SACActorCritic
+  class_name: SafeSACActorCritic
   # Network architecture
   activation: relu
   actor_hidden_dims: [256, 256]
@@ -30,33 +44,37 @@ policy:
   # SAC specific
   log_std_min: -20
   log_std_max: 2
+  # Safe RL
+  num_costs: 1  # number of cost constraints (will be updated by env)
 
 runner:
   # -- Collection
   num_steps_per_env: 1  # steps per environment per iteration
-  max_iterations: 1000000  # total environment steps (for off-policy, this is steps not iterations)
+
+  # -- Training duration
+  max_iterations: 1000000
 
   # -- Replay buffer
   max_size: 1000000  # replay buffer size
 
   # -- Exploration
-  start_random_steps: 1000  # random actions before training starts
+  start_random_steps: 5000  # random actions before training starts
 
   # -- Update schedule
-  update_after: 500  # start training after this many steps
+  update_after: 5000  # start training after this many steps
   update_every: 1  # update policy every N iterations
 
   # -- Checkpointing
-  save_interval: 10000  # save model every N iterations
+  save_interval: 10000
   empirical_normalization: false
 
   # -- Logging
-  experiment_name: safety_gymnasium_sac
+  experiment_name: safety_gymnasium_safe_sac
   run_name: ""
   logger: wandb  # tensorboard, neptune, wandb
   wandb_project: SafeRL
   wandb_entity: uqerh-kit
-  wandb_dir: ./wandb_logs  # custom wandb directory (default: ./wandb)
+  wandb_dir: ./wandb_logs  # custom wandb directory
 
   # -- Load and resume
   load_run: -1
@@ -65,3 +83,4 @@ runner:
 
 runner_class_name: OffPolicyRunner
 seed: 1
+

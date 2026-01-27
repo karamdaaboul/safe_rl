@@ -64,17 +64,17 @@ runner:
   num_steps_per_env: 1
 
   # -- Training duration
-  max_iterations: 25000  # holosoma: num_learning_iterations
+  max_iterations: 200000 
 
   # -- Replay buffer
   max_size: 1000000  # holosoma: buffer_size per env * num_envs
 
   # -- Exploration (holosoma uses learning_starts: 10)
-  start_random_steps: 10
+  start_random_steps: 5000
 
   # -- Update schedule
-  update_after: 10
-  update_every: 1
+  update_after: 5000
+  update_every: 10
 
   # -- Checkpointing
   save_interval: 10000
@@ -86,6 +86,7 @@ runner:
   logger: wandb
   wandb_project: SafeRL
   wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs  # custom wandb directory (default: ./wandb)
 
   # -- Load and resume
   load_run: -1

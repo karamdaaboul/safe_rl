@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48
 #SBATCH --gres=gpu:3
-#SBATCH --time=08:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=/p/scratch/hai_1075/safe_rl/logs/%x-%j.out
 #SBATCH --error=/p/scratch/hai_1075/safe_rl/logs/%x-%j.err
 
