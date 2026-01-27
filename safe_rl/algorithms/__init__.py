@@ -10,5 +10,6 @@ from .p3o import P3O
 from .ppo import PPO
 from .ppol_pid import PPOL_PID
 from .sac import SAC
+from .safe_sac import SafeSAC
 
-__all__ = ["Distillation", "P3O", "PPO", "PPOL_PID", "SAC"]
+__all__ = ["Distillation", "P3O", "PPO", "PPOL_PID", "SAC", "SafeSAC"]

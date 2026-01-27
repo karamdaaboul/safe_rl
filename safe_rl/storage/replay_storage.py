@@ -11,7 +11,7 @@ import torch
 
 
 class ReplayStorage:
-    """Replay buffer for off-policy algorithms (SAC, DDPG, TD3).
+    """Replay buffer for off-policy algorithms (SAC, TD3).
 
     This implements a circular buffer that stores transitions for experience replay.
     It supports efficient random sampling for mini-batch training.

@@ -37,8 +37,13 @@ class WandbSummaryWriter(SummaryWriter):
         else:
             entity = os.environ.get("WANDB_USERNAME")
 
+        # Get custom wandb directory if specified (default: None uses ./wandb)
+        wandb_dir = cfg.get("wandb_dir", None)
+        if wandb_dir is not None:
+            os.makedirs(wandb_dir, exist_ok=True)
+
         # Initialize wandb
-        wandb.init(project=project, entity=entity, name=run_name)
+        wandb.init(project=project, entity=entity, name=run_name, dir=wandb_dir)
 
         # Add log directory to wandb
         wandb.config.update({"log_dir": log_dir})

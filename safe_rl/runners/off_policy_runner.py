@@ -19,7 +19,7 @@ from safe_rl.utils import store_code_state
 
 
 class OffPolicyRunner:
-    """Off-policy runner for training and evaluation (e.g., DDPG, SAC, TD3)."""
+    """Off-policy runner for training and evaluation (e.g., SAC, TD3)."""
 
     def __init__(
         self,
@@ -55,9 +55,9 @@ class OffPolicyRunner:
         if policy_class_name == "SACActorCritic":
             from safe_rl.modules import SACActorCritic
             policy_class = SACActorCritic
-        elif policy_class_name == "DDPGActorCritic":
-            from rsl_rl.modules import DDPGActorCritic
-            policy_class = DDPGActorCritic
+        elif policy_class_name == "SafeSACActorCritic":
+            from safe_rl.modules import SafeSACActorCritic
+            policy_class = SafeSACActorCritic
         else:
             # Try to import from safe_rl.modules first, then fall back to eval
             try:
@@ -76,13 +76,17 @@ class OffPolicyRunner:
         # Initialize algorithm
         alg_class_name = self.alg_cfg.pop("class_name", "SAC")
 
+        # Set cost_limits for safe RL algorithms
+        if alg_class_name == "SafeSAC":
+            self.alg_cfg["cost_limits"] = self.env.cost_limits
+
         # Dynamic import based on algorithm class
         if alg_class_name == "SAC":
             from safe_rl.algorithms import SAC
             alg_class = SAC
-        elif alg_class_name == "DDPG":
-            from rsl_rl.algorithms import DDPG
-            alg_class = DDPG
+        elif alg_class_name == "SafeSAC":
+            from safe_rl.algorithms import SafeSAC
+            alg_class = SafeSAC
         else:
             # Try to import from safe_rl.algorithms first, then fall back to eval
             try:
@@ -157,6 +161,16 @@ class OffPolicyRunner:
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
+        # Safe RL cost tracking
+        self.is_safe_rl = hasattr(self.alg, 'num_costs') and self.alg.num_costs > 0
+        if self.is_safe_rl:
+            num_costs = self.alg.num_costs
+            costbuffers = [deque(maxlen=100) for _ in range(num_costs)]
+            cur_cost_sum = torch.zeros(self.env.num_envs, num_costs, dtype=torch.float, device=self.device)
+        else:
+            costbuffers = None
+            cur_cost_sum = None
+
         # Training loop
         global_step = self.tot_timesteps
         start_iter = self.current_learning_iteration
@@ -167,8 +181,15 @@ class OffPolicyRunner:
 
             # Initialize loss values for logging
             critic_loss = 0.0
+            cost_critic_loss = 0.0
             actor_loss = 0.0
-            noise_std = self.actor_critic.std.mean().item() if hasattr(self.actor_critic, 'std') else 0.0
+            # Get actual action std from the policy (not the placeholder self.std)
+            if hasattr(self.alg, 'get_actual_action_std'):
+                noise_std = self.alg.get_actual_action_std()
+            elif hasattr(self.actor_critic, 'std'):
+                noise_std = self.actor_critic.std.mean().item()
+            else:
+                noise_std = 0.0
 
             # Collect data
             with torch.inference_mode():
@@ -199,14 +220,34 @@ class OffPolicyRunner:
                     else:
                         terminal = dones
 
+                    # Get costs if available (for Safe RL)
+                    costs = None
+                    if self.is_safe_rl and "costs" in infos:
+                        costs = infos["costs"].to(self.device)
+                        # Ensure costs have proper shape [num_envs, num_costs]
+                        if costs.dim() == 1:
+                            costs = costs.unsqueeze(-1)
+                        if costs.shape[-1] != self.alg.num_costs:
+                            costs = costs.expand(-1, self.alg.num_costs)
+
                     # Store transition in replay buffer
-                    self.alg.store_transition(
-                        obs,
-                        action,
-                        rewards,
-                        terminal,  # Use terminal instead of dones for proper bootstrapping
-                        next_obs,
-                    )
+                    if self.is_safe_rl and hasattr(self.alg, 'store_transition'):
+                        self.alg.store_transition(
+                            obs,
+                            action,
+                            rewards,
+                            terminal,
+                            next_obs,
+                            cost=costs,
+                        )
+                    else:
+                        self.alg.store_transition(
+                            obs,
+                            action,
+                            rewards,
+                            terminal,  # Use terminal instead of dones for proper bootstrapping
+                            next_obs,
+                        )
 
                     # Update current observation
                     obs = next_obs
@@ -221,11 +262,24 @@ class OffPolicyRunner:
                     cur_reward_sum += rewards
                     cur_episode_length += 1
 
+                    # Track costs for Safe RL
+                    if self.is_safe_rl and costs is not None:
+                        cur_cost_sum += costs
+
                     # Handle episode completion
                     new_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
                     if new_ids.numel() > 0:
                         rewbuffer.extend(cur_reward_sum[new_ids].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids].cpu().numpy().tolist())
+
+                        # Track episode costs for Safe RL
+                        if self.is_safe_rl and cur_cost_sum is not None:
+                            for cost_idx in range(self.alg.num_costs):
+                                costbuffers[cost_idx].extend(
+                                    cur_cost_sum[new_ids, cost_idx].cpu().numpy().tolist()
+                                )
+                            cur_cost_sum[new_ids] = 0
+
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
 
@@ -235,13 +289,23 @@ class OffPolicyRunner:
 
             # Update policy
             if global_step >= self.update_after and it % self.update_every == 0:
-                update_result = self.alg.update()
+                # For Safe RL, pass current episode costs for PID Lagrangian updates
+                if self.is_safe_rl and costbuffers is not None:
+                    current_costs = [
+                        statistics.mean(costbuffers[i]) if len(costbuffers[i]) > 0 else 0.0
+                        for i in range(self.alg.num_costs)
+                    ]
+                    update_result = self.alg.update(current_costs=current_costs)
+                else:
+                    update_result = self.alg.update()
+
                 if update_result is not None:
                     if isinstance(update_result, tuple):
                         critic_loss, actor_loss, noise_std = update_result
                     elif isinstance(update_result, dict):
                         # Support both naming conventions (critic/critic_loss, actor/actor_loss)
                         critic_loss = update_result.get("critic", update_result.get("critic_loss", 0.0))
+                        cost_critic_loss = update_result.get("cost_critic", update_result.get("cost_critic_loss", 0.0))
                         actor_loss = update_result.get("actor", update_result.get("actor_loss", 0.0))
                         noise_std = update_result.get("noise_std", noise_std)
 
@@ -262,11 +326,13 @@ class OffPolicyRunner:
                     collection_time=collection_time,
                     learn_time=learn_time,
                     critic_loss=critic_loss,
+                    cost_critic_loss=cost_critic_loss,
                     actor_loss=actor_loss,
                     noise_std=noise_std,
                     rewbuffer=rewbuffer,
                     lenbuffer=lenbuffer,
                     ep_infos=ep_infos,
+                    costbuffers=costbuffers if self.is_safe_rl else None,
                 )
 
                 # Save model
@@ -296,11 +362,13 @@ class OffPolicyRunner:
         collection_time: float,
         learn_time: float,
         critic_loss: float,
+        cost_critic_loss: float,
         actor_loss: float,
         noise_std: float,
         rewbuffer: deque,
         lenbuffer: deque,
         ep_infos: list,
+        costbuffers: list[deque] | None = None,
         width: int = 80,
         pad: int = 35,
     ):
@@ -343,6 +411,8 @@ class OffPolicyRunner:
         if self.writer:
             self.writer.add_scalar("Loss/critic", critic_loss, it)
             self.writer.add_scalar("Loss/actor", actor_loss, it)
+            if self.is_safe_rl:
+                self.writer.add_scalar("Loss/cost_critic", cost_critic_loss, it)
             self.writer.add_scalar("Policy/mean_noise_std", noise_std, it)
             self.writer.add_scalar("Perf/total_fps", fps, it)
             self.writer.add_scalar("Perf/collection_time", collection_time, it)
@@ -355,6 +425,23 @@ class OffPolicyRunner:
                     self.writer.add_scalar("Train/mean_reward/time", mean_reward, self.tot_time)
                     self.writer.add_scalar("Train/mean_episode_length/time", mean_length, self.tot_time)
 
+            # Safe RL cost logging
+            if costbuffers is not None and self.is_safe_rl:
+                for cost_idx, costbuffer in enumerate(costbuffers):
+                    if len(costbuffer) > 0:
+                        mean_cost = statistics.mean(costbuffer)
+                        self.writer.add_scalar(f"Train/mean_cost_{cost_idx}", mean_cost, it)
+                        if hasattr(self.alg, 'cost_limits') and cost_idx < len(self.alg.cost_limits):
+                            self.writer.add_scalar(f"Train/cost_limit_{cost_idx}", self.alg.cost_limits[cost_idx], it)
+
+                # Log Lagrangian multiplier info
+                if hasattr(self.alg, 'get_penalty_info'):
+                    penalty_info = self.alg.get_penalty_info()
+                    self.writer.add_scalar("SafeRL/lambda_mean", penalty_info.get("lambda_mean", 0.0), it)
+                    self.writer.add_scalar("SafeRL/lambda_max", penalty_info.get("lambda_max", 0.0), it)
+                    if "alpha" in penalty_info:
+                        self.writer.add_scalar("SafeRL/alpha", penalty_info["alpha"], it)
+
         # Console output
         header = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "
         if len(rewbuffer) > 0:
@@ -364,6 +451,10 @@ class OffPolicyRunner:
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
                 f"""{'Mean action noise std:':>{pad}} {noise_std:.4f}\n"""
                 f"""{'Mean critic loss:':>{pad}} {critic_loss:.4f}\n"""
+            )
+            if self.is_safe_rl:
+                log_string += f"""{f'Mean cost critic loss:':>{pad}} {cost_critic_loss:.4f}\n"""
+            log_string += (
                 f"""{'Mean actor loss:':>{pad}} {actor_loss:.4f}\n"""
                 f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
@@ -375,8 +466,21 @@ class OffPolicyRunner:
                 f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
                 f"""{'Mean action noise std:':>{pad}} {noise_std:.4f}\n"""
                 f"""{'Mean critic loss:':>{pad}} {critic_loss:.4f}\n"""
-                f"""{'Mean actor loss:':>{pad}} {actor_loss:.4f}\n"""
             )
+            if self.is_safe_rl:
+                log_string += f"""{f'Mean cost critic loss:':>{pad}} {cost_critic_loss:.4f}\n"""
+            log_string += f"""{'Mean actor loss:':>{pad}} {actor_loss:.4f}\n"""
+
+        # Add Safe RL cost info to console output
+        if costbuffers is not None and self.is_safe_rl:
+            for cost_idx, costbuffer in enumerate(costbuffers):
+                if len(costbuffer) > 0:
+                    mean_cost = statistics.mean(costbuffer)
+                    cost_limit = self.alg.cost_limits[cost_idx] if hasattr(self.alg, 'cost_limits') else "N/A"
+                    log_string += f"""{f'Mean cost {cost_idx} (limit={cost_limit}):':>{pad}} {mean_cost:.4f}\n"""
+            if hasattr(self.alg, 'lambdas'):
+                lambda_str = ", ".join([f"{l:.4f}" for l in self.alg.lambdas])
+                log_string += f"""{f'Lagrangian multipliers:':>{pad}} [{lambda_str}]\n"""
 
         log_string += ep_string
         log_string += (
@@ -427,7 +531,7 @@ class OffPolicyRunner:
         loaded_dict = torch.load(path, weights_only=False, map_location=self.device)
 
         # Load model
-        self.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        self.actor_critic.load_state_dict(loaded_dict["model_state_dict"], strict=False)
 
         # Load normalizers
         if self.empirical_normalization and "obs_norm_state_dict" in loaded_dict:
@@ -501,6 +605,7 @@ class OffPolicyRunner:
             **self.cfg,
             "wandb_project": self.runner_cfg.get("wandb_project", "safe_rl"),
             "wandb_entity": self.runner_cfg.get("wandb_entity"),
+            "wandb_dir": self.runner_cfg.get("wandb_dir"),
         }
 
         if self.logger_type == "neptune":
