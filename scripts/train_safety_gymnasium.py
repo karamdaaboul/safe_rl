@@ -46,6 +46,7 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str]:
             "runner": {
                 "num_steps_per_env": runner_cfg.get("num_steps_per_env", 1),
                 "save_interval": runner_cfg.get("save_interval", 50),
+                "log_interval": runner_cfg.get("log_interval", 1),
                 "empirical_normalization": runner_cfg.get("empirical_normalization", False),
                 "logger": runner_cfg.get("logger", "tensorboard"),
                 "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),

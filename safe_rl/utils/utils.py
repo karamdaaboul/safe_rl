@@ -146,3 +146,55 @@ def string_to_callable(name: str) -> Callable:
             f" 'module:attribute_name'\nWhile processing input '{name}', received the error:\n {e}."
         )
         raise ValueError(msg)
+
+
+class TensorAverageMeterDict:
+    """Accumulates tensor metrics and computes running averages.
+
+    Similar to FastSAC implementation - accumulates metrics across multiple
+    update steps, then averages and clears at logging intervals.
+    """
+
+    def __init__(self):
+        self.metrics = {}
+        self.counts = {}
+
+    def add(self, new_metrics: dict):
+        """Add new metric values to the accumulator.
+
+        Args:
+            new_metrics: Dictionary of metric names to values (tensors or scalars)
+        """
+        for key, value in new_metrics.items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach()
+
+            if key not in self.metrics:
+                self.metrics[key] = value
+                self.counts[key] = 1
+            else:
+                self.metrics[key] = self.metrics[key] + value
+                self.counts[key] += 1
+
+    def mean_and_clear(self) -> dict:
+        """Compute mean of accumulated metrics and clear the accumulator.
+
+        Returns:
+            Dictionary of metric names to averaged values
+        """
+        averaged = {}
+        for key in self.metrics:
+            averaged[key] = self.metrics[key] / self.counts[key]
+            if isinstance(averaged[key], torch.Tensor):
+                averaged[key] = averaged[key].item()
+
+        # Clear after computing means
+        self.metrics.clear()
+        self.counts.clear()
+
+        return averaged
+
+    def clear(self):
+        """Clear all accumulated metrics."""
+        self.metrics.clear()
+        self.counts.clear()

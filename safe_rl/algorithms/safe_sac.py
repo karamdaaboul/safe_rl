@@ -134,6 +134,8 @@ class SafeSAC:
         self.pid_delta_p_ema_alpha = pid_delta_p_ema_alpha
         self.pid_delta_d_ema_alpha = pid_delta_d_ema_alpha
         self.pid_d_delay = pid_d_delay
+        # Integral anti-windup: prevent integral term from growing too large
+        self.pid_i_max = lambda_max * 0.5  # Cap integral at 50% of lambda_max
 
         # Initialize Lagrangian multipliers
         if lambda_init is None:
@@ -299,10 +301,13 @@ class SafeSAC:
             # Calculate error (delta): positive means violation
             delta = current_cost - cost_limit
 
-            # === Integral term (I) ===
+            # === Integral term (I) with anti-windup ===
             self.pid_i[cost_idx] = max(0.0, self.pid_i[cost_idx] + delta * self.ki)
             if self.diff_norm:
                 self.pid_i[cost_idx] = max(0.0, min(1.0, self.pid_i[cost_idx]))
+            else:
+                # Prevent integral windup by capping at pid_i_max
+                self.pid_i[cost_idx] = min(self.pid_i[cost_idx], self.pid_i_max)
 
             # === Proportional term (P) with EMA smoothing ===
             alpha_p = self.pid_delta_p_ema_alpha

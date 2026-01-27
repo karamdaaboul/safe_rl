@@ -23,12 +23,12 @@ algorithm:
   num_updates_per_step: 1  # gradient steps per environment step
   max_grad_norm: 1.0
 
-  # -- PID Lagrangian parameters (aligned with PPOL_PID / OmniSafe)
-  lagrangian_pid: [0.1, 0.01, 0.01]  # [Kp, Ki, Kd]
+  # -- PID Lagrangian parameters (IMPROVED - fixes integral windup)
+  lagrangian_pid: [0.05, 0.01, 0.05]  # [Kp, Ki, Kd] - doubled Ki for faster response
   lambda_init: [0.001]
-  lambda_max: 100.0
-  pid_delta_p_ema_alpha: 0.95
-  pid_delta_d_ema_alpha: 0.95
+  lambda_max: 25.0  # Reduced from 100.0 to prevent excessive penalties
+  # "smoothing factor" for the error. Lower values = faster response.
+  pid_delta_p_ema_alpha: 0.90  # Reduced from 0.99 for faster decay
   pid_d_delay: 10
   sum_norm: true
   diff_norm: false
@@ -80,6 +80,9 @@ runner:
   load_run: -1
   resume_path: null
   checkpoint: -1
+
+  # Logging frequency
+  log_interval: 1000
 
 runner_class_name: OffPolicyRunner
 seed: 1

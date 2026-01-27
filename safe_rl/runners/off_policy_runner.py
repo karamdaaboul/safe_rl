@@ -15,7 +15,7 @@ import torch
 import safe_rl
 from safe_rl.env import VecEnv
 from safe_rl.modules import EmpiricalNormalization
-from safe_rl.utils import store_code_state
+from safe_rl.utils import store_code_state, TensorAverageMeterDict
 
 
 class OffPolicyRunner:
@@ -109,6 +109,7 @@ class OffPolicyRunner:
         # Training configuration
         self.num_steps_per_env = int(self.runner_cfg.get("num_steps_per_env", 1))
         self.save_interval = int(self.runner_cfg.get("save_interval", 50))
+        self.log_interval = int(self.runner_cfg.get("log_interval", 1))  # Log every N iterations (FastSAC-style)
         self.start_random_steps = int(self.runner_cfg.get("start_random_steps", 10000))
         self.update_after = int(self.runner_cfg.get("update_after", 1000))
         self.update_every = int(self.runner_cfg.get("update_every", 50))
@@ -171,6 +172,9 @@ class OffPolicyRunner:
             costbuffers = None
             cur_cost_sum = None
 
+        # Step-level metric accumulation (FastSAC-style)
+        step_metrics = TensorAverageMeterDict()
+
         # Training loop
         global_step = self.tot_timesteps
         start_iter = self.current_learning_iteration
@@ -198,7 +202,11 @@ class OffPolicyRunner:
                     if global_step < self.start_random_steps:
                         action = self._sample_random_action()
                     else:
-                        action = self.actor_critic.act_with_noise(obs)
+                        # Use algorithm's act method if available (e.g., for shielding)
+                        if hasattr(self.alg, 'act'):
+                            action = self.alg.act(obs, eval_mode=False)
+                        else:
+                            action = self.actor_critic.act_with_noise(obs)
 
                     # Step environment
                     next_obs, rewards, dones, infos = self.env.step(action.to(self.env.device))
@@ -252,6 +260,20 @@ class OffPolicyRunner:
                     # Update current observation
                     obs = next_obs
                     global_step += self.env.num_envs
+
+                    # Accumulate step-level metrics (FastSAC-style)
+                    step_metrics_dict = {
+                        "step_reward": rewards.mean(),
+                    }
+                    if self.is_safe_rl and costs is not None:
+                        # Track each cost dimension separately
+                        for cost_idx in range(costs.shape[-1] if costs.dim() > 1 else 1):
+                            if costs.dim() > 1:
+                                step_metrics_dict[f"step_cost_{cost_idx}"] = costs[:, cost_idx].mean()
+                            else:
+                                step_metrics_dict["step_cost_0"] = costs.mean()
+                                break
+                    step_metrics.add(step_metrics_dict)
 
                     # Book keeping for logging
                     if "episode" in infos:
@@ -309,6 +331,16 @@ class OffPolicyRunner:
                         actor_loss = update_result.get("actor", update_result.get("actor_loss", 0.0))
                         noise_std = update_result.get("noise_std", noise_std)
 
+                    # Accumulate loss metrics (FastSAC-style)
+                    loss_metrics = {
+                        "critic_loss": critic_loss,
+                        "actor_loss": actor_loss,
+                        "noise_std": noise_std,
+                    }
+                    if self.is_safe_rl:
+                        loss_metrics["cost_critic_loss"] = cost_critic_loss
+                    step_metrics.add(loss_metrics)
+
             stop = time.time()
             learn_time = stop - start
 
@@ -316,8 +348,11 @@ class OffPolicyRunner:
             self.tot_timesteps = global_step
             self.current_learning_iteration = it
 
-            # Logging
-            if self.log_dir is not None:
+            # Logging (only at intervals - FastSAC-style)
+            if self.log_dir is not None and it % self.log_interval == 0:
+                # Average and clear accumulated metrics (FastSAC-style)
+                averaged_step_metrics = step_metrics.mean_and_clear()
+
                 self.log(
                     it=it,
                     tot_iter=tot_iter,
@@ -333,11 +368,12 @@ class OffPolicyRunner:
                     lenbuffer=lenbuffer,
                     ep_infos=ep_infos,
                     costbuffers=costbuffers if self.is_safe_rl else None,
+                    averaged_step_metrics=averaged_step_metrics,
                 )
 
-                # Save model
-                if it % self.save_interval == 0:
-                    self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+            # Save model
+            if self.log_dir is not None and it % self.save_interval == 0:
+                self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
             # Clear episode infos
             ep_infos.clear()
@@ -369,6 +405,7 @@ class OffPolicyRunner:
         lenbuffer: deque,
         ep_infos: list,
         costbuffers: list[deque] | None = None,
+        averaged_step_metrics: dict | None = None,
         width: int = 80,
         pad: int = 35,
     ):
@@ -409,28 +446,54 @@ class OffPolicyRunner:
 
         # TensorBoard/Logger writing
         if self.writer:
-            self.writer.add_scalar("Loss/critic", critic_loss, it)
-            self.writer.add_scalar("Loss/actor", actor_loss, it)
-            if self.is_safe_rl:
-                self.writer.add_scalar("Loss/cost_critic", cost_critic_loss, it)
-            self.writer.add_scalar("Policy/mean_noise_std", noise_std, it)
+            # Step-level metrics (FastSAC-style - always available)
+            if averaged_step_metrics:
+                # Log smoothed step-level metrics
+                if "step_reward" in averaged_step_metrics:
+                    self.writer.add_scalar("Train/step_reward", averaged_step_metrics["step_reward"], it)
+
+                # Log step-level costs for Safe RL
+                if self.is_safe_rl:
+                    for key, value in averaged_step_metrics.items():
+                        if key.startswith("step_cost_"):
+                            cost_idx = key.split("_")[-1]
+                            self.writer.add_scalar(f"Train/step_cost_{cost_idx}", value, it)
+
+                # Log smoothed losses
+                if "critic_loss" in averaged_step_metrics:
+                    self.writer.add_scalar("Loss/critic", averaged_step_metrics["critic_loss"], it)
+                if "actor_loss" in averaged_step_metrics:
+                    self.writer.add_scalar("Loss/actor", averaged_step_metrics["actor_loss"], it)
+                if "cost_critic_loss" in averaged_step_metrics and self.is_safe_rl:
+                    self.writer.add_scalar("Loss/cost_critic", averaged_step_metrics["cost_critic_loss"], it)
+                if "noise_std" in averaged_step_metrics:
+                    self.writer.add_scalar("Policy/mean_noise_std", averaged_step_metrics["noise_std"], it)
+            else:
+                # Fallback to old values if no step metrics
+                self.writer.add_scalar("Loss/critic", critic_loss, it)
+                self.writer.add_scalar("Loss/actor", actor_loss, it)
+                if self.is_safe_rl:
+                    self.writer.add_scalar("Loss/cost_critic", cost_critic_loss, it)
+                self.writer.add_scalar("Policy/mean_noise_std", noise_std, it)
+
             self.writer.add_scalar("Perf/total_fps", fps, it)
             self.writer.add_scalar("Perf/collection_time", collection_time, it)
             self.writer.add_scalar("Perf/learning_time", learn_time, it)
 
+            # Episode-based metrics (only when episodes complete)
             if len(rewbuffer) > 0:
-                self.writer.add_scalar("Train/mean_reward", mean_reward, it)
-                self.writer.add_scalar("Train/mean_episode_length", mean_length, it)
+                self.writer.add_scalar("Train/episode_reward", mean_reward, it)
+                self.writer.add_scalar("Train/episode_length", mean_length, it)
                 if self.logger_type != "wandb":
-                    self.writer.add_scalar("Train/mean_reward/time", mean_reward, self.tot_time)
-                    self.writer.add_scalar("Train/mean_episode_length/time", mean_length, self.tot_time)
+                    self.writer.add_scalar("Train/episode_reward/time", mean_reward, self.tot_time)
+                    self.writer.add_scalar("Train/episode_length/time", mean_length, self.tot_time)
 
-            # Safe RL cost logging
+            # Safe RL cost logging (episode-based)
             if costbuffers is not None and self.is_safe_rl:
                 for cost_idx, costbuffer in enumerate(costbuffers):
                     if len(costbuffer) > 0:
                         mean_cost = statistics.mean(costbuffer)
-                        self.writer.add_scalar(f"Train/mean_cost_{cost_idx}", mean_cost, it)
+                        self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, it)
                         if hasattr(self.alg, 'cost_limits') and cost_idx < len(self.alg.cost_limits):
                             self.writer.add_scalar(f"Train/cost_limit_{cost_idx}", self.alg.cost_limits[cost_idx], it)
 
@@ -442,42 +505,59 @@ class OffPolicyRunner:
                     if "alpha" in penalty_info:
                         self.writer.add_scalar("SafeRL/alpha", penalty_info["alpha"], it)
 
+                # Log shield statistics
+                if hasattr(self.alg, 'get_shield_stats'):
+                    shield_stats = self.alg.get_shield_stats()
+                    self.writer.add_scalar("Shield/rejections", shield_stats.get("rejections", 0), it)
+                    self.writer.add_scalar("Shield/total_samples", shield_stats.get("total_samples", 0), it)
+                    self.writer.add_scalar("Shield/avg_resamples", shield_stats.get("avg_resamples", 0.0), it)
+
         # Console output
         header = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "
-        if len(rewbuffer) > 0:
-            log_string = (
-                f"""{'#' * width}\n"""
-                f"""{header.center(width, ' ')}\n\n"""
-                f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
-                f"""{'Mean action noise std:':>{pad}} {noise_std:.4f}\n"""
-                f"""{'Mean critic loss:':>{pad}} {critic_loss:.4f}\n"""
-            )
-            if self.is_safe_rl:
-                log_string += f"""{f'Mean cost critic loss:':>{pad}} {cost_critic_loss:.4f}\n"""
-            log_string += (
-                f"""{'Mean actor loss:':>{pad}} {actor_loss:.4f}\n"""
-                f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
-                f"""{'Mean episode length:':>{pad}} {mean_length:.2f}\n"""
-            )
-        else:
-            log_string = (
-                f"""{'#' * width}\n"""
-                f"""{header.center(width, ' ')}\n\n"""
-                f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
-                f"""{'Mean action noise std:':>{pad}} {noise_std:.4f}\n"""
-                f"""{'Mean critic loss:':>{pad}} {critic_loss:.4f}\n"""
-            )
-            if self.is_safe_rl:
-                log_string += f"""{f'Mean cost critic loss:':>{pad}} {cost_critic_loss:.4f}\n"""
-            log_string += f"""{'Mean actor loss:':>{pad}} {actor_loss:.4f}\n"""
 
-        # Add Safe RL cost info to console output
+        # Use step metrics if available, otherwise fallback to last iteration values
+        display_critic_loss = averaged_step_metrics.get("critic_loss", critic_loss) if averaged_step_metrics else critic_loss
+        display_actor_loss = averaged_step_metrics.get("actor_loss", actor_loss) if averaged_step_metrics else actor_loss
+        display_noise_std = averaged_step_metrics.get("noise_std", noise_std) if averaged_step_metrics else noise_std
+        display_cost_critic_loss = averaged_step_metrics.get("cost_critic_loss", cost_critic_loss) if averaged_step_metrics else cost_critic_loss
+
+        log_string = (
+            f"""{'#' * width}\n"""
+            f"""{header.center(width, ' ')}\n\n"""
+            f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
+            f"""{'Mean action noise std:':>{pad}} {display_noise_std:.4f}\n"""
+            f"""{'Mean critic loss:':>{pad}} {display_critic_loss:.4f}\n"""
+        )
+        if self.is_safe_rl:
+            log_string += f"""{f'Mean cost critic loss:':>{pad}} {display_cost_critic_loss:.4f}\n"""
+        log_string += f"""{'Mean actor loss:':>{pad}} {display_actor_loss:.4f}\n"""
+
+        # Step-level metrics (always available - FastSAC style)
+        if averaged_step_metrics and "step_reward" in averaged_step_metrics:
+            log_string += f"""{'Step reward (avg):':>{pad}} {averaged_step_metrics['step_reward']:.4f}\n"""
+
+        # Step-level costs for Safe RL
+        if averaged_step_metrics and self.is_safe_rl:
+            for key, value in averaged_step_metrics.items():
+                if key.startswith("step_cost_"):
+                    cost_idx = key.split("_")[-1]
+                    cost_limit = self.alg.cost_limits[int(cost_idx)] if hasattr(self.alg, 'cost_limits') else "N/A"
+                    log_string += f"""{'Step cost %s (avg):' % cost_idx:>{pad}} {value:.4f} (limit={cost_limit})\n"""
+
+        # Episode-based metrics (only when available)
+        if len(rewbuffer) > 0:
+            log_string += (
+                f"""{'Episode reward (mean):':>{pad}} {mean_reward:.2f} [{len(rewbuffer)} episodes]\n"""
+                f"""{'Episode length (mean):':>{pad}} {mean_length:.2f}\n"""
+            )
+
+        # Add Safe RL episode cost info to console output
         if costbuffers is not None and self.is_safe_rl:
             for cost_idx, costbuffer in enumerate(costbuffers):
                 if len(costbuffer) > 0:
                     mean_cost = statistics.mean(costbuffer)
                     cost_limit = self.alg.cost_limits[cost_idx] if hasattr(self.alg, 'cost_limits') else "N/A"
-                    log_string += f"""{f'Mean cost {cost_idx} (limit={cost_limit}):':>{pad}} {mean_cost:.4f}\n"""
+                    log_string += f"""{f'Episode cost {cost_idx} (mean):':>{pad}} {mean_cost:.4f} (limit={cost_limit}) [{len(costbuffer)} episodes]\n"""
             if hasattr(self.alg, 'lambdas'):
                 lambda_str = ", ".join([f"{l:.4f}" for l in self.alg.lambdas])
                 log_string += f"""{f'Lagrangian multipliers:':>{pad}} [{lambda_str}]\n"""

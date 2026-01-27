@@ -425,7 +425,8 @@ class OnPolicyRunner:
                         
                         # Log individual constraint metrics
                         self.writer.add_scalar(f"SafeRL/mean_cost_constraint_{cost_idx}", mean_cost, locs["it"])
-                        
+                        self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, locs["it"])  # For cross-algorithm comparison
+
                         if penalty_info:
                             cost_limit = penalty_info["cost_limits"][cost_idx]
                             kappa = penalty_info["kappa_list"][cost_idx]
@@ -470,8 +471,8 @@ class OnPolicyRunner:
                         for cost_idx, integral_error in enumerate(penalty_info["integral_errors"]):
                             self.writer.add_scalar(f"SafeRL/integral_error_constraint_{cost_idx}", integral_error, locs["it"])
             # everything else
-            self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
-            self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
+            self.writer.add_scalar("Train/episode_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
+            self.writer.add_scalar("Train/episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
             if self.logger_type != "wandb":  # wandb does not support non-integer x-axis logging
                 self.writer.add_scalar("Train/mean_reward/time", statistics.mean(locs["rewbuffer"]), self.tot_time)
                 self.writer.add_scalar(
