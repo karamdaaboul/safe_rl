@@ -25,7 +25,7 @@ algorithm:
   max_grad_norm: 1.0
 
   # -- Safe RL parameters (PID Lagrangian)
-  # cost_limits: [25.0]  # Set by environment, don't override here
+  cost_limits: [25.0]
   lagrangian_pid: [0.1, 0.01, 0.01]  # (Kp, Ki, Kd)
   pid_delta_p_ema_alpha: 0.95
   pid_delta_d_ema_alpha: 0.95
@@ -55,7 +55,7 @@ policy:
 runner:
   # -- Collection
   num_steps_per_env: 1  # steps per environment per iteration
-  max_iterations: 1000000  # total environment steps
+  max_iterations: 1500000  # total environment steps
 
   # -- Replay buffer
   max_size: 1000000  # replay buffer size

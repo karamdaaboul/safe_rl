@@ -21,8 +21,18 @@ class WandbSummaryWriter(SummaryWriter):
     def __init__(self, log_dir: str, flush_secs: int, cfg):
         super().__init__(log_dir, flush_secs)
 
-        # Get the run name
-        run_name = os.path.split(log_dir)[-1]
+        # Get the run name from config if provided, otherwise use log_dir basename
+        # For OffPolicyRunner, check cfg["runner"]["run_name"]
+        # For OnPolicyRunner, check cfg["run_name"]
+        run_name = None
+        if "runner" in cfg and "run_name" in cfg["runner"] and cfg["runner"]["run_name"]:
+            run_name = cfg["runner"]["run_name"]
+        elif "run_name" in cfg and cfg["run_name"]:
+            run_name = cfg["run_name"]
+
+        # Fallback to timestamp-based name from log_dir
+        if not run_name:
+            run_name = os.path.split(log_dir)[-1]
 
         try:
             project = cfg["wandb_project"]

@@ -34,7 +34,7 @@ algorithm:
   diff_norm: false
 
   # Cost limits for safety constraints
-  cost_limits: [50.0]  # Can be overridden via --cost_limits CLI argument
+  cost_limits: [25.0]  # Can be overridden via --cost_limits CLI argument
 
 policy:
   class_name: SafeSACActorCritic
@@ -53,7 +53,7 @@ runner:
   num_steps_per_env: 1  # steps per environment per iteration
 
   # -- Training duration
-  max_iterations: 1000000
+  max_iterations: 1500000
 
   # -- Replay buffer
   max_size: 1000000  # replay buffer size

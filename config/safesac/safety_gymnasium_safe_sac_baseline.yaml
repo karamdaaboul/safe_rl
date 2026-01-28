@@ -32,7 +32,7 @@ algorithm:
   pid_d_delay: 10
   sum_norm: true
   diff_norm: false
-  cost_limits: [50.0]
+  cost_limits: [25.0]
 
 policy:
   class_name: SafeSACActorCritic
@@ -45,7 +45,7 @@ policy:
 
 runner:
   num_steps_per_env: 1
-  max_iterations: 1000000
+  max_iterations: 1500000
   max_size: 1000000
   start_random_steps: 5000
   update_after: 5000

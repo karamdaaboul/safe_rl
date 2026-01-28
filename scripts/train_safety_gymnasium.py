@@ -17,11 +17,11 @@ OFF_POLICY_ALGORITHMS = {"SAC", "TD3"}
 ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "Distillation"}
 
 
-def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str]:
+def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
     """Load training configuration from YAML file.
 
     Returns:
-        Tuple of (train_cfg dict, max_iterations, runner_class_name)
+        Tuple of (train_cfg dict, max_iterations, runner_class_name, experiment_name)
     """
     with open(config_path, "r", encoding="utf-8") as file:
         cfg = yaml.safe_load(file)
@@ -29,6 +29,7 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str]:
     algorithm_cfg = cfg["algorithm"]
     policy_cfg = cfg["policy"]
     runner_cfg = cfg.get("runner", {})
+    experiment_name = runner_cfg.get("experiment_name", "")
 
     # Determine runner class from config or algorithm type
     algorithm_name = algorithm_cfg.get("class_name", "PPO")
@@ -78,7 +79,7 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str]:
                 algorithm_cfg["symmetry_cfg"] = None
 
     max_iterations = runner_cfg.get("max_iterations", 1000)
-    return train_cfg, max_iterations, runner_class_name
+    return train_cfg, max_iterations, runner_class_name, experiment_name
 
 
 def parse_cost_limits(cost_limits: str | None) -> list[float] | None:
@@ -122,7 +123,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    train_cfg, max_iterations, runner_class_name = load_train_cfg(args.config)
+    train_cfg, max_iterations, runner_class_name, experiment_name = load_train_cfg(args.config)
     algorithm_cfg = train_cfg["algorithm"]
 
     # Apply CLI overrides to algorithm config
@@ -202,6 +203,14 @@ def main() -> None:
     alg_name = algorithm_cfg.get("class_name", "unknown")
     log_dir = os.path.join(args.log_dir, args.env_id, alg_name, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(log_dir, exist_ok=True)
+
+    # Set wandb run name from experiment_name + num_envs
+    if experiment_name:
+        run_name = f"{experiment_name}_{args.num_envs}"
+        if runner_class_name == "OffPolicyRunner":
+            train_cfg["runner"]["run_name"] = run_name
+        else:
+            train_cfg["run_name"] = run_name
 
     # Select runner based on algorithm type
     if runner_class_name == "OffPolicyRunner":
