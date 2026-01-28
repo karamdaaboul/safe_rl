@@ -33,7 +33,8 @@ algorithm:
   sum_norm: true
   diff_norm: false
 
-  # cost_limits will be set via command line or env wrapper
+  # Cost limits for safety constraints
+  cost_limits: [50.0]  # Can be overridden via --cost_limits CLI argument
 
 policy:
   class_name: SafeSACActorCritic

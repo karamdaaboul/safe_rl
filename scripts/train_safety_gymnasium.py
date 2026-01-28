@@ -180,11 +180,16 @@ def main() -> None:
     if args.max_iterations is not None:
         max_iterations = args.max_iterations
 
+    # Resolve cost_limits: CLI takes precedence, then config, then None
     cost_limits = parse_cost_limits(args.cost_limits)
+    if cost_limits is None and "cost_limits" in algorithm_cfg:
+        # Use cost_limits from config if not provided via CLI
+        cost_limits = algorithm_cfg["cost_limits"]
 
     # Pass cost_limits to algorithm config for Safe RL algorithms
     if algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID") and cost_limits is not None:
         algorithm_cfg["cost_limits"] = cost_limits
+
     env = SafetyGymnasiumVecEnv(
         env_id=args.env_id,
         num_envs=args.num_envs,
