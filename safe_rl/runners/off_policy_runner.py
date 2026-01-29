@@ -77,8 +77,17 @@ class OffPolicyRunner:
         alg_class_name = self.alg_cfg.pop("class_name", "SAC")
 
         # Set cost_limits for safe RL algorithms
+        # Prioritize cost_limits from config, fall back to environment
         if alg_class_name == "SafeSAC":
-            self.alg_cfg["cost_limits"] = self.env.cost_limits
+            if "cost_limits" not in self.alg_cfg or self.alg_cfg["cost_limits"] is None:
+                if hasattr(self.env, "cost_limits") and self.env.cost_limits is not None:
+                    self.alg_cfg["cost_limits"] = self.env.cost_limits
+                else:
+                    raise ValueError(
+                        f"cost_limits must be specified for safe RL algorithm {alg_class_name}. "
+                        "Please specify cost_limits in the config file under 'algorithm.cost_limits' or "
+                        "pass --cost_limits argument to the training script."
+                    )
 
         # Dynamic import based on algorithm class
         if alg_class_name == "SAC":
