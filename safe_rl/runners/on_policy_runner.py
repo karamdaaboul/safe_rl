@@ -85,8 +85,17 @@ class OnPolicyRunner:
             if policy_class_name == "ActorCritic":
                 policy_class_name = "ActorCriticCost"
             # Set cost_limits and num_costs for safe RL algorithms
-            self.alg_cfg["cost_limits"] = self.env.cost_limits
-            self.policy_cfg["num_costs"] = len(self.env.cost_limits)
+            # Prioritize cost_limits from config, fall back to environment
+            if "cost_limits" not in self.alg_cfg or self.alg_cfg["cost_limits"] is None:
+                if hasattr(self.env, "cost_limits") and self.env.cost_limits is not None:
+                    self.alg_cfg["cost_limits"] = self.env.cost_limits
+                else:
+                    raise ValueError(
+                        f"cost_limits must be specified for safe RL algorithm {self.alg_cfg['class_name']}. "
+                        "Please specify cost_limits in the config file under 'algorithm.cost_limits' or "
+                        "pass --cost_limits argument to the training script."
+                    )
+            self.policy_cfg["num_costs"] = len(self.alg_cfg["cost_limits"])
         
         policy_class = eval(policy_class_name)
         policy: ActorCritic | ActorCriticCost | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(

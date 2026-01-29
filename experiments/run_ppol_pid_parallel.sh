@@ -1,18 +1,18 @@
 #!/bin/bash -l
-#SBATCH --job-name=ppol_pid_parallel
+#SBATCH --job-name=ppol_pid_pid_sweep
 #SBATCH --account=hai_1075
 #SBATCH --partition=booster
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48
 #SBATCH --gres=gpu:3
-#SBATCH --time=08:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=/p/scratch/hai_1075/safe_rl/logs/%x-%j.out
 #SBATCH --error=/p/scratch/hai_1075/safe_rl/logs/%x-%j.err
 
 set -euo pipefail
 
-# ---- modules (must match your working interactive setup) ----
+# ---- modules ----
 module --force purge
 module load Stages/2024
 module load GCCcore/.12.3.0
@@ -25,11 +25,9 @@ source /p/project1/hai_1075/venvs/safe_rl311/bin/activate
 export MUJOCO_GL=egl
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-# Disable wandb interactive prompt + internet
+# Wandb offline mode
 export WANDB_MODE=offline
 export WANDB_SILENT=true
-
-# (Optional) if your code reads this:
 export GIT_PYTHON_REFRESH=quiet
 
 # log dirs
@@ -38,49 +36,56 @@ mkdir -p $SCR/safe_rl/logs $SCR/safe_rl/runs
 
 cd /p/project1/hai_1075/workspaces/safe_rl
 
-# ---- Cost thresholds to sweep ----
-COST_LIMIT_1=10.0
-COST_LIMIT_2=25.0
-COST_LIMIT_3=50.0
+# ---- Environment settings ----
+ENV_ID="SafetyCarGoal1-v0"
+NUM_ENVS=32
+MAX_ITERATIONS=100000
 
-# ---- train in parallel ----
-# Training 1: PPOL_PID with cost_limit=10.0 on GPU 0
+echo "=========================================="
+echo "PPOL_PID Parameter Sweep - Batch 1"
+echo "Cost Limit: 25.0 (all configs)"
+echo "Testing 3 configurations in parallel"
+echo "=========================================="
+
+# Config 1: PI Controller Only (no derivative - most stable)
 python -u scripts/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 40 \
-  --config config/safety_gymnasium_ppol_pid.yaml \
-  --cost_limits $COST_LIMIT_1 \
+  --env_id $ENV_ID \
+  --num_envs $NUM_ENVS \
+  --config config/ppol_pid/safety_gymnasium_ppol_pid_pi_only.yaml \
   --device cuda:0 \
-  2>&1 | sed "s/^/[PPOL_PID-${COST_LIMIT_1}] /" &
+  --max_iterations $MAX_ITERATIONS \
+  2>&1 | sed "s/^/[PI-Only] /" &
+PID1=$!
 
-PID_PPOL1=$!
-
-# Training 2: PPOL_PID with cost_limit=25.0 on GPU 1
+# Config 2: Low Kd (reduced derivative oscillations)
 python -u scripts/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 40 \
-  --config config/safety_gymnasium_ppol_pid.yaml \
-  --cost_limits $COST_LIMIT_2 \
+  --env_id $ENV_ID \
+  --num_envs $NUM_ENVS \
+  --config config/ppol_pid/safety_gymnasium_ppol_pid_low_kd.yaml \
   --device cuda:1 \
-  2>&1 | sed "s/^/[PPOL_PID-${COST_LIMIT_2}] /" &
+  --max_iterations $MAX_ITERATIONS \
+  2>&1 | sed "s/^/[Low-Kd] /" &
+PID2=$!
 
-PID_PPOL2=$!
-
-# Training 3: PPOL_PID with cost_limit=50.0 on GPU 2
+# Config 3: Baseline (current settings for comparison)
 python -u scripts/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 40 \
-  --config config/safety_gymnasium_ppol_pid.yaml \
-  --cost_limits $COST_LIMIT_3 \
+  --env_id $ENV_ID \
+  --num_envs $NUM_ENVS \
+  --config config/ppol_pid/safety_gymnasium_ppol_pid_baseline.yaml \
   --device cuda:2 \
-  2>&1 | sed "s/^/[PPOL_PID-${COST_LIMIT_3}] /" &
+  --max_iterations $MAX_ITERATIONS \
+  2>&1 | sed "s/^/[Baseline] /" &
+PID3=$!
 
-PID_PPOL3=$!
-
-echo "Started PPOL_PID training with cost_limit=$COST_LIMIT_1 (PID: $PID_PPOL1) on cuda:0"
-echo "Started PPOL_PID training with cost_limit=$COST_LIMIT_2 (PID: $PID_PPOL2) on cuda:1"
-echo "Started PPOL_PID training with cost_limit=$COST_LIMIT_3 (PID: $PID_PPOL3) on cuda:2"
+echo "Started 3 configs in parallel:"
+echo "  cuda:0 - PI-Only      (PID: $PID1)"
+echo "  cuda:1 - Low-Kd       (PID: $PID2)"
+echo "  cuda:2 - Baseline     (PID: $PID3)"
 
 # Wait for all to finish
-wait $PID_PPOL1 $PID_PPOL2 $PID_PPOL3
-echo "All three PPOL_PID training runs completed."
+wait $PID1 $PID2 $PID3
+
+echo ""
+echo "=========================================="
+echo "Batch 1 completed!"
+echo "=========================================="
