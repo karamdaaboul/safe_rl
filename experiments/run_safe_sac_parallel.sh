@@ -38,7 +38,7 @@ cd /p/project1/hai_1075/workspaces/safe_rl
 
 # ---- Environment settings ----
 ENV_ID="SafetyCarGoal1-v0"
-NUM_ENVS=32
+NUM_ENVS=96
 MAX_ITERATIONS=100000
 
 echo "=========================================="
