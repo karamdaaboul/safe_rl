@@ -8,6 +8,7 @@ dist/*
 
 # cache
 __pycache__
+.pyc
 .pytest_cache
 
 # vs code
@@ -17,3 +18,4 @@ __pycache__
 wandb/*
 outputs/*
 logs/*
+AGENTS.md

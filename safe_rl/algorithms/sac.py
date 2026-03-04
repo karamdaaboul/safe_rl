@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,6 +48,7 @@ class SAC:
         # Training parameters
         batch_size: int = 256,
         num_updates_per_step: int = 1,
+        policy_frequency: int = 1,
         max_grad_norm: float = 1.0,
         # Device
         device: str = "cpu",
@@ -67,6 +70,7 @@ class SAC:
             target_entropy: Target entropy for auto-tuning. If None, uses -dim(action).
             batch_size: Mini-batch size for updates.
             num_updates_per_step: Number of gradient updates per environment step.
+            policy_frequency: Frequency of actor/alpha updates relative to critic updates.
             max_grad_norm: Maximum gradient norm for clipping.
             device: Device to run on.
             multi_gpu_cfg: Multi-GPU configuration (for compatibility).
@@ -83,6 +87,7 @@ class SAC:
         self.tau = tau
         self.batch_size = batch_size
         self.num_updates_per_step = num_updates_per_step
+        self.policy_frequency = max(1, policy_frequency)
         self.max_grad_norm = max_grad_norm
 
         # Entropy coefficient (alpha)
@@ -94,7 +99,7 @@ class SAC:
             else:
                 self.target_entropy = target_entropy
             # Log alpha for numerical stability
-            self.log_alpha = torch.tensor([0.0], requires_grad=True, device=device)
+            self.log_alpha = torch.tensor([math.log(alpha)], requires_grad=True, device=device)
             self.alpha_optimizer = optim.Adam([self.log_alpha], lr=alpha_lr)
         else:
             self.log_alpha = torch.tensor([alpha], device=device).log()
@@ -164,6 +169,8 @@ class SAC:
         reward: torch.Tensor,
         done: torch.Tensor,
         next_obs: torch.Tensor,
+        critic_obs: torch.Tensor | None = None,
+        next_critic_obs: torch.Tensor | None = None,
     ) -> None:
         """Store a transition in the replay buffer.
 
@@ -176,7 +183,12 @@ class SAC:
         """
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
-        self.storage.add(obs, action, reward, done, next_obs)
+        extras = {}
+        if critic_obs is not None:
+            extras["critic_observations"] = critic_obs
+        if next_critic_obs is not None:
+            extras["next_critic_observations"] = next_critic_obs
+        self.storage.add(obs, action, reward, done, next_obs, **extras)
 
     def update(self) -> dict[str, float]:
         """Perform SAC update step.
@@ -191,33 +203,40 @@ class SAC:
         total_actor_loss = 0.0
         total_alpha_loss = 0.0
 
-        for _ in range(self.num_updates_per_step):
+        actor_updates = 0
+
+        for update_idx in range(self.num_updates_per_step):
             # Sample batch
             batch = self.storage.sample(self.batch_size)
             obs = batch["observations"]
+            critic_obs = batch.get("critic_observations", obs)
             actions = batch["actions"]
             rewards = batch["rewards"]
             dones = batch["dones"]
             next_obs = batch["next_observations"]
+            next_critic_obs = batch.get("next_critic_observations", next_obs)
 
             # Update critic
-            critic_loss = self._update_critic(obs, actions, rewards, dones, next_obs)
+            critic_loss = self._update_critic(critic_obs, actions, rewards, dones, next_critic_obs)
             total_critic_loss += critic_loss
 
             # Update actor and alpha
-            actor_loss, alpha_loss = self._update_actor_and_alpha(obs)
-            total_actor_loss += actor_loss
-            total_alpha_loss += alpha_loss
+            if update_idx % self.policy_frequency == 0:
+                actor_loss, alpha_loss = self._update_actor_and_alpha(obs)
+                total_actor_loss += actor_loss
+                total_alpha_loss += alpha_loss
+                actor_updates += 1
 
             # Soft update target networks
             self.policy.soft_update_targets(self.tau)
 
         # Average losses
         num_updates = self.num_updates_per_step
+        actor_denominator = actor_updates if actor_updates > 0 else 1
         return {
             "critic": total_critic_loss / num_updates,
-            "actor": total_actor_loss / num_updates,
-            "alpha": total_alpha_loss / num_updates,
+            "actor": total_actor_loss / actor_denominator,
+            "alpha": total_alpha_loss / actor_denominator,
         }
 
     def _update_critic(

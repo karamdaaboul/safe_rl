@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
@@ -104,7 +105,7 @@ class StochasticActor(nn.Module):
 
         # Log probability with tanh squashing correction
         log_prob = dist.log_prob(x).sum(dim=-1, keepdim=True)
-        log_prob -= (2 * (torch.log(torch.tensor(2.0)) - x - nn.functional.softplus(-2 * x))).sum(
+        log_prob -= (2 * (math.log(2.0) - x - nn.functional.softplus(-2 * x))).sum(
             dim=-1, keepdim=True
         )
 
@@ -118,4 +119,3 @@ class StochasticActor(nn.Module):
         dist = Normal(mean, std)
         x = dist.rsample()
         return torch.tanh(x)
-
