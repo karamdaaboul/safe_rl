@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 from collections import deque
 from typing import Any
 
@@ -56,6 +58,7 @@ class SafeSAC:
         # Training parameters
         batch_size: int = 256,
         num_updates_per_step: int = 1,
+        policy_frequency: int = 1,
         max_grad_norm: float = 1.0,
         # Safe RL parameters (aligned with PPOL_PID / OmniSafe)
         cost_limits: list[float] | None = None,
@@ -88,6 +91,7 @@ class SafeSAC:
             target_entropy: Target entropy for auto-tuning.
             batch_size: Mini-batch size for updates.
             num_updates_per_step: Number of gradient updates per environment step.
+            policy_frequency: Frequency of actor/alpha updates relative to critic updates.
             max_grad_norm: Maximum gradient norm for clipping.
             cost_limits: Cost limits for each constraint (required).
             lagrangian_pid: PID gains (Kp, Ki, Kd) for Lagrangian multiplier updates.
@@ -116,6 +120,7 @@ class SafeSAC:
         self.tau = tau
         self.batch_size = batch_size
         self.num_updates_per_step = num_updates_per_step
+        self.policy_frequency = max(1, policy_frequency)
         self.max_grad_norm = max_grad_norm
 
         # Safe RL parameters
@@ -167,7 +172,7 @@ class SafeSAC:
                 self.target_entropy = -policy.num_actions
             else:
                 self.target_entropy = target_entropy
-            self.log_alpha = torch.tensor([0.0], requires_grad=True, device=device)
+            self.log_alpha = torch.tensor([math.log(alpha)], requires_grad=True, device=device)
             self.alpha_optimizer = optim.Adam([self.log_alpha], lr=alpha_lr)
         else:
             self.log_alpha = torch.tensor([alpha], device=device).log()
@@ -249,6 +254,8 @@ class SafeSAC:
         done: torch.Tensor,
         next_obs: torch.Tensor,
         cost: torch.Tensor | None = None,
+        critic_obs: torch.Tensor | None = None,
+        next_critic_obs: torch.Tensor | None = None,
     ) -> None:
         """Store a transition in the replay buffer.
 
@@ -264,13 +271,18 @@ class SafeSAC:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
 
         # Format cost tensor
+        extras = {}
         if cost is not None:
             cost = self._format_costs_tensor(cost)
-            self.storage.add(obs, action, reward, done, next_obs, costs=cost)
         else:
             # If no cost provided, use zeros
             cost = torch.zeros(obs.shape[0], self.num_costs, device=self.device)
-            self.storage.add(obs, action, reward, done, next_obs, costs=cost)
+        extras["costs"] = cost
+        if critic_obs is not None:
+            extras["critic_observations"] = critic_obs
+        if next_critic_obs is not None:
+            extras["next_critic_observations"] = next_critic_obs
+        self.storage.add(obs, action, reward, done, next_obs, **extras)
 
     def _format_costs_tensor(self, costs: torch.Tensor) -> torch.Tensor:
         """Format costs tensor to have shape (batch_size, num_costs)."""
@@ -336,12 +348,15 @@ class SafeSAC:
             # Update delay queue
             self.cost_delay_queue[cost_idx].append(self.cost_ema[cost_idx])
 
-    def update(self, current_costs: list[float] | None = None) -> dict[str, float]:
+    def update(self, current_costs: list[float] | None = None, obs_normalizer=None, critic_obs_normalizer=None) -> dict[str, float]:
         """Perform Safe SAC update step.
 
         Args:
             current_costs: Current mean episode costs for Lagrangian update.
                           If None, PID update is skipped.
+            obs_normalizer: Optional normalizer for actor observations.
+                Applied at sample time (FastSAC-style) to keep raw obs in buffer.
+            critic_obs_normalizer: Optional normalizer for critic observations.
 
         Returns:
             Dictionary containing loss values for logging.
@@ -358,39 +373,56 @@ class SafeSAC:
         total_actor_loss = 0.0
         total_alpha_loss = 0.0
 
-        for _ in range(self.num_updates_per_step):
-            # Sample batch
+        actor_updates = 0
+
+        for update_idx in range(self.num_updates_per_step):
+            # Sample batch (raw obs from buffer)
             batch = self.storage.sample(self.batch_size)
             obs = batch["observations"]
+            critic_obs = batch.get("critic_observations", obs)
             actions = batch["actions"]
             rewards = batch["rewards"]
             dones = batch["dones"]
             next_obs = batch["next_observations"]
+            next_critic_obs = batch.get("next_critic_observations", next_obs)
             costs = batch.get("costs", torch.zeros(self.batch_size, self.num_costs, device=self.device))
 
+            # Normalize at sample time (FastSAC-style, eval mode to avoid updating stats)
+            if obs_normalizer is not None:
+                with torch.no_grad():
+                    obs = (obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
+                    next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
+            if critic_obs_normalizer is not None:
+                with torch.no_grad():
+                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+
             # Update reward critic
-            critic_loss = self._update_reward_critic(obs, actions, rewards, dones, next_obs)
+            critic_loss = self._update_reward_critic(critic_obs, actions, rewards, dones, next_critic_obs)
             total_critic_loss += critic_loss
 
             # Update cost critic
-            cost_critic_loss = self._update_cost_critic(obs, actions, costs, dones, next_obs)
+            cost_critic_loss = self._update_cost_critic(critic_obs, actions, costs, dones, next_critic_obs)
             total_cost_critic_loss += cost_critic_loss
 
             # Update actor and alpha
-            actor_loss, alpha_loss = self._update_actor_and_alpha(obs)
-            total_actor_loss += actor_loss
-            total_alpha_loss += alpha_loss
+            if update_idx % self.policy_frequency == 0:
+                actor_loss, alpha_loss = self._update_actor_and_alpha(obs, critic_obs)
+                total_actor_loss += actor_loss
+                total_alpha_loss += alpha_loss
+                actor_updates += 1
 
             # Soft update target networks
             self.policy.soft_update_targets(self.tau)
 
         # Average losses
         num_updates = self.num_updates_per_step
+        actor_denominator = actor_updates if actor_updates > 0 else 1
         return {
             "critic": total_critic_loss / num_updates,
             "cost_critic": total_cost_critic_loss / num_updates,
-            "actor": total_actor_loss / num_updates,
-            "alpha": total_alpha_loss / num_updates,
+            "actor": total_actor_loss / actor_denominator,
+            "alpha": total_alpha_loss / actor_denominator,
         }
 
     def _update_reward_critic(
@@ -489,7 +521,7 @@ class SafeSAC:
 
         return cost_critic_loss.item()
 
-    def _update_actor_and_alpha(self, obs: torch.Tensor) -> tuple[float, float]:
+    def _update_actor_and_alpha(self, obs: torch.Tensor, critic_obs: torch.Tensor | None = None) -> tuple[float, float]:
         """Update actor with safety-augmented objective.
 
         The actor maximizes: Q_r - α * log π - λ * Q_c
@@ -499,20 +531,22 @@ class SafeSAC:
         - λ * Q_c is the Lagrangian penalty for constraint violation
 
         Args:
-            obs: Current observations.
+            obs: Current actor observations.
+            critic_obs: Current critic observations. If None, uses actor observations.
 
         Returns:
             Tuple of (actor_loss, alpha_loss).
         """
         # Sample actions and log probs for current policy
         actions, log_prob = self.policy.sample_with_log_prob(obs)
+        critic_obs = obs if critic_obs is None else critic_obs
 
         # Compute reward Q-values
-        q1, q2 = self.policy.evaluate_q(obs, actions)
+        q1, q2 = self.policy.evaluate_q(critic_obs, actions)
         q_min = torch.min(q1, q2)
 
         # Compute cost Q-values
-        cost_q = self.policy.evaluate_cost_q(obs, actions)  # [batch, num_costs]
+        cost_q = self.policy.evaluate_cost_q(critic_obs, actions)  # [batch, num_costs]
 
         # Compute weighted cost penalty: sum(λ_i * Q_c_i)
         total_lambda = sum(self.lambdas)

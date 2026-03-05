@@ -190,8 +190,13 @@ class SAC:
             extras["next_critic_observations"] = next_critic_obs
         self.storage.add(obs, action, reward, done, next_obs, **extras)
 
-    def update(self) -> dict[str, float]:
+    def update(self, obs_normalizer=None, critic_obs_normalizer=None) -> dict[str, float]:
         """Perform SAC update step.
+
+        Args:
+            obs_normalizer: Optional normalizer for actor observations.
+                Applied at sample time (FastSAC-style) to keep raw obs in buffer.
+            critic_obs_normalizer: Optional normalizer for critic observations.
 
         Returns:
             Dictionary containing loss values for logging.
@@ -206,7 +211,7 @@ class SAC:
         actor_updates = 0
 
         for update_idx in range(self.num_updates_per_step):
-            # Sample batch
+            # Sample batch (raw obs from buffer)
             batch = self.storage.sample(self.batch_size)
             obs = batch["observations"]
             critic_obs = batch.get("critic_observations", obs)
@@ -215,6 +220,16 @@ class SAC:
             dones = batch["dones"]
             next_obs = batch["next_observations"]
             next_critic_obs = batch.get("next_critic_observations", next_obs)
+
+            # Normalize at sample time (FastSAC-style, eval mode to avoid updating stats)
+            if obs_normalizer is not None:
+                with torch.no_grad():
+                    obs = (obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
+                    next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
+            if critic_obs_normalizer is not None:
+                with torch.no_grad():
+                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
 
             # Update critic
             critic_loss = self._update_critic(critic_obs, actions, rewards, dones, next_critic_obs)
@@ -301,8 +316,8 @@ class SAC:
         # Compute current Q-values
         q1, q2 = self.policy.evaluate_q(obs, actions)
 
-        # Critic loss (MSE)
-        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+        # Critic loss (MSE with 0.5 factor per SAC paper)
+        critic_loss = 0.5 * F.mse_loss(q1, target_q) + 0.5 * F.mse_loss(q2, target_q)
 
         # Optimize critics
         self.critic_optimizer.zero_grad()
@@ -344,27 +359,27 @@ class SAC:
             next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
             next_log_prob = next_log_prob.squeeze(-1)  # [batch, 1] -> [batch]
 
-            # Get target distributions for both critics
             # Modify rewards to include entropy bonus: r - γ * α * log π(a'|s')
             entropy_adjusted_rewards = rewards - self.gamma * bootstrap * self.alpha.detach() * next_log_prob
 
-            # Project target distributions for each critic
-            target_dist_1 = self.policy.critic_1_target.project(
-                next_dist=self.policy.critic_1_target.get_dist(
-                    self.policy.critic_1_target(
-                        self.policy.critic_obs_normalizer(next_obs), next_actions
-                    )
-                ),
-                rewards=entropy_adjusted_rewards,
-                bootstrap=bootstrap,
-                discount=self.gamma,
-            )
-            target_dist_2 = self.policy.critic_2_target.project(
-                next_dist=self.policy.critic_2_target.get_dist(
-                    self.policy.critic_2_target(
-                        self.policy.critic_obs_normalizer(next_obs), next_actions
-                    )
-                ),
+            # Normalize next_obs once (avoid redundant normalizer updates)
+            next_obs_norm = self.policy.critic_obs_normalizer(next_obs)
+
+            # Get target distributions from both critics
+            logits_t1 = self.policy.critic_1_target(next_obs_norm, next_actions)
+            logits_t2 = self.policy.critic_2_target(next_obs_norm, next_actions)
+            dist_t1 = self.policy.critic_1_target.get_dist(logits_t1)
+            dist_t2 = self.policy.critic_2_target.get_dist(logits_t2)
+
+            # Double-Q trick: select distribution from the more pessimistic critic
+            q1_val = self.policy.critic_1_target.get_value(dist_t1)
+            q2_val = self.policy.critic_2_target.get_value(dist_t2)
+            use_q1 = (q1_val < q2_val).unsqueeze(-1)
+            min_dist = torch.where(use_q1, dist_t1, dist_t2)
+
+            # Shared target distribution for both critics
+            target_dist = self.policy.critic_1_target.project(
+                next_dist=min_dist,
                 rewards=entropy_adjusted_rewards,
                 bootstrap=bootstrap,
                 discount=self.gamma,
@@ -379,8 +394,8 @@ class SAC:
         log_probs_1 = F.log_softmax(logits_1, dim=-1)
         log_probs_2 = F.log_softmax(logits_2, dim=-1)
 
-        critic_loss_1 = -torch.sum(target_dist_1 * log_probs_1, dim=-1).mean()
-        critic_loss_2 = -torch.sum(target_dist_2 * log_probs_2, dim=-1).mean()
+        critic_loss_1 = -torch.sum(target_dist * log_probs_1, dim=-1).mean()
+        critic_loss_2 = -torch.sum(target_dist * log_probs_2, dim=-1).mean()
         critic_loss = critic_loss_1 + critic_loss_2
 
         # Optimize critics

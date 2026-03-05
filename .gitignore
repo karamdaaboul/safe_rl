@@ -10,7 +10,7 @@ dist/*
 __pycache__
 .pyc
 .pytest_cache
-
+.pycache
 # vs code
 .vscode
 

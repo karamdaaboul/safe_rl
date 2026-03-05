@@ -121,7 +121,6 @@ class OffPolicyRunner:
         self.log_interval = int(self.runner_cfg.get("log_interval", 1))  # Log every N iterations (FastSAC-style)
         self.start_random_steps = int(self.runner_cfg.get("start_random_steps", 10000))
         self.update_after = int(self.runner_cfg.get("update_after", 1000))
-        self.update_every = int(self.runner_cfg.get("update_every", 50))
         self.gamma = float(self.alg_cfg.get("gamma", 0.99))
 
         # Empirical normalization
@@ -156,11 +155,15 @@ class OffPolicyRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
 
-        # Get initial observations
-        obs, _ = self.env.get_observations()
+        # Get initial observations (store raw, normalize only for action selection)
+        obs, extras = self.env.get_observations()
         obs = obs.to(self.device)
+        critic_obs = extras.get("observations", {}).get(self.privileged_obs_type, obs)
+        critic_obs = critic_obs.to(self.device) if isinstance(critic_obs, torch.Tensor) else obs
         if self.empirical_normalization:
-            obs = self.obs_normalizer(obs)
+            # Update normalizer stats but keep obs raw for buffer storage
+            self.obs_normalizer(obs)
+            self.critic_obs_normalizer(critic_obs)
 
         self.train_mode()
 
@@ -207,25 +210,29 @@ class OffPolicyRunner:
             # Collect data
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
-                    # Select action
+                    # Select action (normalize obs for policy, but keep raw for buffer)
                     if global_step < self.start_random_steps:
                         action = self._sample_random_action()
                     else:
+                        obs_for_policy = self.obs_normalizer(obs) if self.empirical_normalization else obs
                         # Use algorithm's act method if available (e.g., for shielding)
                         if hasattr(self.alg, 'act'):
-                            action = self.alg.act(obs, eval_mode=False)
+                            action = self.alg.act(obs_for_policy, eval_mode=False)
                         else:
-                            action = self.actor_critic.act_with_noise(obs)
+                            action = self.actor_critic.act_with_noise(obs_for_policy)
 
                     # Step environment
                     next_obs, rewards, dones, infos = self.env.step(action.to(self.env.device))
                     next_obs = next_obs.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
+                    next_critic_obs = infos.get("observations", {}).get(self.privileged_obs_type, next_obs)
+                    next_critic_obs = next_critic_obs.to(self.device) if isinstance(next_critic_obs, torch.Tensor) else next_obs
 
-                    # Apply normalization
+                    # Update normalizer stats with raw obs (don't transform for storage)
                     if self.empirical_normalization:
-                        next_obs = self.obs_normalizer(next_obs)
+                        self.obs_normalizer(next_obs)
+                        self.critic_obs_normalizer(next_critic_obs)
 
                     # Handle truncation (timeout) - for off-policy, truncated episodes
                     # should not be marked as terminal for proper bootstrapping
@@ -236,6 +243,19 @@ class OffPolicyRunner:
                         terminal = dones * (1.0 - time_outs.float())
                     else:
                         terminal = dones
+
+                    # Preserve final observations for timeouts when the env provides them.
+                    final_obs = infos.get("observations", {}).get("final", {})
+                    if isinstance(final_obs, dict) and "time_outs" in infos:
+                        time_out_mask = infos["time_outs"].to(self.device).bool().unsqueeze(-1)
+                        final_actor_obs = final_obs.get("actor_obs")
+                        final_critic_obs = final_obs.get("critic_obs")
+                        if isinstance(final_actor_obs, torch.Tensor):
+                            final_actor_obs = final_actor_obs.to(self.device)
+                            next_obs = torch.where(time_out_mask, final_actor_obs, next_obs)
+                        if isinstance(final_critic_obs, torch.Tensor):
+                            final_critic_obs = final_critic_obs.to(self.device)
+                            next_critic_obs = torch.where(time_out_mask, final_critic_obs, next_critic_obs)
 
                     # Get costs if available (for Safe RL)
                     costs = None
@@ -256,6 +276,8 @@ class OffPolicyRunner:
                             terminal,
                             next_obs,
                             cost=costs,
+                            critic_obs=critic_obs,
+                            next_critic_obs=next_critic_obs,
                         )
                     else:
                         self.alg.store_transition(
@@ -264,10 +286,13 @@ class OffPolicyRunner:
                             rewards,
                             terminal,  # Use terminal instead of dones for proper bootstrapping
                             next_obs,
+                            critic_obs=critic_obs,
+                            next_critic_obs=next_critic_obs,
                         )
 
                     # Update current observation
                     obs = next_obs
+                    critic_obs = next_critic_obs
                     global_step += self.env.num_envs
 
                     # Accumulate step-level metrics (FastSAC-style)
@@ -319,16 +344,22 @@ class OffPolicyRunner:
             start = stop
 
             # Update policy
-            if global_step >= self.update_after and it % self.update_every == 0:
+            if global_step >= self.update_after:
+                # Pass normalizers so update normalizes at sample time (FastSAC-style)
+                norm_kwargs = {}
+                if self.empirical_normalization:
+                    norm_kwargs["obs_normalizer"] = self.obs_normalizer
+                    norm_kwargs["critic_obs_normalizer"] = self.critic_obs_normalizer
+
                 # For Safe RL, pass current episode costs for PID Lagrangian updates
                 if self.is_safe_rl and costbuffers is not None:
                     current_costs = [
                         statistics.mean(costbuffers[i]) if len(costbuffers[i]) > 0 else 0.0
                         for i in range(self.alg.num_costs)
                     ]
-                    update_result = self.alg.update(current_costs=current_costs)
+                    update_result = self.alg.update(current_costs=current_costs, **norm_kwargs)
                 else:
-                    update_result = self.alg.update()
+                    update_result = self.alg.update(**norm_kwargs)
 
                 if update_result is not None:
                     if isinstance(update_result, tuple):

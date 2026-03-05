@@ -105,7 +105,6 @@ class SACActorCritic(nn.Module):
             self.is_distributional_critic = False
             hidden_dims = critic_kwargs.get("hidden_dims", [256, 256])
             activation = critic_kwargs.get("activation", "relu")
-            activation_fn = resolve_nn_activation(activation)
 
             critics = []
             for _ in range(num_critics):
@@ -113,7 +112,7 @@ class SACActorCritic(nn.Module):
                 input_dim = num_critic_obs + num_actions
                 for hidden_dim in hidden_dims:
                     layers.append(nn.Linear(input_dim, hidden_dim))
-                    layers.append(activation_fn)
+                    layers.append(resolve_nn_activation(activation))
                     input_dim = hidden_dim
                 layers.append(nn.Linear(input_dim, 1))
                 critics.append(nn.Sequential(*layers))
@@ -237,8 +236,8 @@ class SACActorCritic(nn.Module):
             logits_2 = self.critic_2(obs, actions)
             dist_1 = self.critic_1.get_dist(logits_1)
             dist_2 = self.critic_2.get_dist(logits_2)
-            q1 = self.critic_1.get_value(dist_1)
-            q2 = self.critic_2.get_value(dist_2)
+            q1 = self.critic_1.get_value(dist_1).unsqueeze(-1)
+            q2 = self.critic_2.get_value(dist_2).unsqueeze(-1)
 
             # Cache for properties
             self._logits = torch.stack([logits_1, logits_2], dim=1)
@@ -285,8 +284,8 @@ class SACActorCritic(nn.Module):
             logits_2 = self.critic_2_target(obs, actions)
             dist_1 = self.critic_1_target.get_dist(logits_1)
             dist_2 = self.critic_2_target.get_dist(logits_2)
-            q1_target = self.critic_1_target.get_value(dist_1)
-            q2_target = self.critic_2_target.get_value(dist_2)
+            q1_target = self.critic_1_target.get_value(dist_1).unsqueeze(-1)
+            q2_target = self.critic_2_target.get_value(dist_2).unsqueeze(-1)
         else:
             critic_input = torch.cat([obs, actions], dim=-1)
             q1_target = self.critic_1_target(critic_input)
