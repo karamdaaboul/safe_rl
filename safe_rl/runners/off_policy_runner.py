@@ -132,6 +132,13 @@ class OffPolicyRunner:
             self.obs_normalizer = torch.nn.Identity().to(self.device)
             self.critic_obs_normalizer = torch.nn.Identity().to(self.device)
 
+        # Reward normalization (divide by running std, like PPO's advantage normalization)
+        self.reward_normalization = self.runner_cfg.get("reward_normalization", True)
+        if self.reward_normalization:
+            self.reward_normalizer = EmpiricalNormalization(shape=[1], until=None).to(self.device)
+        else:
+            self.reward_normalizer = torch.nn.Identity().to(self.device)
+
         # Logging state
         self.writer = None
         self.logger_type = "tensorboard"
@@ -214,7 +221,12 @@ class OffPolicyRunner:
                     if global_step < self.start_random_steps:
                         action = self._sample_random_action()
                     else:
-                        obs_for_policy = self.obs_normalizer(obs) if self.empirical_normalization else obs
+                        # Normalize for policy without updating stats (already updated when obs arrived as next_obs)
+                        if self.empirical_normalization:
+                            with torch.no_grad():
+                                obs_for_policy = (obs - self.obs_normalizer._mean) / (self.obs_normalizer._std + self.obs_normalizer.eps)
+                        else:
+                            obs_for_policy = obs
                         # Use algorithm's act method if available (e.g., for shielding)
                         if hasattr(self.alg, 'act'):
                             action = self.alg.act(obs_for_policy, eval_mode=False)
@@ -229,10 +241,12 @@ class OffPolicyRunner:
                     next_critic_obs = infos.get("observations", {}).get(self.privileged_obs_type, next_obs)
                     next_critic_obs = next_critic_obs.to(self.device) if isinstance(next_critic_obs, torch.Tensor) else next_obs
 
-                    # Update normalizer stats with raw obs (don't transform for storage)
+                    # Update normalizer stats with raw data (don't transform for storage)
                     if self.empirical_normalization:
                         self.obs_normalizer(next_obs)
                         self.critic_obs_normalizer(next_critic_obs)
+                    if self.reward_normalization:
+                        self.reward_normalizer.update(rewards)
 
                     # Handle truncation (timeout) - for off-policy, truncated episodes
                     # should not be marked as terminal for proper bootstrapping
@@ -296,9 +310,7 @@ class OffPolicyRunner:
                     global_step += self.env.num_envs
 
                     # Accumulate step-level metrics (FastSAC-style)
-                    step_metrics_dict = {
-                        "step_reward": rewards.mean(),
-                    }
+                    step_metrics_dict = {}
                     if self.is_safe_rl and costs is not None:
                         # Track each cost dimension separately
                         for cost_idx in range(costs.shape[-1] if costs.dim() > 1 else 1):
@@ -350,6 +362,8 @@ class OffPolicyRunner:
                 if self.empirical_normalization:
                     norm_kwargs["obs_normalizer"] = self.obs_normalizer
                     norm_kwargs["critic_obs_normalizer"] = self.critic_obs_normalizer
+                if self.reward_normalization:
+                    norm_kwargs["reward_normalizer"] = self.reward_normalizer
 
                 # For Safe RL, pass current episode costs for PID Lagrangian updates
                 if self.is_safe_rl and costbuffers is not None:
@@ -488,10 +502,6 @@ class OffPolicyRunner:
         if self.writer:
             # Step-level metrics (FastSAC-style - always available)
             if averaged_step_metrics:
-                # Log smoothed step-level metrics
-                if "step_reward" in averaged_step_metrics:
-                    self.writer.add_scalar("Train/step_reward", averaged_step_metrics["step_reward"], it)
-
                 # Log step-level costs for Safe RL
                 if self.is_safe_rl:
                     for key, value in averaged_step_metrics.items():
@@ -572,9 +582,6 @@ class OffPolicyRunner:
             log_string += f"""{f'Mean cost critic loss:':>{pad}} {display_cost_critic_loss:.4f}\n"""
         log_string += f"""{'Mean actor loss:':>{pad}} {display_actor_loss:.4f}\n"""
 
-        # Step-level metrics (always available - FastSAC style)
-        if averaged_step_metrics and "step_reward" in averaged_step_metrics:
-            log_string += f"""{'Step reward (avg):':>{pad}} {averaged_step_metrics['step_reward']:.4f}\n"""
 
         # Step-level costs for Safe RL
         if averaged_step_metrics and self.is_safe_rl:
@@ -638,6 +645,8 @@ class OffPolicyRunner:
         if self.empirical_normalization:
             saved_dict["obs_norm_state_dict"] = self.obs_normalizer.state_dict()
             saved_dict["critic_obs_norm_state_dict"] = self.critic_obs_normalizer.state_dict()
+        if self.reward_normalization:
+            saved_dict["reward_norm_state_dict"] = self.reward_normalizer.state_dict()
 
         torch.save(saved_dict, path)
         print(f"[Model Saved] -> {path}")
@@ -658,6 +667,8 @@ class OffPolicyRunner:
             self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
         if self.empirical_normalization and "critic_obs_norm_state_dict" in loaded_dict:
             self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
+        if self.reward_normalization and "reward_norm_state_dict" in loaded_dict:
+            self.reward_normalizer.load_state_dict(loaded_dict["reward_norm_state_dict"])
 
         # Load optimizers
         if load_optimizer:

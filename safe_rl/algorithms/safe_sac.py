@@ -348,7 +348,7 @@ class SafeSAC:
             # Update delay queue
             self.cost_delay_queue[cost_idx].append(self.cost_ema[cost_idx])
 
-    def update(self, current_costs: list[float] | None = None, obs_normalizer=None, critic_obs_normalizer=None) -> dict[str, float]:
+    def update(self, current_costs: list[float] | None = None, obs_normalizer=None, critic_obs_normalizer=None, reward_normalizer=None) -> dict[str, float]:
         """Perform Safe SAC update step.
 
         Args:
@@ -396,6 +396,10 @@ class SafeSAC:
                 with torch.no_grad():
                     critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
                     next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+            # Normalize rewards by running std (don't shift mean)
+            if reward_normalizer is not None:
+                with torch.no_grad():
+                    rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
             # Update reward critic
             critic_loss = self._update_reward_critic(critic_obs, actions, rewards, dones, next_critic_obs)
