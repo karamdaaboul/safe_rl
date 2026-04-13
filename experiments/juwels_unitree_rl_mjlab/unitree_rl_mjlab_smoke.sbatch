@@ -17,12 +17,18 @@ PROJECT_ROOT="${PROJECT_ROOT:-/p/project1/${ACCOUNT}/unitree_rl_mjlab}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/p/scratch/${ACCOUNT}/unitree_rl_mjlab}"
 SRC_DIR="${SRC_DIR:-${PROJECT_ROOT}/src/unitree_rl_mjlab}"
 IMAGE_PATH="${IMAGE_PATH:-${PROJECT_ROOT}/images/unitree_rl_mjlab_cuda12.4.1_py311.sif}"
+APPTAINER="${APPTAINER:-/usr/bin/apptainer}"
 TASK_ID="${TASK_ID:-Unitree-Go2-Flat}"
 NUM_ENVS="${NUM_ENVS:-64}"
 MAX_ITER="${MAX_ITER:-2}"
 RUN_NAME="${RUN_NAME:-juwels_smoke_${SLURM_JOB_ID}}"
 
-mkdir -p "${SCRATCH_ROOT}/logs" "${SCRATCH_ROOT}/tmp"
+mkdir -p \
+    "${SCRATCH_ROOT}/logs" \
+    "${SCRATCH_ROOT}/tmp" \
+    "${SCRATCH_ROOT}/apptainer_tmp" \
+    "${SCRATCH_ROOT}/.cache" \
+    "${SCRATCH_ROOT}/wandb"
 
 if [ ! -f "${IMAGE_PATH}" ]; then
     echo "Image not found: ${IMAGE_PATH}" >&2
@@ -35,23 +41,34 @@ if [ ! -d "${SRC_DIR}" ]; then
 fi
 
 export TASK_ID NUM_ENVS MAX_ITER RUN_NAME
+export APPTAINER_CACHEDIR
+APPTAINER_CACHEDIR="$(mktemp -d -p "${SCRATCH_ROOT}/apptainer_tmp")"
+export APPTAINER_TMPDIR
+APPTAINER_TMPDIR="$(mktemp -d -p "${SCRATCH_ROOT}/apptainer_tmp")"
 
-srun apptainer exec --nv \
+srun "${APPTAINER}" exec --nv \
+    --writable-tmpfs \
     --bind "${SRC_DIR}:/workspace/unitree_rl_mjlab" \
     --bind "${SCRATCH_ROOT}:/scratch" \
+    --env PYTHONPATH=/workspace/unitree_rl_mjlab \
+    --env MUJOCO_GL=egl \
+    --env XDG_CACHE_HOME=/scratch/.cache \
+    --env TMPDIR=/scratch/tmp \
+    --env WANDB_MODE=offline \
+    --env WANDB_SILENT=true \
+    --env WANDB_DIR=/scratch/wandb \
+    --pwd /scratch \
     "${IMAGE_PATH}" \
     bash -lc '
         set -euo pipefail
-        cd /scratch
-        export MUJOCO_GL=egl
+        mkdir -p /scratch/.cache /scratch/tmp /scratch/wandb
         export PYTHONUNBUFFERED=1
-        export PYTHONPATH=/workspace/unitree_rl_mjlab:${PYTHONPATH:-}
         python - <<'"'"'PY'"'"'
 import torch
 print("cuda_available:", torch.cuda.is_available())
 print("cuda_device_count:", torch.cuda.device_count())
 PY
-        python /workspace/unitree_rl_mjlab/scripts/list_envs.py Unitree
+        python /workspace/unitree_rl_mjlab/scripts/list_envs.py --keyword Unitree
         python /workspace/unitree_rl_mjlab/scripts/train.py "${TASK_ID}" \
             --env.scene.num-envs="${NUM_ENVS}" \
             --agent.max_iterations="${MAX_ITER}" \

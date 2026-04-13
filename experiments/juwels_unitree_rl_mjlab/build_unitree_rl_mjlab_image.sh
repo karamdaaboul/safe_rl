@@ -53,4 +53,6 @@ apptainer build --fakeroot "${IMAGE_PATH}" "${GENERATED_DEF}"
 echo
 echo "Build completed."
 echo "Next step:"
-echo "  bash ${SCRIPT_DIR}/unitree_rl_mjlab_interactive_check.sh"
+echo "  bash ${SCRIPT_DIR}/interactive_job.sh"
+echo "  # once the allocation is ready:"
+echo "  bash ${SCRIPT_DIR}/run_in_container.sh"
