@@ -1,8 +1,3 @@
-# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 from __future__ import annotations
 
 import os
@@ -52,8 +47,15 @@ class WandbSummaryWriter(SummaryWriter):
         if wandb_dir is not None:
             os.makedirs(wandb_dir, exist_ok=True)
 
-        # Initialize wandb
-        wandb.init(project=project, entity=entity, name=run_name, dir=wandb_dir)
+        # Initialize wandb — disable git integration to avoid broken symlinks
+        # for .diff files when running inside a container (offline mode).
+        wandb.init(
+            project=project,
+            entity=entity,
+            name=run_name,
+            dir=wandb_dir,
+            settings=wandb.Settings(disable_git=True),
+        )
 
         # Add log directory to wandb
         wandb.config.update({"log_dir": log_dir})
@@ -92,9 +94,16 @@ class WandbSummaryWriter(SummaryWriter):
         self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
 
     def save_model(self, model_path, iter):
-        wandb.save(model_path, base_path=os.path.dirname(model_path))
+        # Skip wandb.save for .pt files — they create symlinks that break
+        # when the container's bind-mounted log directory is removed.
+        if not model_path.endswith(".pt"):
+            wandb.save(model_path, base_path=os.path.dirname(model_path))
 
     def save_file(self, path, iter=None):
+        if os.path.islink(path) and not os.path.exists(path):
+            return  # skip broken symlinks
+        if path.endswith(".diff"):
+            return  # skip diff files — they create broken symlinks when synced outside the container
         wandb.save(path, base_path=os.path.dirname(path))
 
     """

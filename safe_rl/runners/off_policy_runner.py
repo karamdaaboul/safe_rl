@@ -1,21 +1,14 @@
-# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 from __future__ import annotations
 
 import os
 import statistics
 import time
-from collections import deque
 
 import torch
 
-import safe_rl
 from safe_rl.env import VecEnv
 from safe_rl.modules import EmpiricalNormalization
-from safe_rl.utils import store_code_state, TensorAverageMeterDict
+from safe_rl.utils.logger import Logger
 
 
 class OffPolicyRunner:
@@ -93,6 +86,9 @@ class OffPolicyRunner:
         if alg_class_name == "SAC":
             from safe_rl.algorithms import SAC
             alg_class = SAC
+        elif alg_class_name == "FastSAC":
+            from safe_rl.algorithms import FastSAC
+            alg_class = FastSAC
         elif alg_class_name == "SafeSAC":
             from safe_rl.algorithms import SafeSAC
             alg_class = SafeSAC
@@ -118,7 +114,6 @@ class OffPolicyRunner:
         # Training configuration
         self.num_steps_per_env = int(self.runner_cfg.get("num_steps_per_env", 1))
         self.save_interval = int(self.runner_cfg.get("save_interval", 50))
-        self.log_interval = int(self.runner_cfg.get("log_interval", 1))  # Log every N iterations (FastSAC-style)
         self.start_random_steps = int(self.runner_cfg.get("start_random_steps", 10000))
         self.update_after = int(self.runner_cfg.get("update_after", 1000))
         self.gamma = float(self.alg_cfg.get("gamma", 0.99))
@@ -139,22 +134,31 @@ class OffPolicyRunner:
         else:
             self.reward_normalizer = torch.nn.Identity().to(self.device)
 
-        # Logging state
-        self.writer = None
-        self.logger_type = "tensorboard"
-        self.tot_timesteps = 0
-        self.tot_time = 0
+        # Safe RL detection
+        self.is_safe_rl = hasattr(self.alg, 'num_costs') and self.alg.num_costs > 0
+        num_costs = self.alg.num_costs if self.is_safe_rl else 0
+
+        # Create logger
+        self.logger = Logger(
+            log_dir=log_dir,
+            cfg=self.cfg,
+            runner_cfg=self.runner_cfg,
+            env_cfg=self.env.cfg,
+            num_envs=self.env.num_envs,
+            num_costs=num_costs,
+            device=self.device,
+        )
+
         self.current_learning_iteration = 0
-        self.git_status_repos = [safe_rl.__file__]
+        self.tot_timesteps = 0
 
         # Reset environment
         _, _ = self.env.reset()
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         """Main training loop."""
-        # Initialize logger
-        if self.log_dir is not None and self.writer is None:
-            self._init_logger()
+        print("Starting to learn with:")
+        print(str(self))
 
         # Randomize initial episode lengths (for exploration diversity)
         if init_at_random_ep_len:
@@ -174,26 +178,6 @@ class OffPolicyRunner:
 
         self.train_mode()
 
-        # Book keeping
-        ep_infos = []
-        rewbuffer = deque(maxlen=100)
-        lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-
-        # Safe RL cost tracking
-        self.is_safe_rl = hasattr(self.alg, 'num_costs') and self.alg.num_costs > 0
-        if self.is_safe_rl:
-            num_costs = self.alg.num_costs
-            costbuffers = [deque(maxlen=100) for _ in range(num_costs)]
-            cur_cost_sum = torch.zeros(self.env.num_envs, num_costs, dtype=torch.float, device=self.device)
-        else:
-            costbuffers = None
-            cur_cost_sum = None
-
-        # Step-level metric accumulation (FastSAC-style)
-        step_metrics = TensorAverageMeterDict()
-
         # Training loop
         global_step = self.tot_timesteps
         start_iter = self.current_learning_iteration
@@ -201,18 +185,6 @@ class OffPolicyRunner:
 
         for it in range(start_iter, tot_iter):
             start = time.time()
-
-            # Initialize loss values for logging
-            critic_loss = 0.0
-            cost_critic_loss = 0.0
-            actor_loss = 0.0
-            # Get actual action std from the policy (not the placeholder self.std)
-            if hasattr(self.alg, 'get_actual_action_std'):
-                noise_std = self.alg.get_actual_action_std()
-            elif hasattr(self.actor_critic, 'std'):
-                noise_std = self.actor_critic.std.mean().item()
-            else:
-                noise_std = 0.0
 
             # Collect data
             with torch.inference_mode():
@@ -309,55 +281,17 @@ class OffPolicyRunner:
                     critic_obs = next_critic_obs
                     global_step += self.env.num_envs
 
-                    # Accumulate step-level metrics (FastSAC-style)
-                    step_metrics_dict = {}
-                    if self.is_safe_rl and costs is not None:
-                        # Track each cost dimension separately
-                        for cost_idx in range(costs.shape[-1] if costs.dim() > 1 else 1):
-                            if costs.dim() > 1:
-                                step_metrics_dict[f"step_cost_{cost_idx}"] = costs[:, cost_idx].mean()
-                            else:
-                                step_metrics_dict["step_cost_0"] = costs.mean()
-                                break
-                    step_metrics.add(step_metrics_dict)
-
-                    # Book keeping for logging
-                    if "episode" in infos:
-                        ep_infos.append(infos["episode"])
-                    elif "log" in infos:
-                        ep_infos.append(infos["log"])
-
-                    cur_reward_sum += rewards
-                    cur_episode_length += 1
-
-                    # Track costs for Safe RL
-                    if self.is_safe_rl and costs is not None:
-                        cur_cost_sum += costs
-
-                    # Handle episode completion
-                    new_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
-                    if new_ids.numel() > 0:
-                        rewbuffer.extend(cur_reward_sum[new_ids].cpu().numpy().tolist())
-                        lenbuffer.extend(cur_episode_length[new_ids].cpu().numpy().tolist())
-
-                        # Track episode costs for Safe RL
-                        if self.is_safe_rl and cur_cost_sum is not None:
-                            for cost_idx in range(self.alg.num_costs):
-                                costbuffers[cost_idx].extend(
-                                    cur_cost_sum[new_ids, cost_idx].cpu().numpy().tolist()
-                                )
-                            cur_cost_sum[new_ids] = 0
-
-                        cur_reward_sum[new_ids] = 0
-                        cur_episode_length[new_ids] = 0
+                    # Update logger episode buffers
+                    self.logger.process_env_step(rewards, dones, infos, costs=costs)
 
             stop = time.time()
             collection_time = stop - start
             start = stop
 
             # Update policy
+            loss_dict: dict = {}
             if global_step >= self.update_after:
-                # Pass normalizers so update normalizes at sample time (FastSAC-style)
+                # Pass normalizers so update normalizes at sample time
                 norm_kwargs = {}
                 if self.empirical_normalization:
                     norm_kwargs["obs_normalizer"] = self.obs_normalizer
@@ -366,9 +300,9 @@ class OffPolicyRunner:
                     norm_kwargs["reward_normalizer"] = self.reward_normalizer
 
                 # For Safe RL, pass current episode costs for PID Lagrangian updates
-                if self.is_safe_rl and costbuffers is not None:
+                if self.is_safe_rl:
                     current_costs = [
-                        statistics.mean(costbuffers[i]) if len(costbuffers[i]) > 0 else 0.0
+                        statistics.mean(self.logger.costbuffers[i]) if len(self.logger.costbuffers[i]) > 0 else 0.0
                         for i in range(self.alg.num_costs)
                     ]
                     update_result = self.alg.update(current_costs=current_costs, **norm_kwargs)
@@ -377,23 +311,38 @@ class OffPolicyRunner:
 
                 if update_result is not None:
                     if isinstance(update_result, tuple):
-                        critic_loss, actor_loss, noise_std = update_result
+                        loss_dict["critic_loss"] = update_result[0]
+                        loss_dict["actor_loss"] = update_result[1]
+                        loss_dict["noise_std"] = update_result[2]
                     elif isinstance(update_result, dict):
-                        # Support both naming conventions (critic/critic_loss, actor/actor_loss)
-                        critic_loss = update_result.get("critic", update_result.get("critic_loss", 0.0))
-                        cost_critic_loss = update_result.get("cost_critic", update_result.get("cost_critic_loss", 0.0))
-                        actor_loss = update_result.get("actor", update_result.get("actor_loss", 0.0))
-                        noise_std = update_result.get("noise_std", noise_std)
+                        # Normalize key names to our convention
+                        loss_dict["critic_loss"] = update_result.get("critic", update_result.get("critic_loss", 0.0))
+                        loss_dict["actor_loss"] = update_result.get("actor", update_result.get("actor_loss", 0.0))
+                        loss_dict["noise_std"] = update_result.get("noise_std", 0.0)
+                        if self.is_safe_rl:
+                            loss_dict["cost_critic_loss"] = update_result.get("cost_critic", update_result.get("cost_critic_loss", 0.0))
 
-                    # Accumulate loss metrics (FastSAC-style)
-                    loss_metrics = {
-                        "critic_loss": critic_loss,
-                        "actor_loss": actor_loss,
-                        "noise_std": noise_std,
-                    }
-                    if self.is_safe_rl:
-                        loss_metrics["cost_critic_loss"] = cost_critic_loss
-                    step_metrics.add(loss_metrics)
+                # Merge safe RL penalty info into loss_dict
+                if self.is_safe_rl:
+                    if hasattr(self.alg, 'get_penalty_info'):
+                        penalty_info = self.alg.get_penalty_info()
+                        loss_dict["lambda_mean"] = penalty_info.get("lambda_mean", 0.0)
+                        loss_dict["lambda_max"] = penalty_info.get("lambda_max", 0.0)
+                        if "alpha" in penalty_info:
+                            loss_dict["alpha"] = penalty_info["alpha"]
+
+                    if hasattr(self.alg, 'get_shield_stats'):
+                        shield_stats = self.alg.get_shield_stats()
+                        loss_dict["shield_rejections"] = shield_stats.get("rejections", 0)
+                        loss_dict["shield_total_samples"] = shield_stats.get("total_samples", 0)
+                        loss_dict["shield_avg_resamples"] = shield_stats.get("avg_resamples", 0.0)
+
+            # Fill in noise_std if not set by update
+            if "noise_std" not in loss_dict:
+                if hasattr(self.alg, 'get_actual_action_std'):
+                    loss_dict["noise_std"] = self.alg.get_actual_action_std()
+                elif hasattr(self.actor_critic, 'std'):
+                    loss_dict["noise_std"] = self.actor_critic.std.mean().item()
 
             stop = time.time()
             learn_time = stop - start
@@ -402,228 +351,23 @@ class OffPolicyRunner:
             self.tot_timesteps = global_step
             self.current_learning_iteration = it
 
-            # Logging (only at intervals - FastSAC-style)
-            if self.log_dir is not None and it % self.log_interval == 0:
-                # Average and clear accumulated metrics (FastSAC-style)
-                averaged_step_metrics = step_metrics.mean_and_clear()
-
-                self.log(
-                    it=it,
-                    tot_iter=tot_iter,
-                    start_iter=start_iter,
-                    num_learning_iterations=num_learning_iterations,
-                    collection_time=collection_time,
-                    learn_time=learn_time,
-                    critic_loss=critic_loss,
-                    cost_critic_loss=cost_critic_loss,
-                    actor_loss=actor_loss,
-                    noise_std=noise_std,
-                    rewbuffer=rewbuffer,
-                    lenbuffer=lenbuffer,
-                    ep_infos=ep_infos,
-                    costbuffers=costbuffers if self.is_safe_rl else None,
-                    averaged_step_metrics=averaged_step_metrics,
-                )
+            # Log
+            self.logger.log(
+                it=it,
+                start_it=start_iter,
+                total_it=tot_iter,
+                collect_time=collection_time,
+                learn_time=learn_time,
+                loss_dict=loss_dict,
+            )
 
             # Save model
             if self.log_dir is not None and it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
-            # Clear episode infos
-            ep_infos.clear()
-
-            # Save code state on first iteration
-            if it == start_iter and self.log_dir is not None:
-                git_file_paths = store_code_state(self.log_dir, self.git_status_repos)
-                if self.logger_type in ["wandb", "neptune"] and git_file_paths and self.writer is not None:
-                    for path in git_file_paths:
-                        self.writer.save_file(path)
-
         # Save final model
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
-
-    def log(
-        self,
-        it: int,
-        tot_iter: int,
-        start_iter: int,
-        num_learning_iterations: int,
-        collection_time: float,
-        learn_time: float,
-        critic_loss: float,
-        cost_critic_loss: float,
-        actor_loss: float,
-        noise_std: float,
-        rewbuffer: deque,
-        lenbuffer: deque,
-        ep_infos: list,
-        costbuffers: list[deque] | None = None,
-        averaged_step_metrics: dict | None = None,
-        width: int = 80,
-        pad: int = 35,
-    ):
-        """Log training metrics."""
-        # Update timing
-        iteration_time = collection_time + learn_time
-        self.tot_time += iteration_time
-
-        # Compute FPS
-        fps = int(self.num_steps_per_env * self.env.num_envs / max(iteration_time, 1e-6))
-
-        # Episode info logging
-        ep_string = ""
-        if ep_infos:
-            for key in ep_infos[0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in ep_infos:
-                    if key not in ep_info:
-                        continue
-                    val = ep_info[key]
-                    if not isinstance(val, torch.Tensor):
-                        val = torch.tensor([val])
-                    if len(val.shape) == 0:
-                        val = val.unsqueeze(0)
-                    infotensor = torch.cat((infotensor, val.to(self.device)))
-                if infotensor.numel() > 0:
-                    value = torch.mean(infotensor).item()
-                    if self.writer:
-                        if "/" in key:
-                            self.writer.add_scalar(key, value, it)
-                        else:
-                            self.writer.add_scalar(f"Episode/{key}", value, it)
-                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
-
-        # Compute mean reward/length
-        mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else 0.0
-        mean_length = statistics.mean(lenbuffer) if len(lenbuffer) > 0 else 0.0
-
-        # TensorBoard/Logger writing
-        if self.writer:
-            # Step-level metrics (FastSAC-style - always available)
-            if averaged_step_metrics:
-                # Log step-level costs for Safe RL
-                if self.is_safe_rl:
-                    for key, value in averaged_step_metrics.items():
-                        if key.startswith("step_cost_"):
-                            cost_idx = key.split("_")[-1]
-                            self.writer.add_scalar(f"Train/step_cost_{cost_idx}", value, it)
-
-                # Log smoothed losses
-                if "critic_loss" in averaged_step_metrics:
-                    self.writer.add_scalar("Loss/critic", averaged_step_metrics["critic_loss"], it)
-                if "actor_loss" in averaged_step_metrics:
-                    self.writer.add_scalar("Loss/actor", averaged_step_metrics["actor_loss"], it)
-                if "cost_critic_loss" in averaged_step_metrics and self.is_safe_rl:
-                    self.writer.add_scalar("Loss/cost_critic", averaged_step_metrics["cost_critic_loss"], it)
-                if "noise_std" in averaged_step_metrics:
-                    self.writer.add_scalar("Policy/mean_noise_std", averaged_step_metrics["noise_std"], it)
-            else:
-                # Fallback to old values if no step metrics
-                self.writer.add_scalar("Loss/critic", critic_loss, it)
-                self.writer.add_scalar("Loss/actor", actor_loss, it)
-                if self.is_safe_rl:
-                    self.writer.add_scalar("Loss/cost_critic", cost_critic_loss, it)
-                self.writer.add_scalar("Policy/mean_noise_std", noise_std, it)
-
-            self.writer.add_scalar("Perf/total_fps", fps, it)
-            self.writer.add_scalar("Perf/collection_time", collection_time, it)
-            self.writer.add_scalar("Perf/learning_time", learn_time, it)
-
-            # Episode-based metrics (only when episodes complete)
-            if len(rewbuffer) > 0:
-                self.writer.add_scalar("Train/episode_reward", mean_reward, it)
-                self.writer.add_scalar("Train/episode_length", mean_length, it)
-                if self.logger_type != "wandb":
-                    self.writer.add_scalar("Train/episode_reward/time", mean_reward, self.tot_time)
-                    self.writer.add_scalar("Train/episode_length/time", mean_length, self.tot_time)
-
-            # Safe RL cost logging (episode-based)
-            if costbuffers is not None and self.is_safe_rl:
-                for cost_idx, costbuffer in enumerate(costbuffers):
-                    if len(costbuffer) > 0:
-                        mean_cost = statistics.mean(costbuffer)
-                        self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, it)
-                        if hasattr(self.alg, 'cost_limits') and cost_idx < len(self.alg.cost_limits):
-                            self.writer.add_scalar(f"Train/cost_limit_{cost_idx}", self.alg.cost_limits[cost_idx], it)
-
-                # Log Lagrangian multiplier info
-                if hasattr(self.alg, 'get_penalty_info'):
-                    penalty_info = self.alg.get_penalty_info()
-                    self.writer.add_scalar("SafeRL/lambda_mean", penalty_info.get("lambda_mean", 0.0), it)
-                    self.writer.add_scalar("SafeRL/lambda_max", penalty_info.get("lambda_max", 0.0), it)
-                    if "alpha" in penalty_info:
-                        self.writer.add_scalar("SafeRL/alpha", penalty_info["alpha"], it)
-
-                # Log shield statistics
-                if hasattr(self.alg, 'get_shield_stats'):
-                    shield_stats = self.alg.get_shield_stats()
-                    self.writer.add_scalar("Shield/rejections", shield_stats.get("rejections", 0), it)
-                    self.writer.add_scalar("Shield/total_samples", shield_stats.get("total_samples", 0), it)
-                    self.writer.add_scalar("Shield/avg_resamples", shield_stats.get("avg_resamples", 0.0), it)
-
-        # Console output
-        header = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "
-
-        # Use step metrics if available, otherwise fallback to last iteration values
-        display_critic_loss = averaged_step_metrics.get("critic_loss", critic_loss) if averaged_step_metrics else critic_loss
-        display_actor_loss = averaged_step_metrics.get("actor_loss", actor_loss) if averaged_step_metrics else actor_loss
-        display_noise_std = averaged_step_metrics.get("noise_std", noise_std) if averaged_step_metrics else noise_std
-        display_cost_critic_loss = averaged_step_metrics.get("cost_critic_loss", cost_critic_loss) if averaged_step_metrics else cost_critic_loss
-
-        log_string = (
-            f"""{'#' * width}\n"""
-            f"""{header.center(width, ' ')}\n\n"""
-            f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
-            f"""{'Mean action noise std:':>{pad}} {display_noise_std:.4f}\n"""
-            f"""{'Mean critic loss:':>{pad}} {display_critic_loss:.4f}\n"""
-        )
-        if self.is_safe_rl:
-            log_string += f"""{f'Mean cost critic loss:':>{pad}} {display_cost_critic_loss:.4f}\n"""
-        log_string += f"""{'Mean actor loss:':>{pad}} {display_actor_loss:.4f}\n"""
-
-
-        # Step-level costs for Safe RL
-        if averaged_step_metrics and self.is_safe_rl:
-            for key, value in averaged_step_metrics.items():
-                if key.startswith("step_cost_"):
-                    cost_idx = key.split("_")[-1]
-                    cost_limit = self.alg.cost_limits[int(cost_idx)] if hasattr(self.alg, 'cost_limits') else "N/A"
-                    log_string += f"""{'Step cost %s (avg):' % cost_idx:>{pad}} {value:.4f} (limit={cost_limit})\n"""
-
-        # Episode-based metrics (only when available)
-        if len(rewbuffer) > 0:
-            log_string += (
-                f"""{'Episode reward (mean):':>{pad}} {mean_reward:.2f} [{len(rewbuffer)} episodes]\n"""
-                f"""{'Episode length (mean):':>{pad}} {mean_length:.2f}\n"""
-            )
-
-        # Add Safe RL episode cost info to console output
-        if costbuffers is not None and self.is_safe_rl:
-            for cost_idx, costbuffer in enumerate(costbuffers):
-                if len(costbuffer) > 0:
-                    mean_cost = statistics.mean(costbuffer)
-                    cost_limit = self.alg.cost_limits[cost_idx] if hasattr(self.alg, 'cost_limits') else "N/A"
-                    log_string += f"""{f'Episode cost {cost_idx} (mean):':>{pad}} {mean_cost:.4f} (limit={cost_limit}) [{len(costbuffer)} episodes]\n"""
-            if hasattr(self.alg, 'lambdas'):
-                lambda_str = ", ".join([f"{l:.4f}" for l in self.alg.lambdas])
-                log_string += f"""{f'Lagrangian multipliers:':>{pad}} [{lambda_str}]\n"""
-
-        log_string += ep_string
-        log_string += (
-            f"""{'-' * width}\n"""
-            f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
-            f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
-            f"""{'Time elapsed:':>{pad}} {time.strftime("%H:%M:%S", time.gmtime(self.tot_time))}\n"""
-            f"""{'ETA:':>{pad}} {time.strftime(
-                "%H:%M:%S",
-                time.gmtime(
-                    self.tot_time / max(it - start_iter + 1, 1)
-                    * (start_iter + num_learning_iterations - it)
-                )
-            )}\n"""
-        )
-        print(log_string)
 
     def save(self, path: str, infos: dict | None = None):
         """Save model checkpoint."""
@@ -652,8 +396,7 @@ class OffPolicyRunner:
         print(f"[Model Saved] -> {path}")
 
         # Upload to external logger
-        if self.logger_type in ["neptune", "wandb"] and self.writer is not None:
-            self.writer.save_model(path, self.current_learning_iteration)
+        self.logger.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True) -> dict | None:
         """Load model checkpoint."""
@@ -714,7 +457,71 @@ class OffPolicyRunner:
 
     def add_git_repo_to_log(self, repo_file_path: str):
         """Add a git repository to track for logging."""
-        self.git_status_repos.append(repo_file_path)
+        self.logger.git_status_repos.append(repo_file_path)
+
+    def __str__(self) -> str:
+        sep = "─" * 56
+        alg = self.alg
+        ac = self.actor_critic
+        n_envs = self.env.num_envs
+        steps = self.num_steps_per_env
+
+        lines = [
+            sep,
+            f"  {alg.__class__.__name__}  |  {n_envs:,} envs  |  {self.device}",
+            sep,
+            "  Runner",
+            f"    {'num_actions:':<28} {self.env.num_actions}",
+            f"    {'num_steps_per_env:':<28} {steps}",
+            f"    {'start_random_steps:':<28} {self.start_random_steps}",
+            f"    {'update_after:':<28} {self.update_after}",
+            f"    {'transitions/iter:':<28} {n_envs * steps:,}",
+            f"    {'empirical_normalization:':<28} {self.empirical_normalization}",
+            f"    {'reward_normalization:':<28} {self.reward_normalization}",
+            "",
+            f"  Policy  ({ac.__class__.__name__})",
+            f"    {'actor_type:':<28} {ac.actor_type}",
+            f"    {'critic_type:':<28} {ac.critic_type}",
+            f"    {'num_critics:':<28} {ac.num_critics}",
+            f"    {'actor:':<28} {ac.actor}",
+            f"    {'critic:':<28} {ac.critics[0]}",
+            "",
+            f"  Algorithm  ({alg.__class__.__name__})",
+            f"    {'batch_size:':<28} {alg.batch_size:,}",
+            f"    {'gamma / tau:':<28} {alg.gamma}  /  {alg.tau}",
+            f"    {'num_updates_per_step:':<28} {alg.num_updates_per_step}",
+            f"    {'policy_frequency:':<28} {alg.policy_frequency}",
+            f"    {'actor_lr / critic_lr:':<28} {alg.actor_optimizer.param_groups[0]['lr']}  /  {alg.critic_optimizer.param_groups[0]['lr']}",
+            f"    {'auto_entropy_tuning:':<28} {alg.auto_entropy_tuning}",
+            f"    {'alpha:':<28} {alg.alpha.item():.4f}",
+        ]
+
+        if alg.auto_entropy_tuning:
+            lines.append(f"    {'target_entropy:':<28} {alg.target_entropy}")
+
+        # Safe RL info
+        if self.is_safe_rl:
+            lines += [
+                "",
+                "  Safe RL",
+                f"    {'num_costs:':<28} {alg.num_costs}",
+                f"    {'cost_limits:':<28} {alg.cost_limits}",
+            ]
+            if hasattr(alg, 'lambdas'):
+                lambda_str = ", ".join([f"{l:.4f}" for l in alg.lambdas])
+                lines.append(f"    {'lambdas:':<28} [{lambda_str}]")
+
+        # Storage
+        if alg.storage is not None:
+            lines += [
+                "",
+                "  Storage",
+                f"    {'max_size:':<28} {alg.storage.max_size:,}",
+                f"    {'device:':<28} {alg.storage.device}",
+            ]
+
+        lines.append(sep)
+        return "\n".join(lines)
 
     def _sample_random_action(self) -> torch.Tensor:
         """Sample random actions for initial exploration."""
@@ -722,33 +529,3 @@ class OffPolicyRunner:
             return self.actor_critic.sample_random_action(self.env.num_envs)
         # Default: uniform random in [-1, 1]
         return torch.rand(self.env.num_envs, self.env.num_actions, device=self.device) * 2 - 1
-
-    def _init_logger(self) -> None:
-        """Initialize the logger based on configuration."""
-        if self.log_dir is None:
-            return
-
-        os.makedirs(self.log_dir, exist_ok=True)
-        self.logger_type = self.runner_cfg.get("logger", "tensorboard").lower()
-
-        # Build a flattened config for loggers that expect wandb_project at top level
-        logger_cfg = {
-            **self.cfg,
-            "wandb_project": self.runner_cfg.get("wandb_project", "safe_rl"),
-            "wandb_entity": self.runner_cfg.get("wandb_entity"),
-            "wandb_dir": self.runner_cfg.get("wandb_dir"),
-        }
-
-        if self.logger_type == "neptune":
-            from safe_rl.utils.neptune_utils import NeptuneSummaryWriter
-            self.writer = NeptuneSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=logger_cfg)
-            self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
-        elif self.logger_type == "wandb":
-            from safe_rl.utils.wandb_utils import WandbSummaryWriter
-            self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=logger_cfg)
-            self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
-        elif self.logger_type == "tensorboard":
-            from torch.utils.tensorboard import SummaryWriter
-            self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
-        else:
-            raise ValueError(f"Logger type '{self.logger_type}' not found. Choose 'neptune', 'wandb', or 'tensorboard'.")
