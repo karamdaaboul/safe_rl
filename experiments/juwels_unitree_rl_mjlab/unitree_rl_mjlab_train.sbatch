@@ -20,8 +20,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=48
-#SBATCH --gres=gpu:4
-#SBATCH --mem=480G
+#SBATCH --gres=gpu:1
+#SBATCH --mem=128G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -76,6 +76,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
     --env WANDB_SILENT=true \
     --env WANDB_DIR=/scratch/wandb \
     --env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+    --env MASTER_ADDR=127.0.0.1 \
+    --env MASTER_PORT=29500 \
+    --env GLOO_SOCKET_IFNAME=lo \
     --env OMP_NUM_THREADS=1 \
     --env MKL_NUM_THREADS=1 \
     --env NUMBA_NUM_THREADS=1 \
@@ -87,7 +90,6 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
         mkdir -p /scratch/.cache /scratch/tmp /scratch/wandb
         export PYTHONUNBUFFERED=1
         python /opt/unitree_rl_mjlab/scripts/train.py $TASK_ID \
-            --gpu-ids all \
             --env.scene.num-envs=$NUM_ENVS \
             --agent.max_iterations=$MAX_ITER \
             --agent.run_name=$RUN_NAME
