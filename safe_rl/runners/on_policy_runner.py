@@ -11,7 +11,7 @@ from safe_rl.algorithms import PPO, Distillation
 from safe_rl.algorithms.p3o import P3O
 from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.cup import CUP
-from safe_rl.env import VecEnv
+from safe_rl.envs import VecEnv
 from safe_rl.modules import (
     ActorCritic,
     ActorCriticCost,

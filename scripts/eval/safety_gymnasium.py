@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple
 import torch
 import yaml
 
-from safe_rl.env import SafetyGymnasiumVecEnv
+from safe_rl.envs import make_env
 from safe_rl.runners import OnPolicyRunner
 
 
@@ -59,7 +59,7 @@ def main() -> None:
 
     train_cfg = load_train_cfg(args.config)
     cost_limits = parse_cost_limits(args.cost_limits)
-    env = SafetyGymnasiumVecEnv(
+    env = make_env(
         env_id=args.env_id,
         num_envs=args.num_envs,
         device=args.device,

@@ -13,7 +13,7 @@ It can be used standalone or as part of a wandb sweep.
 
 Usage:
     # Standalone training
-    python safe_rl_train.py --task Isaac-Velocity-Flat-H1-v0 --num_envs 4096
+    python scripts/train/isaac.py --task Isaac-Velocity-Flat-H1-v0 --num_envs 4096
     
     # With wandb sweep
     wandb sweep sweeps/ppo_sweep.yaml

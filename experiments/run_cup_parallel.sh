@@ -45,7 +45,7 @@ COST_LIMIT_3=50.0
 
 # ---- train in parallel ----
 # Training 1: CUP with cost_limit=10.0 on GPU 0
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 40 \
   --config config/safety_gymnasium_cup.yaml \
@@ -56,7 +56,7 @@ python -u scripts/train_safety_gymnasium.py \
 PID_CUP1=$!
 
 # Training 2: CUP with cost_limit=25.0 on GPU 1
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 40 \
   --config config/safety_gymnasium_cup.yaml \
@@ -67,7 +67,7 @@ python -u scripts/train_safety_gymnasium.py \
 PID_CUP2=$!
 
 # Training 3: CUP with cost_limit=50.0 on GPU 2
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 40 \
   --config config/safety_gymnasium_cup.yaml \

@@ -10,7 +10,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 import safe_rl
-from safe_rl.utils import store_code_state
+from safe_rl.utils.utils import store_code_state
 
 
 class Logger:

@@ -7,7 +7,7 @@ from typing import Any, Dict, Tuple
 
 import yaml
 
-from safe_rl.env import SafetyGymnasiumVecEnv
+from safe_rl.envs import make_env
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner
 
 # Algorithms that use off-policy training
@@ -191,7 +191,7 @@ def main() -> None:
     if algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID", "P3O", "CUP") and cost_limits is not None:
         algorithm_cfg["cost_limits"] = cost_limits
 
-    env = SafetyGymnasiumVecEnv(
+    env = make_env(
         env_id=args.env_id,
         num_envs=args.num_envs,
         device=args.device,

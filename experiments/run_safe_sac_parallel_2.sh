@@ -48,7 +48,7 @@ echo "Testing 3 configurations in parallel"
 echo "=========================================="
 
 # Config 4: High Smoothing (slower, more stable lambda updates)
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/safesac/safety_gymnasium_safe_sac_high_smooth.yaml \
@@ -58,7 +58,7 @@ python -u scripts/train_safety_gymnasium.py \
 PID1=$!
 
 # Config 5: Low Kp (gentler proportional control)
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/safesac/safety_gymnasium_safe_sac_low_kp.yaml \
@@ -68,7 +68,7 @@ python -u scripts/train_safety_gymnasium.py \
 PID2=$!
 
 # Config 6: No sum_norm (no cost normalization, lower lambda_max)
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/safesac/safety_gymnasium_safe_sac_no_sumnorm.yaml \

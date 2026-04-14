@@ -6,7 +6,7 @@ import time
 
 import torch
 
-from safe_rl.env import VecEnv
+from safe_rl.envs import VecEnv
 from safe_rl.modules import EmpiricalNormalization
 from safe_rl.utils.logger import Logger
 

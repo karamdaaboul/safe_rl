@@ -48,7 +48,7 @@ echo "Testing 3 configurations in parallel"
 echo "=========================================="
 
 # Config 1: PI Controller Only (no derivative - most stable)
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/ppol_pid/safety_gymnasium_ppol_pid_pi_only.yaml \
@@ -58,7 +58,7 @@ python -u scripts/train_safety_gymnasium.py \
 PID1=$!
 
 # Config 2: Low Kd (reduced derivative oscillations)
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/ppol_pid/safety_gymnasium_ppol_pid_low_kd.yaml \
@@ -68,7 +68,7 @@ python -u scripts/train_safety_gymnasium.py \
 PID2=$!
 
 # Config 3: Baseline (current settings for comparison)
-python -u scripts/train_safety_gymnasium.py \
+python -u scripts/train/safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/ppol_pid/safety_gymnasium_ppol_pid_baseline.yaml \
