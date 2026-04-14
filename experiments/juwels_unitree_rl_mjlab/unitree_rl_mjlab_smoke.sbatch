@@ -62,6 +62,7 @@ fi
     --writable-tmpfs \
     --bind "$SCRATCH/unitree_rl_mjlab:/scratch" \
     --bind "$SAFE_RL_DIR:/workspace/safe_rl" \
+    --env PYTHONPATH=/workspace/safe_rl \
     --env MUJOCO_GL=egl \
     --env XDG_CACHE_HOME=/scratch/.cache \
     --env TMPDIR=/scratch/tmp \

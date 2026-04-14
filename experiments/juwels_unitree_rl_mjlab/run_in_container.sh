@@ -14,6 +14,7 @@ set -euo pipefail
 
 PROJECT="/p/project1/hai_1075"
 IMAGE="$PROJECT/daaboul1/unitree_rl_mjlab.sif"
+SAFE_RL_DIR="$PROJECT/daaboul1/safe_rl"
 SCRATCH="/p/scratch/hai_1075/daaboul1"
 
 CMD="${1:-bash}"
@@ -27,6 +28,7 @@ export APPTAINER_TMPDIR=$(mktemp -d -p "$SCRATCH/unitree_rl_mjlab/apptainer_tmp"
     --nv \
     --writable-tmpfs \
     --bind "$SCRATCH/unitree_rl_mjlab:/scratch" \
+    --bind "$SAFE_RL_DIR:/workspace/safe_rl" \
     --env MUJOCO_GL=egl \
     --env XDG_CACHE_HOME=/scratch/.cache \
     --env TMPDIR=/scratch/tmp \
@@ -36,6 +38,7 @@ export APPTAINER_TMPDIR=$(mktemp -d -p "$SCRATCH/unitree_rl_mjlab/apptainer_tmp"
     --env OMP_NUM_THREADS=1 \
     --env MKL_NUM_THREADS=1 \
     --env NUMBA_NUM_THREADS=1 \
+    --env PYTHONPATH=/workspace/safe_rl \
     --pwd /opt/unitree_rl_mjlab \
     "$IMAGE" \
     bash -lc "
