@@ -1,58 +1,62 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# =============================================================================
+# Build the unitree_rl_mjlab Apptainer image on the JUWELS login node.
+#
+# Prerequisites — run once before building:
+#   1. Clone unitree_rl_mjlab on JUWELS:
+#        git clone https://github.com/unitreerobotics/unitree_rl_mjlab.git \
+#            /p/project1/hai_1075/daaboul1/unitree_rl_mjlab
+#
+# Usage (on JUWELS login node):
+#   cd /p/project1/hai_1075/daaboul1/safe_rl
+#   bash experiments/juwels_unitree_rl_mjlab/build_unitree_rl_mjlab_image.sh
+# =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ACCOUNT="${ACCOUNT:-hai_1075}"
-PROJECT_ROOT="${PROJECT_ROOT:-/p/project1/${ACCOUNT}/unitree_rl_mjlab}"
-SCRATCH_ROOT="${SCRATCH_ROOT:-/p/scratch/${ACCOUNT}/unitree_rl_mjlab}"
-SRC_DIR="${SRC_DIR:-${PROJECT_ROOT}/src/unitree_rl_mjlab}"
-IMAGE_DIR="${IMAGE_DIR:-${PROJECT_ROOT}/images}"
-CACHE_DIR="${CACHE_DIR:-${SCRATCH_ROOT}/apptainer-cache}"
-TMP_DIR="${TMP_DIR:-${SCRATCH_ROOT}/apptainer-tmp}"
-IMAGE_NAME="${IMAGE_NAME:-unitree_rl_mjlab_cuda12.4.1_py311.sif}"
-IMAGE_PATH="${IMAGE_DIR}/${IMAGE_NAME}"
-DEF_TEMPLATE="${SCRIPT_DIR}/unitree_rl_mjlab.def.template"
-GENERATED_DEF="${IMAGE_DIR}/unitree_rl_mjlab.generated.def"
-REPO_URL="${REPO_URL:-https://github.com/unitreerobotics/unitree_rl_mjlab.git}"
+PROJECT="/p/project1/hai_1075"
+USER_DIR="$PROJECT/daaboul1"
+SCRATCH="/p/scratch/hai_1075/daaboul1"
+REPO="$USER_DIR/unitree_rl_mjlab"
+IMAGE="$USER_DIR/unitree_rl_mjlab.sif"
+DEF_FILE="$SCRIPT_DIR/unitree_rl_mjlab.def.template"
+CACHE_DIR="$SCRATCH/apptainer-cache"
+TMP_DIR="$SCRATCH/apptainer-tmp"
 
-mkdir -p "${PROJECT_ROOT}" "${SCRATCH_ROOT}" "${IMAGE_DIR}" "${CACHE_DIR}" "${TMP_DIR}"
+mkdir -p "$USER_DIR" "$SCRATCH" "$CACHE_DIR" "$TMP_DIR"
 
-if ! command -v apptainer >/dev/null 2>&1; then
-    echo "apptainer is not available in PATH." >&2
-    echo "Make sure your JUWELS account has container runtime access." >&2
+APPTAINER="/usr/bin/apptainer"
+if [[ ! -x "$APPTAINER" ]]; then
+    echo "ERROR: apptainer not found at $APPTAINER"
+    echo "Try: module load Apptainer"
     exit 1
 fi
 
-if [ ! -d "${SRC_DIR}/.git" ]; then
-    mkdir -p "$(dirname "${SRC_DIR}")"
-    git clone "${REPO_URL}" "${SRC_DIR}"
-else
-    git -C "${SRC_DIR}" pull --ff-only
+if [[ ! -d "$REPO/.git" ]]; then
+    echo "ERROR: unitree_rl_mjlab repo not found at $REPO"
+    echo "Clone it first:"
+    echo "  git clone https://github.com/unitreerobotics/unitree_rl_mjlab.git $REPO"
+    exit 1
 fi
 
-export APPTAINER_CACHEDIR="${CACHE_DIR}"
-export APPTAINER_TMPDIR="${TMP_DIR}"
+export APPTAINER_CACHEDIR="$CACHE_DIR"
+export APPTAINER_TMPDIR="$TMP_DIR"
 
-python3 - <<PY
-from pathlib import Path
+echo "Building $IMAGE from $DEF_FILE ..."
+echo "Source: $REPO"
+echo ""
 
-template = Path("${DEF_TEMPLATE}").read_text()
-output = template.replace("__SRC_DIR__", "${SRC_DIR}")
-Path("${GENERATED_DEF}").write_text(output)
-PY
+$APPTAINER build \
+    --fakeroot \
+    --build-arg SRC_DIR="$REPO" \
+    "$IMAGE" \
+    "$DEF_FILE"
 
-echo "Source checkout : ${SRC_DIR}"
-echo "Image output    : ${IMAGE_PATH}"
-echo "Cache dir       : ${APPTAINER_CACHEDIR}"
-echo "Tmp dir         : ${APPTAINER_TMPDIR}"
-echo "Definition file : ${GENERATED_DEF}"
-
-apptainer build --fakeroot "${IMAGE_PATH}" "${GENERATED_DEF}"
-
-echo
-echo "Build completed."
-echo "Next step:"
-echo "  bash ${SCRIPT_DIR}/interactive_job.sh"
-echo "  # once the allocation is ready:"
-echo "  bash ${SCRIPT_DIR}/run_in_container.sh"
+echo ""
+echo "Build complete: $IMAGE"
+echo "Size: $(du -sh "$IMAGE" | cut -f1)"
+echo ""
+echo "Next steps:"
+echo "  sbatch $SCRIPT_DIR/unitree_rl_mjlab_smoke.sbatch   # verify"
+echo "  sbatch $SCRIPT_DIR/unitree_rl_mjlab_train.sbatch   # train"

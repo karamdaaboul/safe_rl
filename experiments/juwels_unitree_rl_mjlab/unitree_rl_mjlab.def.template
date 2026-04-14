@@ -1,12 +1,15 @@
 Bootstrap: docker
 From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
+%arguments
+    SRC_DIR=/p/project1/hai_1075/daaboul1/unitree_rl_mjlab
+
 %labels
     Author daaboul
     Description unitree_rl_mjlab runtime for JUWELS
 
 %files
-    __SRC_DIR__ /opt/unitree_rl_mjlab
+    {{ SRC_DIR }} /opt/unitree_rl_mjlab
 
 %environment
     export CONDA_DIR=/opt/conda
