@@ -1,8 +1,3 @@
-# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 #  Copyright (c) 2020 Preferred Networks, Inc.
 
 from __future__ import annotations

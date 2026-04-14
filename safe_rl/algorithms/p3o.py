@@ -227,7 +227,7 @@ class P3O:
             if violation_detected:
                 # Current: κ = min(ρ * κ, κ_max)
                 # Improved: Different update rates based on violation severity
-                violation_ratio = current_cost / self.cost_limits[cost_idx]
+                violation_ratio = current_cost / (self.cost_limits[cost_idx] + 1e-8)
                 if violation_ratio > 2.0:  # Severe violation
                     self.kappa[cost_idx] *= 2.0  # Aggressive increase
                 elif violation_ratio > 1.5:
@@ -237,7 +237,7 @@ class P3O:
                     self.kappa[cost_idx] = min(self.rho * self.kappa[cost_idx], self.kappa_max)
             else:
                 # No violation detected - consider decreasing kappa
-                cost_ratio = current_cost / self.cost_limits[cost_idx]
+                cost_ratio = current_cost / (self.cost_limits[cost_idx] + 1e-8)
                 if cost_ratio < 0.8:  # Well within limit
                     self.kappa[cost_idx] *= 0.95  # Slight decrease
                 elif cost_ratio < 0.6:  # Very safe

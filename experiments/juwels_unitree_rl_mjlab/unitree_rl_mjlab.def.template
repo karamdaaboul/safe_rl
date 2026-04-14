@@ -1,0 +1,73 @@
+Bootstrap: docker
+From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+%arguments
+    SRC_DIR=/p/project1/hai_1075/daaboul1/unitree_rl_mjlab
+
+%labels
+    Author daaboul
+    Description unitree_rl_mjlab runtime for JUWELS
+
+%files
+    {{ SRC_DIR }} /opt/unitree_rl_mjlab
+
+%environment
+    export CONDA_DIR=/opt/conda
+    export PATH=/opt/conda/envs/unitree_rl_mjlab/bin:/opt/conda/bin:$PATH
+    export PYTHONNOUSERSITE=1
+    export MUJOCO_GL=egl
+    export MPLBACKEND=Agg
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        git \
+        git-lfs \
+        libegl1 \
+        libeigen3-dev \
+        libfmt-dev \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libspdlog-dev \
+        libx11-6 \
+        libxext6 \
+        libxrender1 \
+        libyaml-cpp-dev \
+        pkg-config \
+        wget
+    rm -rf /var/lib/apt/lists/*
+
+    wget -qO /tmp/miniforge.sh \
+        https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+    bash /tmp/miniforge.sh -b -p /opt/conda
+    rm -f /tmp/miniforge.sh
+
+    . /opt/conda/etc/profile.d/conda.sh
+    conda create -y -n unitree_rl_mjlab python=3.11
+    conda activate unitree_rl_mjlab
+
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install --no-cache-dir mjlab==1.2.0
+    python -m pip install --no-cache-dir -e /opt/unitree_rl_mjlab
+
+    python - <<'PY'
+import mjlab
+import src.tasks
+
+print("Verified imports:", mjlab.__name__, src.tasks.__name__)
+PY
+
+    conda clean -afy
+    git lfs install --system || true
+
+%runscript
+    exec /bin/bash "$@"
