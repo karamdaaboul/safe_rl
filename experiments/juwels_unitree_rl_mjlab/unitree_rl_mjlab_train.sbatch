@@ -31,6 +31,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 PROJECT="/p/project1/hai_1075"
 IMAGE="$PROJECT/daaboul1/unitree_rl_mjlab.sif"
+SAFE_RL_DIR="$PROJECT/daaboul1/safe_rl"
 SCRATCH="/p/scratch/hai_1075/daaboul1"
 
 TASK_ID="${TASK_ID:-Unitree-G1-Flat}"
@@ -61,6 +62,13 @@ if [[ ! -f "$IMAGE" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$SAFE_RL_DIR/scripts/train/unitree_mjlab.py" ]]; then
+    echo "ERROR: safe_rl training script not found at $SAFE_RL_DIR"
+    echo "Sync this repo to JUWELS first:"
+    echo "  bash experiments/juwels_unitree_rl_mjlab/sync_to_juwels.sh"
+    exit 1
+fi
+
 # JUWELS binds one GPU per task by default. For one-task multi-GPU jobs we
 # explicitly expose all four devices and let the upstream launcher spawn workers.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -69,6 +77,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
     --nv \
     --writable-tmpfs \
     --bind "$SCRATCH/unitree_rl_mjlab:/scratch" \
+    --bind "$SAFE_RL_DIR:/workspace/safe_rl" \
     --env MUJOCO_GL=egl \
     --env XDG_CACHE_HOME=/scratch/.cache \
     --env TMPDIR=/scratch/tmp \
@@ -89,10 +98,12 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
         set -euo pipefail
         mkdir -p /scratch/.cache /scratch/tmp /scratch/wandb
         export PYTHONUNBUFFERED=1
-        python /opt/unitree_rl_mjlab/scripts/train.py $TASK_ID \
-            --env.scene.num-envs=$NUM_ENVS \
-            --agent.max_iterations=$MAX_ITER \
-            --agent.run_name=$RUN_NAME
+        cd /workspace/safe_rl
+        python scripts/train/unitree_mjlab.py $TASK_ID \
+            --num_envs $NUM_ENVS \
+            --max_iterations $MAX_ITER \
+            --run_name $RUN_NAME \
+            --log_dir /scratch/logs/safe_rl
     "
 
 echo "========================================"
