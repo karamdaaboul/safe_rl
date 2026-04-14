@@ -9,13 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import torch
-import yaml
-
-from safe_rl.envs import make_env
-from safe_rl.runners import OnPolicyRunner
-
-
 def _add_unitree_repo_to_path() -> None:
     explicit_repo = os.environ.get("UNITREE_RL_MJLAB_PATH")
     candidates = [explicit_repo] if explicit_repo else []
@@ -34,6 +27,9 @@ def _add_unitree_repo_to_path() -> None:
 
 _add_unitree_repo_to_path()
 
+# Import mjlab before torch: mjlab transitively loads libicui18n.so.78, which
+# needs CXXABI_1.3.15 from the conda env's newer libstdc++. If torch imports
+# first, it pins the host's older libstdc++ and later mjlab imports fail.
 import mjlab  # noqa: E402
 import mjlab.tasks  # noqa: E402,F401
 import tyro  # noqa: E402
@@ -45,6 +41,12 @@ from mjlab.utils.torch import configure_torch_backends  # noqa: E402
 from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
 
 import src.tasks  # noqa: E402,F401
+
+import torch  # noqa: E402
+import yaml  # noqa: E402
+
+from safe_rl.envs import make_env  # noqa: E402
+from safe_rl.runners import OnPolicyRunner  # noqa: E402
 
 
 class _YamlDumper(yaml.SafeDumper):
