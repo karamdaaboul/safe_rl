@@ -13,10 +13,8 @@
 set -euo pipefail
 
 PROJECT="/p/project1/hai_1075"
-REPO="$PROJECT/daaboul1/unitree_rl_mjlab"
 IMAGE="$PROJECT/daaboul1/unitree_rl_mjlab.sif"
 SCRATCH="/p/scratch/hai_1075/daaboul1"
-SAFE_RL="$PROJECT/daaboul1/safe_rl"
 
 CMD="${1:-bash}"
 
@@ -28,10 +26,7 @@ export APPTAINER_TMPDIR=$(mktemp -d -p "$SCRATCH/unitree_rl_mjlab/apptainer_tmp"
 /usr/bin/apptainer exec \
     --nv \
     --writable-tmpfs \
-    --bind "$REPO:/workspace/unitree_rl_mjlab" \
-    --bind "$SAFE_RL:/opt/safe_rl" \
     --bind "$SCRATCH/unitree_rl_mjlab:/scratch" \
-    --env PYTHONPATH=/opt/safe_rl:/workspace/unitree_rl_mjlab \
     --env MUJOCO_GL=egl \
     --env XDG_CACHE_HOME=/scratch/.cache \
     --env TMPDIR=/scratch/tmp \
@@ -41,7 +36,7 @@ export APPTAINER_TMPDIR=$(mktemp -d -p "$SCRATCH/unitree_rl_mjlab/apptainer_tmp"
     --env OMP_NUM_THREADS=1 \
     --env MKL_NUM_THREADS=1 \
     --env NUMBA_NUM_THREADS=1 \
-    --pwd /workspace/unitree_rl_mjlab \
+    --pwd /opt/unitree_rl_mjlab \
     "$IMAGE" \
     bash -lc "
         mkdir -p /scratch/.cache /scratch/tmp /scratch/wandb

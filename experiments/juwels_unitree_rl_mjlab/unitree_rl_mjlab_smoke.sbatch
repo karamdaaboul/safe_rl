@@ -23,10 +23,8 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 PROJECT="/p/project1/hai_1075"
-REPO="$PROJECT/daaboul1/unitree_rl_mjlab"
 IMAGE="$PROJECT/daaboul1/unitree_rl_mjlab.sif"
 SCRATCH="/p/scratch/hai_1075/daaboul1"
-SAFE_RL="$PROJECT/daaboul1/safe_rl"
 
 TASK_ID="${TASK_ID:-Unitree-Go2-Flat}"
 NUM_ENVS="${NUM_ENVS:-64}"
@@ -50,22 +48,11 @@ if [[ ! -f "$IMAGE" ]]; then
     echo "ERROR: Container not found: $IMAGE"
     exit 1
 fi
-if [[ ! -d "$REPO" ]]; then
-    echo "ERROR: Source checkout not found: $REPO"
-    exit 1
-fi
-if [[ ! -d "$SAFE_RL" ]]; then
-    echo "ERROR: safe_rl not found at $SAFE_RL"
-    exit 1
-fi
 
 /usr/bin/apptainer exec \
     --nv \
     --writable-tmpfs \
-    --bind "$REPO:/workspace/unitree_rl_mjlab" \
-    --bind "$SAFE_RL:/opt/safe_rl" \
     --bind "$SCRATCH/unitree_rl_mjlab:/scratch" \
-    --env PYTHONPATH=/opt/safe_rl:/workspace/unitree_rl_mjlab \
     --env MUJOCO_GL=egl \
     --env XDG_CACHE_HOME=/scratch/.cache \
     --env TMPDIR=/scratch/tmp \
@@ -75,15 +62,15 @@ fi
     --env OMP_NUM_THREADS=1 \
     --env MKL_NUM_THREADS=1 \
     --env NUMBA_NUM_THREADS=1 \
-    --pwd /workspace \
+    --pwd /scratch \
     "$IMAGE" \
     bash -lc "
         set -euo pipefail
         mkdir -p /scratch/.cache /scratch/tmp /scratch/wandb
         export PYTHONUNBUFFERED=1
         python -c 'import torch; print(\"cuda_available:\", torch.cuda.is_available()); print(\"cuda_device_count:\", torch.cuda.device_count())'
-        python /workspace/unitree_rl_mjlab/scripts/list_envs.py --keyword Unitree
-        python /workspace/unitree_rl_mjlab/scripts/train.py $TASK_ID \
+        python /opt/unitree_rl_mjlab/scripts/list_envs.py --keyword Unitree
+        python /opt/unitree_rl_mjlab/scripts/train.py $TASK_ID \
             --env.scene.num-envs=$NUM_ENVS \
             --agent.max_iterations=$MAX_ITER \
             --agent.run_name=$RUN_NAME

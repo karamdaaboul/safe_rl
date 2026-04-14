@@ -30,16 +30,13 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 PROJECT="/p/project1/hai_1075"
-REPO="$PROJECT/daaboul1/unitree_rl_mjlab"
 IMAGE="$PROJECT/daaboul1/unitree_rl_mjlab.sif"
 SCRATCH="/p/scratch/hai_1075/daaboul1"
-SAFE_RL="$PROJECT/daaboul1/safe_rl"
 
 TASK_ID="${TASK_ID:-Unitree-G1-Flat}"
 NUM_ENVS="${NUM_ENVS:-4096}"
 MAX_ITER="${MAX_ITER:-1500}"
 RUN_NAME="${RUN_NAME:-juwels_train_${SLURM_JOB_ID}}"
-GPU_IDS="${GPU_IDS:-0 1 2 3}"
 # ---------------------------------------------------------------------------
 
 mkdir -p logs
@@ -64,22 +61,6 @@ if [[ ! -f "$IMAGE" ]]; then
     exit 1
 fi
 
-if [[ ! -d "$REPO" ]]; then
-    echo "ERROR: Source checkout not found: $REPO"
-    echo "Clone it once on JUWELS:"
-    echo "  git clone https://github.com/unitreerobotics/unitree_rl_mjlab.git $REPO"
-    exit 1
-fi
-
-if [[ ! -d "$SAFE_RL" ]]; then
-    echo "ERROR: safe_rl not found at $SAFE_RL"
-    echo "Clone it once on JUWELS:"
-    echo "  git clone https://github.com/karamdaaboul/safe_rl.git $SAFE_RL"
-    exit 1
-fi
-
-LOGDIR="$SCRATCH/unitree_rl_mjlab/logs"
-
 # JUWELS binds one GPU per task by default. For one-task multi-GPU jobs we
 # explicitly expose all four devices and let the upstream launcher spawn workers.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -87,11 +68,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 /usr/bin/apptainer exec \
     --nv \
     --writable-tmpfs \
-    --bind "$REPO:/workspace/unitree_rl_mjlab" \
-    --bind "$LOGDIR:/workspace/logs" \
-    --bind "$SAFE_RL:/opt/safe_rl" \
     --bind "$SCRATCH/unitree_rl_mjlab:/scratch" \
-    --env PYTHONPATH=/opt/safe_rl:/workspace/unitree_rl_mjlab \
     --env MUJOCO_GL=egl \
     --env XDG_CACHE_HOME=/scratch/.cache \
     --env TMPDIR=/scratch/tmp \
@@ -103,15 +80,14 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
     --env MKL_NUM_THREADS=1 \
     --env NUMBA_NUM_THREADS=1 \
     --env PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 \
-    --pwd /workspace \
+    --pwd /scratch \
     "$IMAGE" \
     bash -lc "
         set -euo pipefail
         mkdir -p /scratch/.cache /scratch/tmp /scratch/wandb
         export PYTHONUNBUFFERED=1
-        read -r -a GPU_IDS_ARR <<< \"$GPU_IDS\"
-        python /workspace/unitree_rl_mjlab/scripts/train.py $TASK_ID \
-            --gpu-ids \"\${GPU_IDS_ARR[@]}\" \
+        python /opt/unitree_rl_mjlab/scripts/train.py $TASK_ID \
+            --gpu-ids all \
             --env.scene.num-envs=$NUM_ENVS \
             --agent.max_iterations=$MAX_ITER \
             --agent.run_name=$RUN_NAME
