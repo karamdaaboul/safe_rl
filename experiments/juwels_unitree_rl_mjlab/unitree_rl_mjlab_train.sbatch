@@ -52,7 +52,7 @@ echo " Job:      $SLURM_JOB_ID on $SLURMD_NODENAME"
 echo " Task:     $TASK_ID"
 echo " Envs:     $NUM_ENVS"
 echo " Max iter: $MAX_ITER"
-echo " GPUs:     $GPU_IDS"
+echo " GPUs:     ${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 echo "========================================"
 
 if [[ ! -f "$IMAGE" ]]; then
