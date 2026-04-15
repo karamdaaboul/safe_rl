@@ -204,7 +204,6 @@ class ActorCritic(nn.Module):
         if self.is_deterministic_actor:
             raise RuntimeError("update_distribution not available for deterministic actor")
 
-        observations = self.actor_obs_normalizer(observations)
         mean = self.actor(observations)
 
         if self.noise_std_type == "scalar":

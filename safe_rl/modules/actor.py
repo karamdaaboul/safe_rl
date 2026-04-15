@@ -11,7 +11,13 @@ from safe_rl.utils import resolve_nn_activation
 
 
 class DeterministicActor(nn.Module):
-    """Deterministic actor network that outputs mean actions."""
+    """Deterministic actor network that outputs mean actions.
+
+    Optionally supports per-environment exploration noise: if ``num_envs`` and
+    a non-zero noise range are supplied, each env gets an independently
+    sampled noise std from ``U[noise_std_min, noise_std_max]`` which is
+    resampled on episode termination via :meth:`reset`.
+    """
 
     def __init__(
         self,
@@ -19,6 +25,9 @@ class DeterministicActor(nn.Module):
         num_actions: int,
         hidden_dims: list[int] = [256, 256, 256],
         activation: str = "elu",
+        num_envs: int = 1,
+        noise_std_min: float = 0.0,
+        noise_std_max: float = 0.0,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -27,6 +36,12 @@ class DeterministicActor(nn.Module):
                 + str([key for key in kwargs])
             )
         super().__init__()
+
+        self.num_actions = num_actions
+        self.num_envs = num_envs
+        self.noise_std_min = float(noise_std_min)
+        self.noise_std_max = float(noise_std_max)
+        self.has_exploration_noise = self.noise_std_max > 0.0
 
         activation_fn = resolve_nn_activation(activation)
 
@@ -40,8 +55,36 @@ class DeterministicActor(nn.Module):
 
         self.network = nn.Sequential(*layers)
 
+        # Per-env exploration noise scales, resampled on episode termination.
+        init_scales = torch.empty(num_envs, 1).uniform_(self.noise_std_min, self.noise_std_max)
+        self.register_buffer("noise_scales", init_scales)
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.network(obs)
+
+    def act(self, obs: torch.Tensor) -> torch.Tensor:
+        """Return actions with per-env Gaussian exploration noise added."""
+        actions = self.network(obs)
+        if self.has_exploration_noise and self.training:
+            noise = torch.randn_like(actions) * self.noise_scales[: actions.shape[0]]
+            actions = actions + noise
+        return actions
+
+    def act_inference(self, obs: torch.Tensor) -> torch.Tensor:
+        """Return the deterministic action without added noise."""
+        return self.network(obs)
+
+    def reset(self, dones: torch.Tensor | None = None) -> None:
+        """Resample exploration-noise scales for terminated environments."""
+        if not self.has_exploration_noise or dones is None:
+            return
+        mask = dones.view(-1).bool()
+        if not mask.any():
+            return
+        new_scales = torch.empty(int(mask.sum().item()), 1, device=self.noise_scales.device).uniform_(
+            self.noise_std_min, self.noise_std_max
+        )
+        self.noise_scales[mask] = new_scales
 
 
 class StochasticActor(nn.Module):

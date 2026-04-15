@@ -36,7 +36,7 @@ SCRATCH="/p/scratch/hai_1075/daaboul1"
 
 TASK_ID="${TASK_ID:-Unitree-G1-Flat}"
 NUM_ENVS="${NUM_ENVS:-4096}"
-MAX_ITER="${MAX_ITER:-1500}"
+MAX_ITER="${MAX_ITER:-10000}"
 RUN_NAME="${RUN_NAME:-juwels_train_${SLURM_JOB_ID}}"
 # ---------------------------------------------------------------------------
 
