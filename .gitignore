@@ -19,7 +19,7 @@ wandb/*
 outputs/*
 logs/*
 AGENTS.md
-
+wandb_logs/*
 # local workspace files
 .DS_Store
 CLAUDE.md
@@ -31,3 +31,8 @@ checkpoints/
 
 # local experiment helpers
 experiments/juwels_unitree_rl_mjlab/
+experiments/juwels_safety_gym/
+
+.pre-commit-config.yaml
+
+.github/
