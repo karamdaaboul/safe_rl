@@ -21,7 +21,7 @@ algorithm:
   # -- Training
   batch_size: 8192  # holosoma: large batch size
   num_updates_per_step: 8  # holosoma: multiple updates per step
-  policy_frequency: 4  # FastSAC-style delayed actor updates
+  policy_frequency: 4  # delayed actor updates
   max_grad_norm: 1.0  # gradient clipping (holosoma uses 0.0 but we keep some clipping)
 
 policy:

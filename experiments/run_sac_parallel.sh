@@ -50,7 +50,7 @@ MAX_ITERATIONS=100000
 
 # ---- train in parallel ----
 # Training 1: SAC with seed=1 on GPU 0
-python -u scripts/train/safety_gymnasium.py \
+python -u scripts/train/train_safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/safety_gymnasium_sac.yaml \
@@ -62,7 +62,7 @@ python -u scripts/train/safety_gymnasium.py \
 PID_SAC1=$!
 
 # Training 2: SAC with seed=42 on GPU 1
-python -u scripts/train/safety_gymnasium.py \
+python -u scripts/train/train_safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/safety_gymnasium_sac.yaml \
@@ -74,7 +74,7 @@ python -u scripts/train/safety_gymnasium.py \
 PID_SAC2=$!
 
 # Training 3: SAC with seed=123 on GPU 2
-python -u scripts/train/safety_gymnasium.py \
+python -u scripts/train/train_safety_gymnasium.py \
   --env_id $ENV_ID \
   --num_envs $NUM_ENVS \
   --config config/safety_gymnasium_sac.yaml \

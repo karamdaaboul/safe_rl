@@ -13,12 +13,15 @@ from typing import Callable
 
 
 def resolve_nn_activation(act_name: str) -> torch.nn.Module:
+    act_name = act_name.lower()
     if act_name == "elu":
         return torch.nn.ELU()
     elif act_name == "selu":
         return torch.nn.SELU()
     elif act_name == "relu":
         return torch.nn.ReLU()
+    elif act_name in {"silu", "swish"}:
+        return torch.nn.SiLU()
     elif act_name == "crelu":
         return torch.nn.CELU()
     elif act_name == "lrelu":

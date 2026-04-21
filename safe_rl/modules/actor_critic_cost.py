@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import torch
 import torch.nn as nn
-from torch.distributions import Normal
 
-from safe_rl.utils import resolve_nn_activation
+from safe_rl.modules.actor import GaussianActor
+from safe_rl.modules.critic import StandardCritic
 
 
 class ActorCriticCost(nn.Module):
@@ -30,71 +29,32 @@ class ActorCriticCost(nn.Module):
                 + str([key for key in kwargs.keys()])
             )
         super().__init__()
-        activation = resolve_nn_activation(activation)
 
-        mlp_input_dim_a = num_actor_obs
-        mlp_input_dim_c = num_critic_obs
-        # Policy
-        actor_layers = []
-        actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
-        actor_layers.append(activation)
-        for layer_index in range(len(actor_hidden_dims)):
-            if layer_index == len(actor_hidden_dims) - 1:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
-            else:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
-                actor_layers.append(activation)
-        self.actor = nn.Sequential(*actor_layers)
-
-        # Value function
-        critic_layers = []
-        critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
-        critic_layers.append(activation)
-        for layer_index in range(len(critic_hidden_dims)):
-            if layer_index == len(critic_hidden_dims) - 1:
-                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], 1))
-            else:
-                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
-                critic_layers.append(activation)
-        self.critic = nn.Sequential(*critic_layers)
-
-        # Cost function - outputs num_costs values
-        cost_critic_layers = []
-        cost_critic_layers.append(nn.Linear(mlp_input_dim_c, cost_critic_hidden_dims[0]))
-        cost_critic_layers.append(activation)
-        for layer_index in range(len(cost_critic_hidden_dims)):
-            if layer_index == len(cost_critic_hidden_dims) - 1:
-                cost_critic_layers.append(nn.Linear(cost_critic_hidden_dims[layer_index], num_costs))
-            else:
-                cost_critic_layers.append(nn.Linear(cost_critic_hidden_dims[layer_index], cost_critic_hidden_dims[layer_index + 1]))
-                cost_critic_layers.append(activation)
-        self.cost_critic = nn.Sequential(*cost_critic_layers)
-
-        print(f"Actor MLP: {self.actor}")
-        print(f"Critic MLP: {self.critic}")
-        print(f"Cost Critic MLP: {self.cost_critic}")
-
-        # Action noise
-        self.noise_std_type = noise_std_type
-        if self.noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        elif self.noise_std_type == "log":
-            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
-        else:
-            raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        self.actor = GaussianActor(
+            num_obs=num_actor_obs,
+            num_actions=num_actions,
+            hidden_dims=actor_hidden_dims,
+            activation=activation,
+            init_noise_std=init_noise_std,
+            noise_std_type=noise_std_type,
+        )
+        self.critic = StandardCritic(
+            num_obs=num_critic_obs,
+            num_actions=0,
+            output_dim=1,
+            hidden_dims=critic_hidden_dims,
+            activation=activation,
+        )
+        self.cost_critic = StandardCritic(
+            num_obs=num_critic_obs,
+            num_actions=0,
+            output_dim=num_costs,
+            hidden_dims=cost_critic_hidden_dims,
+            activation=activation,
+        )
 
         # Action distribution (populated in update_distribution)
         self.distribution = None
-        # disable args validation for speedup
-        Normal.set_default_validate_args(False)
-
-    @staticmethod
-    # not used at the moment
-    def init_weights(sequential, scales):
-        [
-            torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
-            for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
-        ]
 
     def reset(self, dones=None):
         pass
@@ -115,17 +75,7 @@ class ActorCriticCost(nn.Module):
         return self.distribution.entropy().sum(dim=-1)
 
     def update_distribution(self, observations):
-        # compute mean
-        mean = self.actor(observations)
-        # compute standard deviation
-        if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
-        elif self.noise_std_type == "log":
-            std = torch.exp(self.log_std).expand_as(mean)
-        else:
-            raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        # create distribution
-        self.distribution = Normal(mean, std)
+        self.distribution = self.actor.distribution(observations)
 
     def act(self, observations, **kwargs):
         self.update_distribution(observations)

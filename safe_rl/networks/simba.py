@@ -176,7 +176,8 @@ class HyperLERPBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # LERP: (1 - alpha) * x + alpha * mlp(x)
-        alpha = torch.sigmoid(self.alpha(torch.ones_like(x)))
+        # Compute alpha from a unit vector of shape [hidden_dim] — batch-independent.
+        alpha = torch.sigmoid(self.alpha.init + self.alpha.scale * self.alpha.weight)
         y = (1 - alpha) * x + alpha * self.mlp(x)
         y = l2normalize(y, dim=-1)
         return y

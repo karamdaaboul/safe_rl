@@ -54,7 +54,7 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to evaluate.")
     parser.add_argument("--cost_limits", type=str, default=None, help="Comma-separated cost limits.")
     parser.add_argument("--render_mode", type=str, default=None, help="Render mode (e.g. human, rgb_array).")
-    parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
+    parser.add_argument("--seed", type=str, default=None, help="Environment seed.")
     args = parser.parse_args()
 
     train_cfg = load_train_cfg(args.config)
@@ -110,7 +110,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-

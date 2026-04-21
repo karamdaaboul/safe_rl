@@ -1,6 +1,6 @@
 # Safe PPO sweep for comprehensive hyperparameter exploration
 # Focuses on safety-critical parameters and performance optimization
-program: safe_rl_train.py
+program: scripts/train/isaac.py
 method: grid
 metric:
   goal: maximize

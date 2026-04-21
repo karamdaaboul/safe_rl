@@ -1,13 +1,17 @@
-"""FastSAC — performance-optimized Soft Actor-Critic.
+"""FastTD3 — Twin Delayed DDPG with optional distributional critics.
 
-torch.compile on loss functions, AMP, AdamW, vectorized soft updates,
-and a clipped_double_q toggle. Works with SACActorCritic and safe_rl's
-ReplayStorage via the same interface as SAC.
+Port of the TD3 variant from Seo et al., "Learning Sim-to-Real Humanoid
+Locomotion in 15 Minutes" (arXiv:2512.01996), adapted to safe_rl's interfaces.
+
+Key features:
+- Twin critics (standard scalar Q or C51 distributional)
+- Delayed actor + soft-target update every ``policy_frequency`` critic steps
+- Target policy smoothing (clipped Gaussian noise on target actions)
+- ``num_updates_per_step`` gradient updates per collection (UTD ratio)
+- AdamW, AMP, vectorized Polyak averaging
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 import torch.nn as nn
@@ -16,13 +20,8 @@ import torch.optim as optim
 from torch.amp import GradScaler, autocast
 
 from safe_rl.modules.reward_normalization import RewardNormalization
-from safe_rl.modules.sac_actor_critic import SACActorCritic
+from safe_rl.modules.td3_actor_critic import TD3ActorCritic
 from safe_rl.storage.replay_storage import ReplayStorage
-
-
-# ---------------------------------------------------------------------------
-# Compiled loss functions (standalone for maximum torch.compile benefit)
-# ---------------------------------------------------------------------------
 
 
 @torch.compile
@@ -32,8 +31,11 @@ def _critic_loss_standard(
     rewards: torch.Tensor,
     dones: torch.Tensor,
     next_obs: torch.Tensor,
-    alpha: torch.Tensor,
     gamma: float,
+    smoothing_noise: float,
+    noise_clip: float,
+    action_low: float,
+    action_high: float,
     clipped_double_q: bool,
     actor: nn.Module,
     critic_1: nn.Module,
@@ -42,28 +44,21 @@ def _critic_loss_standard(
     target_2: nn.Module,
     actor_obs_normalizer: nn.Module,
     critic_obs_normalizer: nn.Module,
-    actor_obs: torch.Tensor,
-    next_actor_obs: torch.Tensor,
 ) -> torch.Tensor:
-    """Compiled critic loss for standard (MSE) Q-networks."""
     with torch.no_grad():
-        next_actions, next_log_prob = actor.sample(actor_obs_normalizer(next_actor_obs))
+        next_mean = actor(actor_obs_normalizer(next_obs))
+        noise = torch.randn_like(next_mean).mul(smoothing_noise).clamp(-noise_clip, noise_clip)
+        next_actions = (next_mean + noise).clamp(action_low, action_high)
 
         next_obs_norm = critic_obs_normalizer(next_obs)
-        q1_target = target_1(next_obs_norm, next_actions)
-        q2_target = target_2(next_obs_norm, next_actions)
-
-        if clipped_double_q:
-            q_target = torch.min(q1_target, q2_target)
-        else:
-            q_target = (q1_target + q2_target) / 2.0
-
-        target_q = rewards + gamma * (1 - dones) * (q_target - alpha * next_log_prob)
+        q1_t = target_1(next_obs_norm, next_actions)
+        q2_t = target_2(next_obs_norm, next_actions)
+        q_t = torch.min(q1_t, q2_t) if clipped_double_q else 0.5 * (q1_t + q2_t)
+        target_q = rewards + gamma * (1.0 - dones) * q_t
 
     obs_norm = critic_obs_normalizer(obs)
     q1 = critic_1(obs_norm, actions)
     q2 = critic_2(obs_norm, actions)
-
     return 0.5 * F.mse_loss(q1, target_q) + 0.5 * F.mse_loss(q2, target_q)
 
 
@@ -74,8 +69,11 @@ def _critic_loss_distributional(
     rewards: torch.Tensor,
     dones: torch.Tensor,
     next_obs: torch.Tensor,
-    alpha: torch.Tensor,
     gamma: float,
+    smoothing_noise: float,
+    noise_clip: float,
+    action_low: float,
+    action_high: float,
     clipped_double_q: bool,
     actor: nn.Module,
     critic_1: nn.Module,
@@ -84,19 +82,14 @@ def _critic_loss_distributional(
     target_2: nn.Module,
     actor_obs_normalizer: nn.Module,
     critic_obs_normalizer: nn.Module,
-    actor_obs: torch.Tensor,
-    next_actor_obs: torch.Tensor,
 ) -> torch.Tensor:
-    """Compiled critic loss for distributional (C51) Q-networks."""
     rewards_1d = rewards.squeeze(-1)
     bootstrap = (1.0 - dones).squeeze(-1)
 
     with torch.no_grad():
-        next_actions, next_log_prob = actor.sample(actor_obs_normalizer(next_actor_obs))
-        next_log_prob = next_log_prob.squeeze(-1)
-
-        # Entropy-adjusted reward: r - γ * α * log π(a'|s')
-        rewards_adj = rewards_1d - gamma * bootstrap * alpha.squeeze() * next_log_prob
+        next_mean = actor(actor_obs_normalizer(next_obs))
+        noise = torch.randn_like(next_mean).mul(smoothing_noise).clamp(-noise_clip, noise_clip)
+        next_actions = (next_mean + noise).clamp(action_low, action_high)
 
         next_obs_norm = critic_obs_normalizer(next_obs)
         logits_t1 = target_1(next_obs_norm, next_actions)
@@ -110,12 +103,11 @@ def _critic_loss_distributional(
             use_q1 = (q1_val < q2_val).unsqueeze(-1)
             min_dist = torch.where(use_q1, dist_t1, dist_t2)
         else:
-            min_dist = (dist_t1 + dist_t2) / 2.0
+            min_dist = 0.5 * (dist_t1 + dist_t2)
 
-        # Use critic_1 for projection (both share the same support)
         target_dist = target_1.project(
             next_dist=min_dist,
-            rewards=rewards_adj,
+            rewards=rewards_1d,
             bootstrap=bootstrap,
             discount=gamma,
         )
@@ -126,7 +118,6 @@ def _critic_loss_distributional(
 
     log_probs_1 = F.log_softmax(logits_1, dim=-1)
     log_probs_2 = F.log_softmax(logits_2, dim=-1)
-
     loss_1 = -torch.sum(target_dist * log_probs_1, dim=-1).mean()
     loss_2 = -torch.sum(target_dist * log_probs_2, dim=-1).mean()
     return loss_1 + loss_2
@@ -134,102 +125,69 @@ def _critic_loss_distributional(
 
 @torch.compile
 def _actor_loss_fn(
-    actor_obs: torch.Tensor,
-    critic_obs: torch.Tensor,
-    alpha: torch.Tensor,
-    clipped_double_q: bool,
+    obs: torch.Tensor,
     is_distributional: bool,
+    clipped_double_q: bool,
     actor: nn.Module,
     critic_1: nn.Module,
     critic_2: nn.Module,
     actor_obs_normalizer: nn.Module,
     critic_obs_normalizer: nn.Module,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compiled actor loss. Returns (loss, mean_log_pi)."""
-    actions, log_prob = actor.sample(actor_obs_normalizer(actor_obs))
-
-    obs_norm = critic_obs_normalizer(critic_obs)
+) -> torch.Tensor:
+    actions = actor(actor_obs_normalizer(obs))
+    obs_norm = critic_obs_normalizer(obs)
 
     if is_distributional:
         logits_1 = critic_1(obs_norm, actions)
         logits_2 = critic_2(obs_norm, actions)
         dist_1 = critic_1.get_dist(logits_1)
         dist_2 = critic_2.get_dist(logits_2)
-        q1 = critic_1.get_value(dist_1).unsqueeze(-1)
-        q2 = critic_2.get_value(dist_2).unsqueeze(-1)
+        q1 = critic_1.get_value(dist_1)
+        q2 = critic_2.get_value(dist_2)
     else:
-        q1 = critic_1(obs_norm, actions)
-        q2 = critic_2(obs_norm, actions)
+        q1 = critic_1(obs_norm, actions).squeeze(-1)
+        q2 = critic_2(obs_norm, actions).squeeze(-1)
 
-    if clipped_double_q:
-        q = torch.min(q1, q2)
-    else:
-        q = (q1 + q2) / 2.0
-
-    actor_loss = (alpha * log_prob - q).mean()
-    return actor_loss, log_prob.detach().mean()
+    q = torch.min(q1, q2) if clipped_double_q else 0.5 * (q1 + q2)
+    return -q.mean()
 
 
-# ---------------------------------------------------------------------------
-# FastSAC algorithm
-# ---------------------------------------------------------------------------
+class FastTD3:
+    """TD3 with the FastSAC performance suite (AdamW, AMP, torch.compile)."""
 
-
-class FastSAC:
-    """Performance-optimized Soft Actor-Critic.
-
-    Combines the standard SAC algorithm with performance optimizations:
-    - torch.compile on critic and actor loss functions
-    - Automatic mixed precision (AMP) training
-    - AdamW optimizer with weight decay and configurable betas
-    - Vectorized soft target updates (torch._foreach_*)
-    - Clipped double-Q toggle (min vs average)
-
-    Conforms to the same interface as SAC so it can be used with
-    OffPolicyRunner without modification.
-    """
-
-    policy: SACActorCritic
+    policy: TD3ActorCritic
 
     def __init__(
         self,
-        policy: SACActorCritic,
-        # Learning rates
+        policy: TD3ActorCritic,
         actor_lr: float = 3e-4,
         critic_lr: float = 3e-4,
-        alpha_lr: float = 3e-4,
-        # SAC parameters
         gamma: float = 0.99,
         tau: float = 0.005,
-        alpha: float = 0.2,
-        auto_entropy_tuning: bool = True,
-        target_entropy: float | None = None,
-        # Training parameters
         batch_size: int = 256,
         num_updates_per_step: int = 1,
-        policy_frequency: int = 1,
+        policy_frequency: int = 2,
         n_step: int = 1,
-        # Optimizer parameters
+        smoothing_noise: float = 0.2,
+        noise_clip: float = 0.5,
+        action_low: float = -1.0,
+        action_high: float = 1.0,
         weight_decay: float = 0.001,
         adam_betas: tuple[float, float] = (0.9, 0.95),
-        # Performance
         clipped_double_q: bool = True,
         amp: bool = False,
         amp_dtype: str = "bf16",
-        # Device
         device: str = "cpu",
-        # Compatibility
         multi_gpu_cfg: dict | None = None,
         **kwargs,
-    ):
+    ) -> None:
         if kwargs:
-            print(f"FastSAC.__init__ got unexpected arguments, which will be ignored: {list(kwargs.keys())}")
+            print(f"FastTD3.__init__ got unexpected arguments, which will be ignored: {list(kwargs.keys())}")
 
         self.device = device
         self.policy = policy
         self.policy.to(self.device)
 
-        # SAC parameters
         self.gamma = gamma
         self.n_step = max(1, int(n_step))
         self.bellman_gamma = gamma ** self.n_step
@@ -237,9 +195,12 @@ class FastSAC:
         self.batch_size = batch_size
         self.num_updates_per_step = num_updates_per_step
         self.policy_frequency = max(1, policy_frequency)
+        self.smoothing_noise = smoothing_noise
+        self.noise_clip = noise_clip
+        self.action_low = action_low
+        self.action_high = action_high
         self.clipped_double_q = clipped_double_q
 
-        # AMP
         self.amp = amp
         self.amp_device = "cuda" if "cuda" in self.device else "cpu"
         if amp_dtype in ("bf16", "bfloat16"):
@@ -250,25 +211,6 @@ class FastSAC:
             self.amp_dtype = torch.bfloat16
         self.scaler = GradScaler(enabled=self.amp and self.amp_dtype == torch.float16)
 
-        # Entropy coefficient (alpha)
-        self.auto_entropy_tuning = auto_entropy_tuning
-        if auto_entropy_tuning:
-            if target_entropy is None:
-                self.target_entropy = -float(policy.num_actions)
-            else:
-                self.target_entropy = float(target_entropy)
-            self.log_alpha = torch.tensor(
-                math.log(alpha), dtype=torch.float32, device=device, requires_grad=True
-            )
-            self.alpha_optimizer = optim.AdamW(
-                [self.log_alpha], lr=alpha_lr, betas=adam_betas
-            )
-        else:
-            self.log_alpha = torch.tensor([alpha], device=device).log()
-            self.target_entropy = None
-            self.alpha_optimizer = None
-
-        # Optimizers (AdamW with weight decay)
         self.actor_optimizer = optim.AdamW(
             policy.actor.parameters(),
             lr=actor_lr,
@@ -282,14 +224,10 @@ class FastSAC:
             weight_decay=weight_decay,
             betas=adam_betas,
         )
-
-        # Unified optimizer for compatibility
         self.optimizer = self.actor_optimizer
 
-        # Storage (initialized later)
         self.storage: ReplayStorage | None = None
 
-        # Multi-GPU (for compatibility)
         self.is_multi_gpu = multi_gpu_cfg is not None
         if multi_gpu_cfg is not None:
             self.gpu_global_rank = multi_gpu_cfg["global_rank"]
@@ -298,18 +236,10 @@ class FastSAC:
             self.gpu_global_rank = 0
             self.gpu_world_size = 1
 
-        # Store LRs for logging
         self.actor_learning_rate = actor_lr
         self.critic_learning_rate = critic_lr
-
-        # For compatibility with PPO interface
-        self.rnd = None
         self.learning_rate = actor_lr
-
-    @property
-    def alpha(self) -> torch.Tensor:
-        """Current entropy coefficient."""
-        return self.log_alpha.exp().detach()
+        self.rnd = None
 
     def init_storage(
         self,
@@ -318,7 +248,6 @@ class FastSAC:
         obs_shape: list[int],
         act_shape: list[int],
     ) -> None:
-        """Initialize the replay buffer."""
         self.storage = ReplayStorage(
             num_envs=num_envs,
             max_size=buffer_size,
@@ -337,7 +266,6 @@ class FastSAC:
         critic_obs: torch.Tensor | None = None,
         next_critic_obs: torch.Tensor | None = None,
     ) -> None:
-        """Store a transition in the replay buffer."""
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
         extras = {}
@@ -353,22 +281,14 @@ class FastSAC:
         critic_obs_normalizer=None,
         reward_normalizer=None,
     ) -> dict[str, float]:
-        """Perform FastSAC update step.
-
-        Returns:
-            Dictionary containing loss values for logging.
-        """
         if self.storage is None or len(self.storage) < self.batch_size:
-            return {"critic_loss": 0.0, "actor_loss": 0.0, "alpha": 0.0, "noise_std": 0.0}
+            return {"critic_loss": 0.0, "actor_loss": 0.0, "noise_std": 0.0}
 
         total_critic_loss = 0.0
         total_actor_loss = 0.0
-        total_alpha_loss = 0.0
         actor_updates = 0
-        alpha_val = self.alpha
 
         for update_idx in range(self.num_updates_per_step):
-            # Sample batch
             batch = self.storage.sample(self.batch_size)
             obs = batch["observations"]
             critic_obs = batch.get("critic_observations", obs)
@@ -378,15 +298,18 @@ class FastSAC:
             next_obs = batch["next_observations"]
             next_critic_obs = batch.get("next_critic_observations", next_obs)
 
-            # Normalize at sample time (keep raw obs in buffer)
             if obs_normalizer is not None:
                 with torch.no_grad():
                     obs = (obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
                     next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
             if critic_obs_normalizer is not None:
                 with torch.no_grad():
-                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
-                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
+                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
             if reward_normalizer is not None:
                 with torch.no_grad():
                     if isinstance(reward_normalizer, RewardNormalization):
@@ -394,37 +317,25 @@ class FastSAC:
                     else:
                         rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
-            # Update critics
             critic_loss = self._update_critic(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs, alpha_val
+                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs
             )
             total_critic_loss += critic_loss
 
-            # Update actor and alpha (at policy_frequency)
             if update_idx % self.policy_frequency == 0:
-                actor_loss, log_pi_mean = self._update_actor(obs, critic_obs, alpha_val)
+                actor_loss = self._update_actor(obs)
                 total_actor_loss += actor_loss
                 actor_updates += 1
-
-                if self.auto_entropy_tuning:
-                    alpha_loss = self._update_alpha(log_pi_mean)
-                    total_alpha_loss += alpha_loss
-                    alpha_val = self.alpha  # refresh
-
-            # Vectorized soft update
-            self._soft_update()
+                self._soft_update()
 
         num_updates = self.num_updates_per_step
         actor_denom = max(actor_updates, 1)
 
-        # Compute noise_std from the policy
-        noise_std = self.policy.std.mean().item()
+        noise_std = self.policy.actor.noise_scales.mean().item() if hasattr(self.policy.actor, "noise_scales") else 0.0
 
         return {
             "critic_loss": total_critic_loss / num_updates,
             "actor_loss": total_actor_loss / actor_denom,
-            "alpha": alpha_val.item(),
-            "alpha_loss": total_alpha_loss / actor_denom,
             "noise_std": noise_std,
         }
 
@@ -437,47 +348,37 @@ class FastSAC:
         dones: torch.Tensor,
         next_obs: torch.Tensor,
         next_critic_obs: torch.Tensor,
-        alpha: torch.Tensor,
     ) -> float:
-        """One gradient step on the twin critics."""
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
             if self.policy.is_distributional_critic:
                 loss = _critic_loss_distributional(
                     critic_obs, actions, rewards, dones, next_critic_obs,
-                    alpha, self.bellman_gamma, self.clipped_double_q,
+                    self.bellman_gamma, self.smoothing_noise, self.noise_clip,
+                    self.action_low, self.action_high, self.clipped_double_q,
                     self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                     self.policy.critic_1_target, self.policy.critic_2_target,
                     self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
-                    obs, next_obs,
                 )
             else:
                 loss = _critic_loss_standard(
                     critic_obs, actions, rewards, dones, next_critic_obs,
-                    alpha, self.bellman_gamma, self.clipped_double_q,
+                    self.bellman_gamma, self.smoothing_noise, self.noise_clip,
+                    self.action_low, self.action_high, self.clipped_double_q,
                     self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                     self.policy.critic_1_target, self.policy.critic_2_target,
                     self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
-                    obs, next_obs,
                 )
 
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.step(self.critic_optimizer)
         self.scaler.update()
-
         return loss.item()
 
-    def _update_actor(
-        self,
-        obs: torch.Tensor,
-        critic_obs: torch.Tensor,
-        alpha: torch.Tensor,
-    ) -> tuple[float, torch.Tensor]:
-        """One gradient step on the actor. Returns (loss, mean_log_pi)."""
+    def _update_actor(self, obs: torch.Tensor) -> float:
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
-            actor_loss, log_pi_mean = _actor_loss_fn(
-                obs, critic_obs, alpha, self.clipped_double_q,
-                self.policy.is_distributional_critic,
+            actor_loss = _actor_loss_fn(
+                obs, self.policy.is_distributional_critic, self.clipped_double_q,
                 self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                 self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
             )
@@ -486,36 +387,22 @@ class FastSAC:
         self.scaler.scale(actor_loss).backward()
         self.scaler.step(self.actor_optimizer)
         self.scaler.update()
-
-        return actor_loss.item(), log_pi_mean
-
-    def _update_alpha(self, log_pi_mean: torch.Tensor) -> float:
-        """Adapt entropy temperature toward the target entropy."""
-        alpha_loss = -(self.log_alpha * (log_pi_mean + self.target_entropy))
-
-        self.alpha_optimizer.zero_grad(set_to_none=True)
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
-
-        return alpha_loss.item()
+        return actor_loss.item()
 
     @torch.no_grad()
     def _soft_update(self) -> None:
-        """Vectorized soft update of target critic parameters + buffer copy."""
         for critic, target in zip(self.policy.critics, self.policy.critic_targets):
             src_ps = [p.data for p in critic.parameters()]
             tgt_ps = [p.data for p in target.parameters()]
             torch._foreach_mul_(tgt_ps, 1.0 - self.tau)
             torch._foreach_add_(tgt_ps, src_ps, alpha=self.tau)
 
-            # Copy buffers (e.g. normalizer running stats) exactly
             for (_, b_s), (_, b_t) in zip(
                 critic.named_buffers(), target.named_buffers(), strict=False
             ):
                 b_t.copy_(b_s)
 
     def broadcast_parameters(self) -> None:
-        """Broadcast model parameters to all GPUs (for multi-GPU training)."""
         if not self.is_multi_gpu:
             return
         model_params = [self.policy.state_dict()]
@@ -523,5 +410,6 @@ class FastSAC:
         self.policy.load_state_dict(model_params[0])
 
     def get_actual_action_std(self) -> float:
-        """Return current action noise std for logging."""
-        return self.policy.std.mean().item()
+        if hasattr(self.policy.actor, "noise_scales"):
+            return self.policy.actor.noise_scales.mean().item()
+        return 0.0

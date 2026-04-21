@@ -94,17 +94,10 @@ class WandbSummaryWriter(SummaryWriter):
         self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
 
     def save_model(self, model_path, iter):
-        # Skip wandb.save for .pt files — they create symlinks that break
-        # when the container's bind-mounted log directory is removed.
-        if not model_path.endswith(".pt"):
-            wandb.save(model_path, base_path=os.path.dirname(model_path))
+        pass
 
     def save_file(self, path, iter=None):
-        if os.path.islink(path) and not os.path.exists(path):
-            return  # skip broken symlinks
-        if path.endswith(".diff"):
-            return  # skip diff files — they create broken symlinks when synced outside the container
-        wandb.save(path, base_path=os.path.dirname(path))
+        pass
 
     """
     Private methods.

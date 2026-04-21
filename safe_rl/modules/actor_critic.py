@@ -5,12 +5,10 @@ from typing import Any, NoReturn
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
 
-from safe_rl.modules.actor import DeterministicActor
-from safe_rl.modules.distributional_critic import DistributionalCritic
+from safe_rl.modules.actor import DeterministicActor, GaussianActor
+from safe_rl.modules.critic import DistributionalCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
-from safe_rl.utils import resolve_nn_activation
 
 
 class ActorCritic(nn.Module):
@@ -77,34 +75,8 @@ class ActorCritic(nn.Module):
 
         elif actor_type == "gaussian":
             self.is_deterministic_actor = False
-            init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
-            noise_std_type = actor_kwargs.pop("noise_std_type", "scalar")
-            hidden_dims = actor_kwargs.get("hidden_dims", [256, 256, 256])
-            activation = actor_kwargs.get("activation", "elu")
-
-            activation_fn = resolve_nn_activation(activation)
-
-            # Build Gaussian actor manually (outputs mean, std is learned separately)
-            layers = []
-            layers.append(nn.Linear(num_actor_obs, hidden_dims[0]))
-            layers.append(activation_fn)
-            for i in range(len(hidden_dims) - 1):
-                layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
-                layers.append(activation_fn)
-            layers.append(nn.Linear(hidden_dims[-1], num_actions))
-            self.actor = nn.Sequential(*layers)
-
-            # Action noise
-            self.noise_std_type = noise_std_type
-            if noise_std_type == "scalar":
-                self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-            elif noise_std_type == "log":
-                self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
-            else:
-                raise ValueError(f"Unknown noise_std_type: {noise_std_type}")
-
+            self.actor = GaussianActor(num_actor_obs, num_actions, **actor_kwargs)
             self.distribution = None
-            Normal.set_default_validate_args(False)
         else:
             raise ValueError(f"Unknown actor_type: {actor_type}. Must be 'deterministic' or 'gaussian'.")
 
@@ -120,21 +92,10 @@ class ActorCritic(nn.Module):
         # ==================== Critic ====================
         if critic_type == "standard":
             self.is_distributional_critic = False
-            hidden_dims = critic_kwargs.get("hidden_dims", [256, 256, 256])
-            activation = critic_kwargs.get("activation", "elu")
-            activation_fn = resolve_nn_activation(activation)
-
-            critics = []
-            for _ in range(num_critics):
-                layers = []
-                layers.append(nn.Linear(num_critic_obs, hidden_dims[0]))
-                layers.append(activation_fn)
-                for i in range(len(hidden_dims) - 1):
-                    layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
-                    layers.append(activation_fn)
-                layers.append(nn.Linear(hidden_dims[-1], 1))
-                critics.append(nn.Sequential(*layers))
-            self.critics = nn.ModuleList(critics)
+            self.critics = nn.ModuleList(
+                StandardCritic(num_obs=num_critic_obs, num_actions=0, **critic_kwargs)
+                for _ in range(num_critics)
+            )
 
         elif critic_type == "distributional":
             self.is_distributional_critic = True
@@ -203,15 +164,7 @@ class ActorCritic(nn.Module):
         """Update the action distribution (for Gaussian actor only)."""
         if self.is_deterministic_actor:
             raise RuntimeError("update_distribution not available for deterministic actor")
-
-        mean = self.actor(observations)
-
-        if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
-        else:
-            std = torch.exp(self.log_std).expand_as(mean)
-
-        self.distribution = Normal(mean, std)
+        self.distribution = self.actor.distribution(observations)
 
     def act(self, observations: torch.Tensor, **kwargs: dict[str, Any]) -> torch.Tensor:
         """Sample actions from the policy."""

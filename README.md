@@ -71,7 +71,7 @@ pip install safety-gymnasium
 Train PPO (standard RL):
 
 ```bash
-python scripts/train/safety_gymnasium.py \
+python scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 8 \
   --config config/dummy_config.yaml
@@ -80,7 +80,7 @@ python scripts/train/safety_gymnasium.py \
 Train P3O (safe RL with adaptive penalty):
 
 ```bash
-python scripts/train/safety_gymnasium.py \
+python scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 36 \
   --config config/safety_gymnasium_p3o.yaml \
@@ -90,7 +90,7 @@ python scripts/train/safety_gymnasium.py \
 Train CUP (safe RL with Lagrangian constraint projection):
 
 ```bash
-python scripts/train/safety_gymnasium.py \
+python scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 36 \
   --config config/safety_gymnasium_cup.yaml \
@@ -100,7 +100,7 @@ python scripts/train/safety_gymnasium.py \
 Train PPOL-PID (safe RL with PID-controlled Lagrangian):
 
 ```bash
-python scripts/train/safety_gymnasium.py \
+python scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 36 \
   --config config/safety_gymnasium_ppol_pid.yaml \
@@ -110,7 +110,7 @@ python scripts/train/safety_gymnasium.py \
 Evaluate a trained policy (single env, rendered):
 
 ```bash
-python scripts/eval/safety_gymnasium.py \
+python scripts/eval/eval_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 1 \
   --render_mode human \

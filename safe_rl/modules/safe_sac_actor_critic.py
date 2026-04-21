@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 
 from safe_rl.modules.actor import StochasticActor
+from safe_rl.modules.critic import StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
-from safe_rl.utils import resolve_nn_activation
 
 
 class SafeSACActorCritic(nn.Module):
@@ -126,21 +126,16 @@ class SafeSACActorCritic(nn.Module):
             raise ValueError(f"Safe SAC only supports 'standard' critic_type, got: {critic_type}")
 
         self.is_distributional_critic = False
-        hidden_dims = critic_kwargs.get("hidden_dims", [256, 256])
-        activation = critic_kwargs.get("activation", "relu")
-        activation_fn = resolve_nn_activation(activation)
-
-        reward_critics = []
-        for _ in range(num_reward_critics):
-            layers = []
-            input_dim = num_critic_obs + num_actions
-            for hidden_dim in hidden_dims:
-                layers.append(nn.Linear(input_dim, hidden_dim))
-                layers.append(activation_fn)
-                input_dim = hidden_dim
-            layers.append(nn.Linear(input_dim, 1))
-            reward_critics.append(nn.Sequential(*layers))
-        self.reward_critics = nn.ModuleList(reward_critics)
+        critic_kwargs.setdefault("hidden_dims", [256, 256])
+        critic_kwargs.setdefault("activation", "relu")
+        self.reward_critics = nn.ModuleList(
+            StandardCritic(
+                num_obs=num_critic_obs,
+                num_actions=num_actions,
+                **critic_kwargs,
+            )
+            for _ in range(num_reward_critics)
+        )
 
         print(f"Safe SAC Reward Critic: {self.reward_critics[0]}")
 
@@ -161,22 +156,19 @@ class SafeSACActorCritic(nn.Module):
         self.critic_2_target = self.reward_critic_targets[1] if num_reward_critics > 1 else self.reward_critic_targets[0]
 
         # ==================== Cost Critics ====================
-        cost_hidden_dims = cost_critic_kwargs.get("hidden_dims", hidden_dims)
-        cost_activation = cost_critic_kwargs.get("activation", activation)
-        cost_activation_fn = resolve_nn_activation(cost_activation)
+        cost_critic_kwargs.setdefault("hidden_dims", critic_kwargs.get("hidden_dims", [256, 256]))
+        cost_critic_kwargs.setdefault("activation", critic_kwargs.get("activation", "relu"))
+        cost_critic_kwargs.setdefault("layer_norm", critic_kwargs.get("layer_norm", False))
 
-        cost_critics = []
-        for _ in range(num_cost_critics):
-            layers = []
-            input_dim = num_critic_obs + num_actions
-            for hidden_dim in cost_hidden_dims:
-                layers.append(nn.Linear(input_dim, hidden_dim))
-                layers.append(cost_activation_fn)
-                input_dim = hidden_dim
-            # Output num_costs values (one for each constraint)
-            layers.append(nn.Linear(input_dim, num_costs))
-            cost_critics.append(nn.Sequential(*layers))
-        self.cost_critics = nn.ModuleList(cost_critics)
+        self.cost_critics = nn.ModuleList(
+            StandardCritic(
+                num_obs=num_critic_obs,
+                num_actions=num_actions,
+                output_dim=num_costs,
+                **cost_critic_kwargs,
+            )
+            for _ in range(num_cost_critics)
+        )
 
         print(f"Safe SAC Cost Critic (num_costs={num_costs}): {self.cost_critics[0]}")
 
@@ -257,9 +249,8 @@ class SafeSACActorCritic(nn.Module):
             q2: Q-values from reward critic 2
         """
         obs = self.critic_obs_normalizer(obs)
-        critic_input = torch.cat([obs, actions], dim=-1)
-        q1 = self.critic_1(critic_input)
-        q2 = self.critic_2(critic_input)
+        q1 = self.critic_1(obs, actions)
+        q2 = self.critic_2(obs, actions)
         return q1, q2
 
     def evaluate_q_target(
@@ -276,9 +267,8 @@ class SafeSACActorCritic(nn.Module):
             q2_target: Q-values from target reward critic 2
         """
         obs = self.critic_obs_normalizer(obs)
-        critic_input = torch.cat([obs, actions], dim=-1)
-        q1_target = self.critic_1_target(critic_input)
-        q2_target = self.critic_2_target(critic_input)
+        q1_target = self.critic_1_target(obs, actions)
+        q2_target = self.critic_2_target(obs, actions)
         return q1_target, q2_target
 
     def evaluate_cost_q(
@@ -294,12 +284,11 @@ class SafeSACActorCritic(nn.Module):
             cost_q: Cost Q-values [batch_size, num_costs]
         """
         obs = self.critic_obs_normalizer(obs)
-        critic_input = torch.cat([obs, actions], dim=-1)
         # Use first cost critic (or average if multiple)
         if self.num_cost_critics == 1:
-            return self.cost_critics[0](critic_input)
+            return self.cost_critics[0](obs, actions)
         else:
-            cost_qs = [critic(critic_input) for critic in self.cost_critics]
+            cost_qs = [critic(obs, actions) for critic in self.cost_critics]
             return torch.stack(cost_qs, dim=0).mean(dim=0)
 
     def evaluate_cost_q_target(
@@ -315,12 +304,11 @@ class SafeSACActorCritic(nn.Module):
             cost_q_target: Cost Q-values from target [batch_size, num_costs]
         """
         obs = self.critic_obs_normalizer(obs)
-        critic_input = torch.cat([obs, actions], dim=-1)
         # Use first cost critic target (or average if multiple)
         if self.num_cost_critics == 1:
-            return self.cost_critic_targets[0](critic_input)
+            return self.cost_critic_targets[0](obs, actions)
         else:
-            cost_qs = [target(critic_input) for target in self.cost_critic_targets]
+            cost_qs = [target(obs, actions) for target in self.cost_critic_targets]
             return torch.stack(cost_qs, dim=0).mean(dim=0)
 
     def soft_update_targets(self, tau: float) -> None:

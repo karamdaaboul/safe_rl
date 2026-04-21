@@ -9,6 +9,49 @@ import torch.nn.functional as F
 from safe_rl.networks import MLP, SimbaV2
 
 
+class StandardCritic(nn.Module):
+    """MLP critic for V(s) or Q(s,a).
+
+    With ``num_actions=0`` behaves as a V(s) estimator; otherwise Q(s,a) by
+    concatenating ``obs`` and ``actions`` before the MLP. ``output_dim``
+    controls the number of heads (e.g., ``num_costs`` for vector cost critics).
+    """
+
+    def __init__(
+        self,
+        num_obs: int,
+        num_actions: int = 0,
+        output_dim: int = 1,
+        hidden_dims: list[int] = [256, 256, 256],
+        activation: str = "elu",
+        layer_norm: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        if kwargs:
+            print(
+                "StandardCritic.__init__ got unexpected arguments, which will be ignored: "
+                + str([key for key in kwargs])
+            )
+        super().__init__()
+
+        self.num_obs = num_obs
+        self.num_actions = num_actions
+        self.output_dim = output_dim
+
+        self.network = MLP(
+            input_dim=num_obs + num_actions,
+            output_dim=output_dim,
+            hidden_dims=hidden_dims,
+            activation=activation,
+            layer_norm=layer_norm,
+        )
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor | None = None) -> torch.Tensor:
+        if self.num_actions == 0:
+            return self.network(obs)
+        return self.network(torch.cat([obs, actions], dim=-1))
+
+
 class DistributionalCritic(nn.Module):
     def __init__(
         self,

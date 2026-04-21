@@ -8,7 +8,9 @@ from collections import deque
 
 import safe_rl
 from safe_rl.algorithms import PPO, Distillation
+from safe_rl.algorithms.cpo import CPO
 from safe_rl.algorithms.p3o import P3O
+from safe_rl.algorithms.pcrpo import PCRPO
 from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.cup import CUP
 from safe_rl.envs import VecEnv
@@ -45,6 +47,10 @@ class OnPolicyRunner:
             self.training_type = "saferl"  # PPOL_PID is also safe RL with cost constraints
         elif self.alg_cfg["class_name"] == "CUP":
             self.training_type = "saferl"  # CUP is safe RL with two-phase constraint projection
+        elif self.alg_cfg["class_name"] == "PCRPO":
+            self.training_type = "saferl"  # PCRPO is safe RL with PCGrad projection between reward and cost TRPO steps
+        elif self.alg_cfg["class_name"] == "CPO":
+            self.training_type = "saferl"  # CPO is safe RL with TRPO-style trust-region constraint projection
         elif self.alg_cfg["class_name"] == "Distillation":
             self.training_type = "distillation"
         else:
@@ -76,7 +82,7 @@ class OnPolicyRunner:
         policy_class_name = self.policy_cfg.pop("class_name")
         
         # For safe RL algorithms, use ActorCriticCost if ActorCritic is specified
-        if self.alg_cfg["class_name"] in ["P3O", "PPOL_PID", "CUP"]:
+        if self.alg_cfg["class_name"] in ["P3O", "PPOL_PID", "CUP", "PCRPO", "CPO"]:
             if policy_class_name == "ActorCritic":
                 policy_class_name = "ActorCriticCost"
             # Set cost_limits and num_costs for safe RL algorithms
@@ -119,7 +125,7 @@ class OnPolicyRunner:
         alg_class = eval(self.alg_cfg.pop("class_name"))
         # Avoid passing multi_gpu_cfg twice (config may include it as null).
         self.alg_cfg.pop("multi_gpu_cfg", None)
-        self.alg: PPO | P3O | PPOL_PID | CUP | Distillation = alg_class(
+        self.alg: PPO | P3O | PPOL_PID | CUP | PCRPO | CPO | Distillation = alg_class(
             policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
 
@@ -205,7 +211,7 @@ class OnPolicyRunner:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         # Cost tracking for SafeRL
-        is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CUP))
+        is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CUP, CPO))
         if is_saferl:
             # Initialize separate cost buffers for each constraint
             num_costs = len(self.env.cost_limits) if hasattr(self.env, 'cost_limits') else 1
@@ -415,7 +421,7 @@ class OnPolicyRunner:
                 self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # SafeRL cost logging - individual constraints
-            is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CUP))
+            is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CUP, CPO))
             if is_saferl and "costbuffers" in locs:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
                 

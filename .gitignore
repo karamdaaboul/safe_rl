@@ -19,3 +19,15 @@ wandb/*
 outputs/*
 logs/*
 AGENTS.md
+
+# local workspace files
+.DS_Store
+CLAUDE.md
+tea_debug.log
+safe_rl/storage/Untitled
+
+# generated training artifacts
+checkpoints/
+
+# local experiment helpers
+experiments/juwels_unitree_rl_mjlab/

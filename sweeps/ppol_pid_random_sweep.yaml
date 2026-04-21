@@ -3,9 +3,9 @@
 #
 # Usage:
 #   wandb sweep sweeps/ppol_pid_random_sweep.yaml
-#   # Then run 3 agents in parallel (see scripts/slurm_ppol_pid_sweep.sh)
+#   # Then run 3 agents in parallel (see scripts/slurm/ppol_pid_sweep.sh)
 
-program: scripts/train_safety_gymnasium.py
+program: scripts/train/train_safety_gymnasium.py
 method: random  # Random search parallelizes perfectly
 metric:
   goal: maximize

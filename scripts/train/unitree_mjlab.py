@@ -4,7 +4,7 @@ import argparse
 import logging
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,7 +46,44 @@ import torch  # noqa: E402
 import yaml  # noqa: E402
 
 from safe_rl.envs import make_env  # noqa: E402
-from safe_rl.runners import OnPolicyRunner  # noqa: E402
+from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
+
+
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "Distillation"}
+
+
+@dataclass
+class OffPolicyRunnerCfg:
+    num_steps_per_env: int = 1
+    save_interval: int = 50
+    log_interval: int = 1
+    empirical_normalization: bool = False
+    logger: str = "tensorboard"
+    wandb_project: str = "safe_rl"
+    wandb_entity: str | None = None
+    wandb_dir: str | None = None
+    max_size: int = 1_000_000
+    start_random_steps: int = 10000
+    update_after: int = 1000
+    update_every: int = 50
+    n_step: int = 1
+    reward_normalization: bool = True
+    reward_normalization_mode: str = "empirical"
+    reward_normalization_g_max: float = 10.0
+    run_name: str = ""
+
+
+@dataclass
+class OnPolicyRunnerCfg:
+    num_steps_per_env: int = 24
+    save_interval: int = 50
+    empirical_normalization: bool = False
+    logger: str = "tensorboard"
+    wandb_project: str = "safe_rl"
+    wandb_entity: str | None = None
+    wandb_dir: str | None = None
+    run_name: str = ""
 
 
 class _YamlDumper(yaml.SafeDumper):
@@ -146,9 +183,39 @@ def apply_overrides(train_cfg: dict[str, Any], args: argparse.Namespace) -> dict
     return train_cfg
 
 
+def load_safe_rl_yaml(config_path: str) -> tuple[dict[str, Any], int, str, str]:
+    with open(config_path, encoding="utf-8") as file:
+        cfg = yaml.safe_load(file)
+
+    algorithm_cfg = cfg["algorithm"]
+    policy_cfg = cfg["policy"]
+    runner_cfg = dict(cfg.get("runner", {}))
+    experiment_name = runner_cfg.pop("experiment_name", "")
+    max_iterations = runner_cfg.pop("max_iterations", 1000)
+
+    algorithm_name = algorithm_cfg.get("class_name", "PPO")
+    default_runner = "OffPolicyRunner" if algorithm_name in OFF_POLICY_ALGORITHMS else "OnPolicyRunner"
+    runner_class_name = cfg.get("runner_class_name", default_runner)
+
+    if runner_class_name == "OffPolicyRunner":
+        runner = asdict(OffPolicyRunnerCfg(**runner_cfg))
+        train_cfg: dict[str, Any] = {"algorithm": algorithm_cfg, "policy": policy_cfg, "runner": runner}
+    else:
+        runner = asdict(OnPolicyRunnerCfg(**runner_cfg))
+        train_cfg = {"algorithm": algorithm_cfg, "policy": policy_cfg, **runner}
+
+    return train_cfg, max_iterations, runner_class_name, experiment_name
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train Unitree mjlab tasks with safe_rl PPO.")
+    parser = argparse.ArgumentParser(description="Train Unitree mjlab tasks with safe_rl.")
     parser.add_argument("task_id", type=str, help="Registered mjlab task id, e.g. Unitree-Go2-Flat.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional safe_rl YAML config. If omitted, use mjlab's registered PPO config.",
+    )
     parser.add_argument("--num_envs", type=int, default=None, help="Override number of vectorized environments.")
     parser.add_argument("--device", type=str, default="cuda:0", help="Torch device for training.")
     parser.add_argument("--gpu_ids", nargs="*", default=["0"], help="GPU ids to use, or 'all'.")
@@ -247,13 +314,31 @@ def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
         )
 
     vec_env = make_env(env_id=task_id, env=env, clip_actions=getattr(agent_cfg, "clip_actions", None))
-    train_cfg = convert_mjlab_ppo_cfg(agent_cfg, args.logger, args.wandb_project, args.wandb_entity)
-    train_cfg = apply_overrides(train_cfg, args)
 
-    if train_cfg["algorithm"]["class_name"] != "PPO":
-        raise NotImplementedError("The mjlab safe_rl integration currently supports PPO only.")
+    if args.config is not None:
+        train_cfg, max_iterations, runner_class_name, _ = load_safe_rl_yaml(args.config)
+        if args.max_iterations is not None:
+            max_iterations = args.max_iterations
+        if args.run_name is not None:
+            if runner_class_name == "OffPolicyRunner":
+                train_cfg["runner"]["run_name"] = args.run_name
+            else:
+                train_cfg["run_name"] = args.run_name
+    else:
+        train_cfg = convert_mjlab_ppo_cfg(agent_cfg, args.logger, args.wandb_project, args.wandb_entity)
+        train_cfg = apply_overrides(train_cfg, args)
+        runner_class_name = "OnPolicyRunner"
+        max_iterations = agent_cfg.max_iterations
 
-    runner = OnPolicyRunner(vec_env, train_cfg, log_dir=str(log_dir), device=device)
+    alg_name = train_cfg["algorithm"].get("class_name", "PPO")
+    if runner_class_name == "OffPolicyRunner" or alg_name in OFF_POLICY_ALGORITHMS:
+        if rank == 0:
+            print(f"[INFO] Using OffPolicyRunner for algorithm: {alg_name}")
+        runner = OffPolicyRunner(vec_env, train_cfg, log_dir=str(log_dir), device=device)
+    else:
+        if rank == 0:
+            print(f"[INFO] Using OnPolicyRunner for algorithm: {alg_name}")
+        runner = OnPolicyRunner(vec_env, train_cfg, log_dir=str(log_dir), device=device)
     runner.add_git_repo_to_log(__file__)
     runner.add_git_repo_to_log(src.tasks.__file__)
 
@@ -268,7 +353,7 @@ def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
         _dump_yaml(log_dir / "params" / "env.yaml", asdict(env_cfg))
         _dump_yaml(log_dir / "params" / "agent.yaml", train_cfg)
 
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
     env.close()
 
 

@@ -7,9 +7,8 @@ import torch
 import torch.nn as nn
 
 from safe_rl.modules.actor import StochasticActor
-from safe_rl.modules.distributional_critic import DistributionalCritic
+from safe_rl.modules.critic import DistributionalCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
-from safe_rl.utils import resolve_nn_activation
 
 
 class SACActorCritic(nn.Module):
@@ -98,20 +97,16 @@ class SACActorCritic(nn.Module):
         # ==================== Critics ====================
         if critic_type == "standard":
             self.is_distributional_critic = False
-            hidden_dims = critic_kwargs.get("hidden_dims", [256, 256])
-            activation = critic_kwargs.get("activation", "relu")
-
-            critics = []
-            for _ in range(num_critics):
-                layers = []
-                input_dim = num_critic_obs + num_actions
-                for hidden_dim in hidden_dims:
-                    layers.append(nn.Linear(input_dim, hidden_dim))
-                    layers.append(resolve_nn_activation(activation))
-                    input_dim = hidden_dim
-                layers.append(nn.Linear(input_dim, 1))
-                critics.append(nn.Sequential(*layers))
-            self.critics = nn.ModuleList(critics)
+            critic_kwargs.setdefault("hidden_dims", [256, 256])
+            critic_kwargs.setdefault("activation", "relu")
+            self.critics = nn.ModuleList(
+                StandardCritic(
+                    num_obs=num_critic_obs,
+                    num_actions=num_actions,
+                    **critic_kwargs,
+                )
+                for _ in range(num_critics)
+            )
 
         elif critic_type == "distributional":
             self.is_distributional_critic = True
@@ -238,9 +233,8 @@ class SACActorCritic(nn.Module):
             self._logits = torch.stack([logits_1, logits_2], dim=1)
             self._value_dist = dist_1
         else:
-            critic_input = torch.cat([obs, actions], dim=-1)
-            q1 = self.critic_1(critic_input)
-            q2 = self.critic_2(critic_input)
+            q1 = self.critic_1(obs, actions)
+            q2 = self.critic_2(obs, actions)
 
         return q1, q2
 
@@ -282,9 +276,8 @@ class SACActorCritic(nn.Module):
             q1_target = self.critic_1_target.get_value(dist_1).unsqueeze(-1)
             q2_target = self.critic_2_target.get_value(dist_2).unsqueeze(-1)
         else:
-            critic_input = torch.cat([obs, actions], dim=-1)
-            q1_target = self.critic_1_target(critic_input)
-            q2_target = self.critic_2_target(critic_input)
+            q1_target = self.critic_1_target(obs, actions)
+            q2_target = self.critic_2_target(obs, actions)
 
         return q1_target, q2_target
 
@@ -316,6 +309,14 @@ class SACActorCritic(nn.Module):
         """Sample random actions for initial exploration."""
         device = next(self.parameters()).device
         return torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
+
+    def as_onnx(self, obs_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
+        """Return an ONNX-exportable actor: obs_normalizer → actor_obs_normalizer → backbone → tanh(mean)."""
+        return self.actor.as_onnx(
+            pre_normalizer=obs_normalizer,
+            actor_normalizer=self.actor_obs_normalizer,
+            verbose=verbose,
+        )
 
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
         """Update observation normalizers."""

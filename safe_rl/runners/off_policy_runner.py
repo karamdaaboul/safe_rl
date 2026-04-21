@@ -7,7 +7,8 @@ import time
 import torch
 
 from safe_rl.envs import VecEnv
-from safe_rl.modules import EmpiricalNormalization
+from safe_rl.modules import EmpiricalNormalization, RewardNormalization
+from safe_rl.utils import NStepReturnAggregator
 from safe_rl.utils.logger import Logger
 
 
@@ -51,6 +52,9 @@ class OffPolicyRunner:
         elif policy_class_name == "SafeSACActorCritic":
             from safe_rl.modules import SafeSACActorCritic
             policy_class = SafeSACActorCritic
+        elif policy_class_name == "TD3ActorCritic":
+            from safe_rl.modules import TD3ActorCritic
+            policy_class = TD3ActorCritic
         else:
             # Try to import from safe_rl.modules first, then fall back to eval
             try:
@@ -58,6 +62,10 @@ class OffPolicyRunner:
                 policy_class = getattr(modules, policy_class_name)
             except AttributeError:
                 policy_class = eval(policy_class_name)
+
+        # TD3ActorCritic needs num_envs for its per-env exploration noise buffer.
+        if policy_class_name == "TD3ActorCritic":
+            self.policy_cfg.setdefault("num_envs", self.env.num_envs)
 
         self.actor_critic = policy_class(
             num_obs,
@@ -89,6 +97,9 @@ class OffPolicyRunner:
         elif alg_class_name == "FastSAC":
             from safe_rl.algorithms import FastSAC
             alg_class = FastSAC
+        elif alg_class_name == "FastTD3":
+            from safe_rl.algorithms import FastTD3
+            alg_class = FastTD3
         elif alg_class_name == "SafeSAC":
             from safe_rl.algorithms import SafeSAC
             alg_class = SafeSAC
@@ -99,6 +110,11 @@ class OffPolicyRunner:
                 alg_class = getattr(algorithms, alg_class_name)
             except AttributeError:
                 alg_class = eval(alg_class_name)
+
+        # Forward n_step into the algorithm so it can set bellman_gamma = gamma ** n_step.
+        self.n_step = int(self.runner_cfg.get("n_step", 1))
+        if self.n_step > 1:
+            self.alg_cfg["n_step"] = self.n_step
 
         self.alg = alg_class(self.actor_critic, device=self.device, **self.alg_cfg)
 
@@ -118,6 +134,18 @@ class OffPolicyRunner:
         self.update_after = int(self.runner_cfg.get("update_after", 1000))
         self.gamma = float(self.alg_cfg.get("gamma", 0.99))
 
+        # N-step return buffer (optional). When enabled, transitions are aggregated
+        # into n-step returns before being written to the replay buffer.
+        if self.n_step > 1:
+            self.n_step_buffer: NStepReturnAggregator | None = NStepReturnAggregator(
+                n_step=self.n_step,
+                gamma=self.gamma,
+                num_envs=self.env.num_envs,
+                device=self.device,
+            )
+        else:
+            self.n_step_buffer = None
+
         # Empirical normalization
         self.empirical_normalization = self.runner_cfg.get("empirical_normalization", False)
         if self.empirical_normalization:
@@ -127,16 +155,32 @@ class OffPolicyRunner:
             self.obs_normalizer = torch.nn.Identity().to(self.device)
             self.critic_obs_normalizer = torch.nn.Identity().to(self.device)
 
-        # Reward normalization (divide by running std, like PPO's advantage normalization)
+        # Reward normalization. Two modes:
+        #   "empirical" (default): running std of raw rewards (EmpiricalNormalization)
+        #   "return": running std of discounted returns (RewardNormalization)
         self.reward_normalization = self.runner_cfg.get("reward_normalization", True)
+        reward_norm_mode = self.runner_cfg.get("reward_normalization_mode", "empirical")
+        self.reward_normalization_mode = reward_norm_mode
         if self.reward_normalization:
-            self.reward_normalizer = EmpiricalNormalization(shape=[1], until=None).to(self.device)
+            if reward_norm_mode == "return":
+                self.reward_normalizer = RewardNormalization(
+                    gamma=self.gamma,
+                    g_max=float(self.runner_cfg.get("reward_normalization_g_max", 10.0)),
+                ).to(self.device)
+            else:
+                self.reward_normalizer = EmpiricalNormalization(shape=[1], until=None).to(self.device)
         else:
             self.reward_normalizer = torch.nn.Identity().to(self.device)
 
         # Safe RL detection
         self.is_safe_rl = hasattr(self.alg, 'num_costs') and self.alg.num_costs > 0
         num_costs = self.alg.num_costs if self.is_safe_rl else 0
+
+        if self.is_safe_rl and self.n_step_buffer is not None:
+            raise NotImplementedError(
+                "n_step > 1 is not supported with safe RL algorithms yet "
+                "(cost aggregation is not implemented in NStepReturnAggregator)."
+            )
 
         # Create logger
         self.logger = Logger(
@@ -218,16 +262,20 @@ class OffPolicyRunner:
                         self.obs_normalizer(next_obs)
                         self.critic_obs_normalizer(next_critic_obs)
                     if self.reward_normalization:
-                        self.reward_normalizer.update(rewards)
+                        if isinstance(self.reward_normalizer, RewardNormalization):
+                            self.reward_normalizer.update(rewards, dones.float())
+                        else:
+                            self.reward_normalizer.update(rewards)
 
                     # Handle truncation (timeout) - for off-policy, truncated episodes
                     # should not be marked as terminal for proper bootstrapping
                     if "time_outs" in infos:
-                        time_outs = infos["time_outs"].to(self.device)
+                        time_outs = infos["time_outs"].to(self.device).float()
                         # Mask out truncated episodes from done signal
                         # True terminal = done AND NOT truncated
-                        terminal = dones * (1.0 - time_outs.float())
+                        terminal = dones * (1.0 - time_outs)
                     else:
+                        time_outs = torch.zeros_like(dones, dtype=torch.float32)
                         terminal = dones
 
                     # Preserve final observations for timeouts when the env provides them.
@@ -253,7 +301,7 @@ class OffPolicyRunner:
                         if costs.shape[-1] != self.alg.num_costs:
                             costs = costs.expand(-1, self.alg.num_costs)
 
-                    # Store transition in replay buffer
+                    # Store transition in replay buffer (optionally aggregated via n-step buffer)
                     if self.is_safe_rl and hasattr(self.alg, 'store_transition'):
                         self.alg.store_transition(
                             obs,
@@ -262,6 +310,18 @@ class OffPolicyRunner:
                             terminal,
                             next_obs,
                             cost=costs,
+                            critic_obs=critic_obs,
+                            next_critic_obs=next_critic_obs,
+                        )
+                    elif self.n_step_buffer is not None:
+                        self.n_step_buffer.push(
+                            storage=self.alg.storage,
+                            obs=obs,
+                            action=action,
+                            reward=rewards,
+                            next_obs=next_obs,
+                            terminal=terminal,
+                            truncated=time_outs,
                             critic_obs=critic_obs,
                             next_critic_obs=next_critic_obs,
                         )
@@ -411,7 +471,10 @@ class OffPolicyRunner:
         if self.empirical_normalization and "critic_obs_norm_state_dict" in loaded_dict:
             self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
         if self.reward_normalization and "reward_norm_state_dict" in loaded_dict:
-            self.reward_normalizer.load_state_dict(loaded_dict["reward_norm_state_dict"])
+            rn_sd = loaded_dict["reward_norm_state_dict"]
+            if "G" in rn_sd and rn_sd["G"].shape != self.reward_normalizer.G.shape:
+                rn_sd["G"] = torch.zeros_like(self.reward_normalizer.G)
+            self.reward_normalizer.load_state_dict(rn_sd)
 
         # Load optimizers
         if load_optimizer:
@@ -477,7 +540,9 @@ class OffPolicyRunner:
             f"    {'update_after:':<28} {self.update_after}",
             f"    {'transitions/iter:':<28} {n_envs * steps:,}",
             f"    {'empirical_normalization:':<28} {self.empirical_normalization}",
-            f"    {'reward_normalization:':<28} {self.reward_normalization}",
+            f"    {'reward_normalization:':<28} {self.reward_normalization} ({self.reward_normalization_mode})",
+            f"    {'n_step:':<28} {self.n_step}"
+            + (f" (bellman_gamma = {self.gamma ** self.n_step:.5f})" if self.n_step > 1 else ""),
             "",
             f"  Policy  ({ac.__class__.__name__})",
             f"    {'actor_type:':<28} {ac.actor_type}",
@@ -492,12 +557,15 @@ class OffPolicyRunner:
             f"    {'num_updates_per_step:':<28} {alg.num_updates_per_step}",
             f"    {'policy_frequency:':<28} {alg.policy_frequency}",
             f"    {'actor_lr / critic_lr:':<28} {alg.actor_optimizer.param_groups[0]['lr']}  /  {alg.critic_optimizer.param_groups[0]['lr']}",
-            f"    {'auto_entropy_tuning:':<28} {alg.auto_entropy_tuning}",
-            f"    {'alpha:':<28} {alg.alpha.item():.4f}",
         ]
 
-        if alg.auto_entropy_tuning:
-            lines.append(f"    {'target_entropy:':<28} {alg.target_entropy}")
+        if hasattr(alg, "auto_entropy_tuning"):
+            lines.append(f"    {'auto_entropy_tuning:':<28} {alg.auto_entropy_tuning}")
+            lines.append(f"    {'alpha:':<28} {alg.alpha.item():.4f}")
+            if alg.auto_entropy_tuning:
+                lines.append(f"    {'target_entropy:':<28} {alg.target_entropy}")
+        if hasattr(alg, "smoothing_noise"):
+            lines.append(f"    {'target_smoothing_noise:':<28} {alg.smoothing_noise} (clip {alg.noise_clip})")
 
         # Safe RL info
         if self.is_safe_rl:
@@ -522,6 +590,25 @@ class OffPolicyRunner:
 
         lines.append(sep)
         return "\n".join(lines)
+
+    def export_policy_to_onnx(self, path: str, filename: str = "policy.onnx", verbose: bool = False) -> None:
+        """Export actor + obs normalizer to ONNX (mirrors rsl_rl OnPolicyRunner.export_policy_to_onnx)."""
+        onnx_model = self.actor_critic.as_onnx(obs_normalizer=self.obs_normalizer, verbose=verbose)
+        onnx_model.to("cpu").eval()
+
+        os.makedirs(path, exist_ok=True)
+        save_path = os.path.join(path, filename)
+        torch.onnx.export(
+            onnx_model,
+            onnx_model.get_dummy_inputs(),
+            save_path,
+            export_params=True,
+            opset_version=18,
+            verbose=verbose,
+            input_names=onnx_model.input_names,
+            output_names=onnx_model.output_names,
+        )
+        print(f"[ONNX Exported] -> {save_path}")
 
     def _sample_random_action(self) -> torch.Tensor:
         """Sample random actions for initial exploration."""

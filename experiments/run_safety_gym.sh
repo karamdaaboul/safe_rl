@@ -40,7 +40,7 @@ cd /p/project1/hai_1075/workspaces/safe_rl
 
 # ---- train in parallel ----
 # Training 1: PPO-Lagrangian on GPU 0
-python -u scripts/train/safety_gymnasium.py \
+python -u scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 40 \
   --config config/safety_gymnasium_ppol_pid.yaml \
@@ -51,7 +51,7 @@ python -u scripts/train/safety_gymnasium.py \
 PID_PPOL=$!
 
 # Training 2: P3O on GPU 1
-python -u scripts/train/safety_gymnasium.py \
+python -u scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 40 \
   --config config/safety_gymnasium_p3o.yaml \
