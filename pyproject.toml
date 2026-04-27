@@ -33,6 +33,25 @@ dependencies = [
     "onnx",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "PyYAML",
+]
+logging = [
+    "tensorboard",
+    "wandb",
+]
+tensorboard = [
+    "tensorboard",
+]
+safety-gymnasium = [
+    "safety-gymnasium",
+]
+wandb = [
+    "tensorboard",
+    "wandb",
+]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["safe_rl*"]
