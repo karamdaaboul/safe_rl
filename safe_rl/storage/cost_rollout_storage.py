@@ -312,17 +312,16 @@ class RolloutStorageCMDP:
         # Compute the cost advantages
         self.cost_advantages = self.cost_returns - self.cost_values
         
-        # Normalize cost advantages per cost output neuron
+        # Mean-center cost advantages only; trust-region safe RL (CPO/PCPO) relies on the
+        # magnitude of the cost gradient being comparable to the raw violation budget c_hat,
+        # which std-normalization would destroy.
         if normalize_cost_advantage:
             if self.cost_shape is not None:
-                # Normalize each cost output separately
                 for cost_idx in range(self.num_costs):
-                    cost_adv_flat = self.cost_advantages[:, :, cost_idx].flatten()
-                    cost_adv_normalized = (cost_adv_flat - cost_adv_flat.mean()) / (cost_adv_flat.std() + 1e-8)
-                    self.cost_advantages[:, :, cost_idx] = cost_adv_normalized.view(self.num_transitions_per_env, self.num_envs)
+                    ca = self.cost_advantages[:, :, cost_idx]
+                    self.cost_advantages[:, :, cost_idx] = ca - ca.mean()
             else:
-                # Single cost case
-                self.cost_advantages = (self.cost_advantages - self.cost_advantages.mean()) / (self.cost_advantages.std() + 1e-8)
+                self.cost_advantages = self.cost_advantages - self.cost_advantages.mean()
 
     # For distillation
     def generator(self):
