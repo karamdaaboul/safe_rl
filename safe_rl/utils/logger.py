@@ -4,13 +4,15 @@ import os
 import statistics
 import time
 from collections import defaultdict, deque
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
 
 import safe_rl
 from .utils import store_code_state
+
+if TYPE_CHECKING:
+    from torch.utils.tensorboard import SummaryWriter
 
 
 class Logger:
@@ -21,7 +23,7 @@ class Logger:
     :meth:`process_env_step` during rollout and :meth:`log` after each iteration.
     """
 
-    writer: SummaryWriter | None
+    writer: "SummaryWriter | Any | None"
 
     def __init__(
         self,
@@ -196,7 +198,7 @@ class Logger:
 
     def save_model(self, path: str, it: int) -> None:
         """Forward model checkpoint to external logger."""
-        if self.writer is not None and self.logger_type in ("wandb", "neptune"):
+        if self.writer is not None and self.logger_type == "wandb":
             self.writer.save_model(path, it)
 
     # ------------------------------------------------------------------
@@ -222,7 +224,7 @@ class Logger:
         return f"Train/{key}"
 
     def _init_writer(self, env_cfg: dict | object) -> None:
-        """Create the TensorBoard / wandb / Neptune writer."""
+        """Create the TensorBoard / wandb writer."""
         if self.log_dir is None:
             return
 
@@ -238,21 +240,18 @@ class Logger:
             "run_name": self.runner_cfg.get("run_name"),
         }
 
-        if self.logger_type == "neptune":
-            from safe_rl.utils.neptune_utils import NeptuneSummaryWriter
-
-            self.writer = NeptuneSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=logger_cfg)
-            self.writer.log_config(env_cfg, self.cfg, self.runner_cfg, {})
-        elif self.logger_type == "wandb":
+        if self.logger_type == "wandb":
             from safe_rl.utils.wandb_utils import WandbSummaryWriter
 
             self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=logger_cfg)
             self.writer.log_config(env_cfg, self.cfg, self.runner_cfg, {})
         elif self.logger_type == "tensorboard":
+            from torch.utils.tensorboard import SummaryWriter
+
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         else:
             raise ValueError(
-                f"Logger type '{self.logger_type}' not found. Choose 'neptune', 'wandb', or 'tensorboard'."
+                f"Logger type '{self.logger_type}' not found. Choose 'wandb' or 'tensorboard'."
             )
 
     def _store_code_state(self) -> None:
@@ -260,7 +259,7 @@ class Logger:
         if self.log_dir is None:
             return
         git_file_paths = store_code_state(self.log_dir, self.git_status_repos)
-        if self.logger_type in ("wandb", "neptune") and git_file_paths and self.writer is not None:
+        if self.logger_type == "wandb" and git_file_paths and self.writer is not None:
             for path in git_file_paths:
                 if self.writer is not None:
                     self.writer.save_file(path)

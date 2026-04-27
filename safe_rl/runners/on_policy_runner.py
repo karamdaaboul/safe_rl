@@ -171,16 +171,11 @@ class OnPolicyRunner:
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         # initialize writer
         if self.log_dir is not None and self.writer is None and not self.disable_logs:
-            # Launch either Tensorboard or Neptune & Tensorboard summary writer(s), default: Tensorboard.
+            # Launch either Tensorboard or wandb summary writer(s), default: Tensorboard.
             self.logger_type = self.cfg.get("logger", "tensorboard")
             self.logger_type = self.logger_type.lower()
 
-            if self.logger_type == "neptune":
-                from safe_rl.utils.neptune_utils import NeptuneSummaryWriter
-
-                self.writer = NeptuneSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
-                self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
-            elif self.logger_type == "wandb":
+            if self.logger_type == "wandb":
                 from safe_rl.utils.wandb_utils import WandbSummaryWriter
 
                 self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
@@ -190,7 +185,7 @@ class OnPolicyRunner:
 
                 self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
             else:
-                raise ValueError("Logger type not found. Please choose 'neptune', 'wandb' or 'tensorboard'.")
+                raise ValueError("Logger type not found. Please choose 'wandb' or 'tensorboard'.")
 
         # check if teacher is loaded
         if self.training_type == "distillation" and not self.alg.policy.loaded_teacher:
@@ -363,7 +358,7 @@ class OnPolicyRunner:
                 # obtain all the diff files
                 git_file_paths = store_code_state(self.log_dir, self.git_status_repos)
                 # if possible store them to wandb
-                if self.logger_type in ["wandb", "neptune"] and git_file_paths:
+                if self.logger_type == "wandb" and git_file_paths:
                     for path in git_file_paths:
                         self.writer.save_file(path)
 
@@ -601,7 +596,7 @@ class OnPolicyRunner:
         torch.save(saved_dict, path)
 
         # upload model to external logging service
-        if self.logger_type in ["neptune", "wandb"] and not self.disable_logs:
+        if self.logger_type == "wandb" and not self.disable_logs:
             self.writer.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True):
