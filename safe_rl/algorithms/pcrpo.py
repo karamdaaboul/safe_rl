@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from safe_rl.modules import ActorCriticCost
+from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -34,11 +34,11 @@ class PCRPO:
     fires or falls back to the reward-only step.
     """
 
-    policy: ActorCriticCost
+    policy: ActorCritic
 
     def __init__(
         self,
-        policy: ActorCriticCost,
+        policy: ActorCritic,
         num_learning_epochs: int = 1,
         num_mini_batches: int = 1,
         gamma: float = 0.99,
@@ -480,7 +480,7 @@ class PCRPO:
 
     def _validate_cost_critic(self) -> None:
         if not hasattr(self.policy, "cost_critic"):
-            raise ValueError("ActorCriticCost with a cost_critic is required for PCRPO")
+            raise ValueError("ActorCritic with a cost_critic is required for PCRPO")
         last_layer = None
         for module in reversed(list(self.policy.cost_critic.modules())):
             if isinstance(module, nn.Linear):
@@ -491,5 +491,5 @@ class PCRPO:
         if last_layer.out_features != self.num_costs:
             print(
                 f"WARNING: Cost critic outputs {last_layer.out_features} values but PCRPO expects {self.num_costs}. "
-                f"Configure ActorCriticCost with num_costs={self.num_costs}."
+                f"Configure ActorCritic with num_costs={self.num_costs}."
             )

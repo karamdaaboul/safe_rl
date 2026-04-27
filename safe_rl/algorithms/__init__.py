@@ -3,9 +3,12 @@
 from .cpo import CPO
 from .cup import CUP
 from .distillation import Distillation
+from .focops import FOCOPS
+from .fppo import FPPO
 from .fast_sac import FastSAC
 from .fast_td3 import FastTD3
 from .p3o import P3O
+from .pcpo import PCPO
 from .pcrpo import PCRPO
 from .ppo import PPO
 from .ppol_pid import PPOL_PID
@@ -16,9 +19,12 @@ __all__ = [
     "CPO",
     "CUP",
     "Distillation",
+    "FOCOPS",
+    "FPPO",
     "FastSAC",
     "FastTD3",
     "P3O",
+    "PCPO",
     "PCRPO",
     "PPO",
     "PPOL_PID",

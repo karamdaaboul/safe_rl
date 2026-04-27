@@ -6,7 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
-from safe_rl.modules import ActorCriticCost
+from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -17,11 +17,11 @@ class P3O:
     Based on the paper: "Penalized Proximal Policy Optimization for Safe Reinforcement Learning"
     https://arxiv.org/pdf/2205.11814.pdf
     """
-    policy: ActorCriticCost
+    policy: ActorCritic
 
     def __init__(
         self,
-        policy: ActorCriticCost,
+        policy: ActorCritic,
         num_learning_epochs: int = 1,
         num_mini_batches: int = 1,
         clip_param: float = 0.2,
@@ -213,42 +213,24 @@ class P3O:
         cost_advantages_batch: Optional[List[torch.Tensor]] = None
     ) -> None:
         """
-        Update penalty factors for each cost constraint based on violations.
+        Symmetric multiplicative κ update:
+            violation  → κ ← min(κ · ρ,   κ_max)
+            safe       → κ ← max(κ / ρ,   0.1)
+
+        Growth and decay use the same ρ, so alternating states cancel exactly
+        (ρ · 1/ρ = 1). This prevents the ratchet explosion of the previous
+        asymmetric tiered update.
         """
         if not self.adaptive_penalty:
             return
-            
+
         violations = self.constraint_violation_detected(current_costs, cost_advantages_batch)
-        
+
         for cost_idx, violation_detected in enumerate(violations):
-            old_kappa = self.kappa[cost_idx]
-            current_cost = current_costs[cost_idx]
-            
             if violation_detected:
-                # Current: κ = min(ρ * κ, κ_max)
-                # Improved: Different update rates based on violation severity
-                violation_ratio = current_cost / (self.cost_limits[cost_idx] + 1e-8)
-                if violation_ratio > 2.0:  # Severe violation
-                    self.kappa[cost_idx] *= 2.0  # Aggressive increase
-                elif violation_ratio > 1.5:
-                    self.kappa[cost_idx] *= 1.5
-                else:
-                    # Default behavior for moderate violations (>1.0)
-                    self.kappa[cost_idx] = min(self.rho * self.kappa[cost_idx], self.kappa_max)
+                self.kappa[cost_idx] = min(self.kappa[cost_idx] * self.rho, self.kappa_max)
             else:
-                # No violation detected - consider decreasing kappa
-                cost_ratio = current_cost / (self.cost_limits[cost_idx] + 1e-8)
-                if cost_ratio < 0.8:  # Well within limit
-                    self.kappa[cost_idx] *= 0.95  # Slight decrease
-                elif cost_ratio < 0.6:  # Very safe
-                    self.kappa[cost_idx] *= 0.9   # More aggressive decrease
-                # If cost_ratio >= 0.8, keep kappa unchanged (close to limit but no violation)
-            
-            # Apply constraints: minimum 0.1, maximum kappa_max
-            self.kappa[cost_idx] = max(0.1, min(self.kappa[cost_idx], self.kappa_max))
-            
-            #print(f"Cost {cost_idx}: ratio={current_cost / self.cost_limits[cost_idx]:.3f}, "
-            #      f"κ: {old_kappa:.3f} → {self.kappa[cost_idx]:.3f}")
+                self.kappa[cost_idx] = max(self.kappa[cost_idx] / self.rho, 0.1)
 
     def _update_policy(
         self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None
@@ -309,26 +291,18 @@ class P3O:
         current_costs_computed = []
         
         for cost_idx in range(self.num_costs):
-            # Cost surrogate calculation (Equation 7)
-            surrogate_cost = torch.squeeze(cost_advantages_batch[:, cost_idx]) * ratio
-            surrogate_cost_clipped = torch.squeeze(cost_advantages_batch[:, cost_idx]) * torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            )
-            # P3O extends PPO's clipped surrogate to costs
-            surrogate_cost_loss = torch.max(surrogate_cost, surrogate_cost_clipped).mean()
-            
-            # Calculate the cost constraint term using mean episode costs
             if current_costs is None:
-                # Use mean episode costs from storage (like statistics.mean(cost_buffer) in runner)
                 mean_cost = self.storage.get_mean_episode_costs()[cost_idx]
             else:
                 mean_cost = current_costs[cost_idx]
             current_costs_computed.append(mean_cost)
             Jc = mean_cost - self.cost_limits[cost_idx]
-            
-            # P3O penalty loss for this cost (Equation 3)
-            cost_penalty = self.kappa[cost_idx] * F.relu(surrogate_cost_loss + (1.0 - self.gamma) * Jc)
-            total_cost_loss += cost_penalty
+
+            if Jc > 0:
+                # Unclipped cost surrogate — matches paper and both external reference implementations
+                surrogate_cost_loss = (torch.squeeze(cost_advantages_batch[:, cost_idx]) * ratio).mean()
+                cost_penalty = self.kappa[cost_idx] * F.relu(surrogate_cost_loss + (1.0 - self.gamma) * Jc)
+                total_cost_loss += cost_penalty
 
         # Standard PPO reward surrogate (Equation 6)
         surrogate = -torch.squeeze(advantages_batch) * ratio
@@ -350,7 +324,11 @@ class P3O:
             value_loss = torch.max(value_losses, value_losses_clipped).mean()
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
-        
+
+        if hasattr(self.policy, 'critic'):
+            for param in self.policy.critic.parameters():
+                value_loss = value_loss + 0.001 * param.pow(2).sum()
+
         # Cost value function losses with vectorized operations
         total_cost_critic_loss = 0
         
@@ -367,6 +345,10 @@ class P3O:
         
         # Sum across all cost critics
         total_cost_critic_loss = self.cost_loss_coef * cost_losses_all.sum()
+
+        if hasattr(self.policy, 'cost_critic'):
+            for param in self.policy.cost_critic.parameters():
+                total_cost_critic_loss = total_cost_critic_loss + 0.001 * param.pow(2).sum()
 
         # Composite loss
         critic_loss = self.value_loss_coef * value_loss
@@ -530,5 +512,5 @@ class P3O:
         
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but P3O expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with num_costs parameter.")
-            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
+            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")

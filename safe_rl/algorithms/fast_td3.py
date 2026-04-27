@@ -44,9 +44,10 @@ def _critic_loss_standard(
     target_2: nn.Module,
     actor_obs_normalizer: nn.Module,
     critic_obs_normalizer: nn.Module,
+    next_actor_obs: torch.Tensor,
 ) -> torch.Tensor:
     with torch.no_grad():
-        next_mean = actor(actor_obs_normalizer(next_obs))
+        next_mean = actor(actor_obs_normalizer(next_actor_obs))
         noise = torch.randn_like(next_mean).mul(smoothing_noise).clamp(-noise_clip, noise_clip)
         next_actions = (next_mean + noise).clamp(action_low, action_high)
 
@@ -82,12 +83,13 @@ def _critic_loss_distributional(
     target_2: nn.Module,
     actor_obs_normalizer: nn.Module,
     critic_obs_normalizer: nn.Module,
+    next_actor_obs: torch.Tensor,
 ) -> torch.Tensor:
     rewards_1d = rewards.squeeze(-1)
     bootstrap = (1.0 - dones).squeeze(-1)
 
     with torch.no_grad():
-        next_mean = actor(actor_obs_normalizer(next_obs))
+        next_mean = actor(actor_obs_normalizer(next_actor_obs))
         noise = torch.randn_like(next_mean).mul(smoothing_noise).clamp(-noise_clip, noise_clip)
         next_actions = (next_mean + noise).clamp(action_low, action_high)
 
@@ -326,7 +328,8 @@ class FastTD3:
                 actor_loss = self._update_actor(obs)
                 total_actor_loss += actor_loss
                 actor_updates += 1
-                self._soft_update()
+
+            self._soft_update()
 
         num_updates = self.num_updates_per_step
         actor_denom = max(actor_updates, 1)
@@ -358,6 +361,7 @@ class FastTD3:
                     self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                     self.policy.critic_1_target, self.policy.critic_2_target,
                     self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
+                    next_obs,
                 )
             else:
                 loss = _critic_loss_standard(
@@ -367,6 +371,7 @@ class FastTD3:
                     self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                     self.policy.critic_1_target, self.policy.critic_2_target,
                     self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
+                    next_obs,
                 )
 
         self.critic_optimizer.zero_grad(set_to_none=True)

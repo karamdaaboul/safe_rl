@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal
 
-from safe_rl.modules import ActorCriticCost
+from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 from safe_rl.utils import (
     conjugate_gradients,
@@ -28,11 +28,11 @@ class CPO:
     Value and cost-value critics are updated with standard PPO-style clipped value loss.
     """
 
-    policy: ActorCriticCost
+    policy: ActorCritic
 
     def __init__(
         self,
-        policy: ActorCriticCost,
+        policy: ActorCritic,
         num_learning_epochs: int = 10,
         num_mini_batches: int = 4,
         clip_param: float = 0.2,
@@ -274,10 +274,12 @@ class CPO:
         return flat_hvp + self.cg_damping * vector
 
     def _active_constraint_index(self, current_costs: Optional[List[float]]) -> Tuple[int, float]:
+        # current_costs must be the undiscounted episode-cost running mean (from the runner) so it
+        # shares units with cost_limits. Never fall back to storage.get_mean_episode_costs(): that
+        # returns a discounted per-step GAE mean ~E[c]/(1-gamma) and mixing scales blows up c_hat.
         if current_costs is None:
-            mean_costs = self.storage.get_mean_episode_costs().detach().cpu().tolist()
-        else:
-            mean_costs = [float(c.item()) if torch.is_tensor(c) else float(c) for c in current_costs]
+            return 0, 0.0
+        mean_costs = [float(c.item()) if torch.is_tensor(c) else float(c) for c in current_costs]
         violations = [mean_costs[k] - self.cost_limits[k] for k in range(self.num_costs)]
         active_idx = int(max(range(self.num_costs), key=lambda k: violations[k]))
         return active_idx, float(violations[active_idx])
@@ -407,6 +409,23 @@ class CPO:
         set_param_values_to_parameters(self._policy_parameters, theta_old)
         return step_frac * step_direction, accepted, final_kl
 
+    def _compute_step_direction(
+        self,
+        xHx: torch.Tensor,
+        x: torch.Tensor,
+        p: torch.Tensor,
+        q: torch.Tensor,
+        r: torch.Tensor,
+        s: torch.Tensor,
+        c_hat: torch.Tensor,
+        b_grads: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        optim_case, A, B = self._determine_case(b_grads, c_hat, q, r, s)
+        step, lambda_star, nu_star = self._step_direction(
+            optim_case=optim_case, xHx=xHx, x=x, A=A, B=B, q=q, p=p, r=r, s=s, c_hat=c_hat
+        )
+        return step, lambda_star, nu_star, optim_case
+
     def _update_actor(self, current_costs: Optional[List[float]]) -> Dict[str, float]:
         # Full batch in one shot
         batch = next(self.storage.mini_batch_generator(1, 1))
@@ -461,9 +480,8 @@ class CPO:
         r = grads.dot(p)
         s = b_grads.dot(p)
 
-        optim_case, A, B = self._determine_case(b_grads, c_hat_tensor, q, r, s)
-        step_direction, lambda_star, nu_star = self._step_direction(
-            optim_case=optim_case, xHx=xHx, x=x, A=A, B=B, q=q, p=p, r=r, s=s, c_hat=c_hat_tensor
+        step_direction, lambda_star, nu_star, optim_case = self._compute_step_direction(
+            xHx=xHx, x=x, p=p, q=q, r=r, s=s, c_hat=c_hat_tensor, b_grads=b_grads
         )
 
         accepted_direction, accepted, final_kl = self._cpo_line_search(

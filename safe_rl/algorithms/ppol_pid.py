@@ -8,7 +8,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
-from safe_rl.modules import ActorCriticCost
+from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -29,11 +29,11 @@ class PPOL_PID:
     - PID output directly sets lambda (not accumulated)
     - Normalized surrogate: (adv_r - λ * adv_c) / (1 + λ)
     """
-    policy: ActorCriticCost
+    policy: ActorCritic
 
     def __init__(
         self,
-        policy: ActorCriticCost,
+        policy: ActorCritic,
         num_learning_epochs: int = 1,
         num_mini_batches: int = 1,
         clip_param: float = 0.2,
@@ -505,5 +505,5 @@ class PPOL_PID:
         
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but PPOL-PID expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with num_costs parameter.")
-            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
+            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")
