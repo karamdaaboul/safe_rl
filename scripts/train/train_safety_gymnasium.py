@@ -100,6 +100,7 @@ def main() -> None:
     parser.add_argument("--log_dir", type=str, default="logs/safety_gymnasium", help="Root log directory.")
     parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
     parser.add_argument("--disable_rnd", action="store_true", help="Disable RND even if configured.")
+    parser.add_argument("--wandb_project", type=str, default=None, help="Override wandb project name from config.")
 
     # Sweep-friendly hyperparameters (override config values)
     parser.add_argument("--learning_rate", type=float, default=None, help="Learning rate (overrides config).")
@@ -181,6 +182,12 @@ def main() -> None:
     if args.max_iterations is not None:
         max_iterations = args.max_iterations
 
+    if args.wandb_project is not None:
+        if runner_class_name == "OffPolicyRunner":
+            train_cfg["runner"]["wandb_project"] = args.wandb_project
+        else:
+            train_cfg["wandb_project"] = args.wandb_project
+
     # Resolve cost_limits: CLI takes precedence, then config, then None
     cost_limits = parse_cost_limits(args.cost_limits)
     if cost_limits is None and "cost_limits" in algorithm_cfg:
@@ -204,9 +211,13 @@ def main() -> None:
     log_dir = os.path.join(args.log_dir, args.env_id, alg_name, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(log_dir, exist_ok=True)
 
-    # Set wandb run name from experiment_name + num_envs
+    # Set wandb run name from experiment_name + num_envs (+ cost_limit for single-constraint safe RL)
     if experiment_name:
         run_name = f"{experiment_name}_{args.num_envs}"
+        if cost_limits is not None and len(cost_limits) == 1:
+            cl = cost_limits[0]
+            cl_str = str(int(cl)) if float(cl).is_integer() else str(cl)
+            run_name = f"{run_name}_cl{cl_str}"
         if runner_class_name == "OffPolicyRunner":
             train_cfg["runner"]["run_name"] = run_name
         else:
