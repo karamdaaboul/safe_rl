@@ -6,7 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import List, Optional
 
-from safe_rl.modules import ActorCriticCost
+from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -17,7 +17,7 @@ class CUP:
     Based on the paper: "Constrained Update Projection Approach to Safe Policy Optimization"
     https://arxiv.org/pdf/2209.07089.pdf
     """
-    policy: ActorCriticCost
+    policy: ActorCritic
 
     def __init__(
         self,
@@ -715,5 +715,5 @@ class CUP:
         
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but CUP expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with num_costs parameter.")
-            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
+            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")
