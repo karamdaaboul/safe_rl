@@ -21,8 +21,18 @@ class SafetyGymnasiumVecEnv(VecEnv):
         render_mode: str | None = None,
         cost_limits: list[float] | None = None,
         seed: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        camera_name: str | None = None,
     ) -> None:
-        self.env = safety_gymnasium.vector.make(env_id, num_envs=num_envs, render_mode=render_mode)
+        make_kwargs: Dict[str, Any] = {"render_mode": render_mode}
+        if width is not None:
+            make_kwargs["width"] = width
+        if height is not None:
+            make_kwargs["height"] = height
+        if camera_name is not None:
+            make_kwargs["camera_name"] = camera_name
+        self.env = safety_gymnasium.vector.make(env_id, num_envs=num_envs, **make_kwargs)
         self.device = torch.device(device)
         self.num_envs = num_envs
         self.num_actions = int(self.env.single_action_space.shape[0])
@@ -86,6 +96,19 @@ class SafetyGymnasiumVecEnv(VecEnv):
 
     def close(self) -> None:
         self.env.close()
+
+    def render(self) -> Any:
+        # safety-gymnasium's AsyncVectorEnv worker has no 'render' command handler;
+        # its native render() kills the worker. Route through call("render") instead.
+        if hasattr(self.env, "call"):
+            frames = self.env.call("render")
+            if frames is None:
+                return None
+            if self.num_envs == 1:
+                return frames[0]
+            import numpy as np
+            return np.stack(frames, axis=0)
+        return self.env.render()
 
     def _build_extras(
         self,
