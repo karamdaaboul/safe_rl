@@ -19,13 +19,15 @@ class ActorCritic(nn.Module):
         num_actor_obs: int,
         num_critic_obs: int,
         num_actions: int,
-        actor_type: str = "deterministic",
+        actor_type: str = "gaussian",
         critic_type: str = "standard",
         num_critics: int = 1,
+        num_costs: int = 0,
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
+        cost_critic_kwargs: dict[str, Any] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         """Initialize Actor-Critic.
@@ -37,10 +39,13 @@ class ActorCritic(nn.Module):
             actor_type: Type of actor - "deterministic" or "gaussian".
             critic_type: Type of critic - "standard" or "distributional".
             num_critics: Number of critic networks.
+            num_costs: Number of constraint cost heads. If > 0, a `cost_critic` submodule is built and
+                `evaluate_cost()` becomes available. The runner injects this from `len(cost_limits)`.
             actor_obs_normalization: Whether to normalize actor observations.
             critic_obs_normalization: Whether to normalize critic observations.
             actor_kwargs: Actor-specific parameters.
             critic_kwargs: Critic-specific parameters.
+            cost_critic_kwargs: Cost-critic MLP parameters (hidden_dims, activation, ...). Only read when num_costs > 0.
         """
         if kwargs:
             print(
@@ -52,10 +57,12 @@ class ActorCritic(nn.Module):
         # Deep copy to avoid modifying original dicts
         actor_kwargs = deepcopy(actor_kwargs) if actor_kwargs is not None else {}
         critic_kwargs = deepcopy(critic_kwargs) if critic_kwargs is not None else {}
+        cost_critic_kwargs = deepcopy(cost_critic_kwargs) if cost_critic_kwargs is not None else {}
 
         self.actor_type = actor_type
         self.critic_type = critic_type
         self.num_critics = num_critics
+        self.num_costs = num_costs
 
         # ==================== Actor ====================
         if actor_type == "deterministic":
@@ -121,6 +128,19 @@ class ActorCritic(nn.Module):
             self.critic_obs_normalizer = EmpiricalNormalization(num_critic_obs)
         else:
             self.critic_obs_normalizer = nn.Identity()
+
+        # ==================== Cost critic (optional) ====================
+        # Built only for safe RL algorithms; runner injects num_costs from len(cost_limits).
+        if num_costs > 0:
+            self.cost_critic = StandardCritic(
+                num_obs=num_critic_obs,
+                num_actions=0,
+                output_dim=num_costs,
+                **cost_critic_kwargs,
+            )
+            print(f"Cost critic: {self.cost_critic}")
+        else:
+            self.cost_critic = None
 
     def reset(self, dones: torch.Tensor | None = None) -> None:
         pass
@@ -224,6 +244,17 @@ class ActorCritic(nn.Module):
                 )
         return value
 
+    def evaluate_cost(self, critic_observations: torch.Tensor, **kwargs: dict[str, Any]) -> torch.Tensor:
+        """Evaluate the cost-value function (safe RL only).
+
+        Returns:
+            cost_value: [batch_size, num_costs].
+        """
+        if self.cost_critic is None:
+            raise RuntimeError("evaluate_cost requires num_costs > 0 (no cost_critic was built)")
+        critic_observations = self.critic_obs_normalizer(critic_observations)
+        return self.cost_critic(critic_observations)
+
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
         """Update observation normalizers."""
         if self.actor_obs_normalization:
@@ -232,6 +263,22 @@ class ActorCritic(nn.Module):
             self.critic_obs_normalizer.update(critic_obs)
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load the parameters of the actor-critic model."""
+        """Load the parameters of the actor-critic model.
+
+        Legacy checkpoints (from the old ActorCritic / ActorCriticCost classes) stored the reward
+        critic under ``critic.network.*``. The unified class stores it under ``critics.0.network.*``
+        (via ``nn.ModuleList`` to support ``num_critics > 1``). Remap old keys on the fly so
+        pre-refactor checkpoints load without manual conversion.
+        """
+        has_new = any(k.startswith("critics.0.") for k in state_dict)
+        has_old = any(k.startswith("critic.network.") for k in state_dict)
+        if has_old and not has_new:
+            # self.critic = self.critics[0] registers both paths, so state_dict() emits both.
+            # Mirror the legacy critic.* keys under critics.0.* so strict load is satisfied.
+            remap = {}
+            for k, v in state_dict.items():
+                if k.startswith("critic.network."):
+                    remap[k.replace("critic.network.", "critics.0.network.", 1)] = v
+            state_dict = {**state_dict, **remap}
         super().load_state_dict(state_dict, strict=strict)
         return True

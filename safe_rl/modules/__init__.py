@@ -2,7 +2,6 @@
 
 from .actor import DeterministicActor, GaussianActor, StochasticActor
 from .actor_critic import ActorCritic
-from .actor_critic_cost import ActorCriticCost
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .critic import DistributionalCritic, StandardCritic
 from .normalizer import EmpiricalNormalization
@@ -16,7 +15,6 @@ from .td3_actor_critic import TD3ActorCritic
 
 __all__ = [
     "ActorCritic",
-    "ActorCriticCost",
     "ActorCriticRecurrent",
     "DeterministicActor",
     "DistributionalCritic",
