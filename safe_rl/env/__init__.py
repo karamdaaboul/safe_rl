@@ -1,12 +1,15 @@
 """Submodule defining the environment definitions."""
 
-from .mjlab_vec_env import MjlabVecEnv
-from .vec_env import VecEnv
+try:
+    from safe_rl.envs import MjlabVecEnv
+except ImportError:
+    MjlabVecEnv = None
+from safe_rl.envs import VecEnv
 
 try:
-    from .safety_gymnasium_vec_env import SafetyGymnasiumVecEnv
+    from safe_rl.envs import SafetyGymnasiumVecEnv
 except ImportError:
     SafetyGymnasiumVecEnv = None
-    
+
 
 __all__ = ["VecEnv", "MjlabVecEnv", "SafetyGymnasiumVecEnv"]
