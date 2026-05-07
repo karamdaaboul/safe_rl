@@ -16,11 +16,13 @@ from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.cup import CUP
 from safe_rl.algorithms.focops import FOCOPS
 from safe_rl.algorithms.fppo import FPPO
+from safe_rl.algorithms.reppo import REPPO
 from safe_rl.envs import VecEnv
 from safe_rl.modules import (
     ActorCritic,
     ActorCriticRecurrent,
     EmpiricalNormalization,
+    REPPOActorCritic,
     StudentTeacher,
     StudentTeacherRecurrent,
 )
@@ -43,6 +45,8 @@ class OnPolicyRunner:
         # resolve training type depending on the algorithm
         if self.alg_cfg["class_name"] == "PPO":
             self.training_type = "rl"
+        elif self.alg_cfg["class_name"] == "REPPO":
+            self.training_type = "rl"  # REPPO is on-policy reward-only RL
         elif self.alg_cfg["class_name"] == "P3O":
             self.training_type = "saferl"  # P3O is also RL but with cost constraints
         elif self.alg_cfg["class_name"] == "PPOL_PID":
@@ -268,6 +272,10 @@ class OnPolicyRunner:
                     # process the step
                     if is_saferl:
                         self.alg.process_env_step(rewards, costs, dones, infos)
+                    elif isinstance(self.alg, REPPO):
+                        self.alg.process_env_step(
+                            rewards, dones, infos, next_obs=obs, next_critic_obs=privileged_obs
+                        )
                     else:
                         self.alg.process_env_step(rewards, dones, infos)
 
@@ -336,7 +344,7 @@ class OnPolicyRunner:
                 current_costs = None
                 if "costbuffers" in locals() and all(len(buf) > 0 for buf in costbuffers):
                     current_costs = [statistics.mean(buf) for buf in costbuffers]
-                loss_dict = self.alg.update(current_costs=current_costs)
+                loss_dict = self.alg.update(current_costs=current_costs, iteration=it)
             else:
                 loss_dict = self.alg.update()
 
