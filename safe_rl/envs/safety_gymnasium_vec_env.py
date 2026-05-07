@@ -125,6 +125,21 @@ class SafetyGymnasiumVecEnv(VecEnv):
             extras["episode"] = info["episode"]
         if "log" in info:
             extras["log"] = info["log"]
+
+        # Forward the true terminal observations on truncation so Q-bootstrap is
+        # correct (gymnasium puts the new-episode reset obs in `obs` after auto-
+        # reset). `final_observation` is an object array of shape [num_envs] with
+        # the real terminal obs for terminated/truncated envs and None elsewhere.
+        final_obs = info.get("final_observation")
+        if final_obs is not None:
+            import numpy as np
+            stacked = np.zeros((self.num_envs, *self._last_obs.shape[1:]), dtype=np.float32) \
+                if self._last_obs is not None else None
+            if stacked is not None:
+                for i, fo in enumerate(final_obs):
+                    if fo is not None:
+                        stacked[i] = np.asarray(fo, dtype=np.float32)
+                extras["final_observation"] = torch.as_tensor(stacked, device=self.device)
         return extras
 
 

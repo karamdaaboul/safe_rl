@@ -13,4 +13,9 @@ try:
 except ImportError:
     MjlabVecEnv = None
 
-__all__ = ["VecEnv", "make_env", "SafetyGymnasiumVecEnv", "MjlabVecEnv"]
+try:
+    from .simplex_rta_wrapper import SimplexRTAWrapper
+except ImportError:
+    SimplexRTAWrapper = None
+
+__all__ = ["VecEnv", "make_env", "SafetyGymnasiumVecEnv", "MjlabVecEnv", "SimplexRTAWrapper"]
