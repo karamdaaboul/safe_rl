@@ -1,0 +1,60 @@
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL constraint
+  desired_kl: 0.05
+  # -- learned dual variables
+  init_alpha_temp: 0.1
+  init_alpha_kl: 0.1
+  target_entropy: -1.0   # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- target networks (Polyak)
+  tau: 0.005
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: gaussian
+  critic_type: distributional
+  num_critics: 2
+  actor_obs_normalization: false
+  critic_obs_normalization: false
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: log
+  critic_kwargs:
+    num_atoms: 101
+    v_min: -150.0
+    v_max: 150.0
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [512, 512]
+      activation: elu
+      layer_norm: true
+
+runner:
+    num_steps_per_env: 256
+    max_iterations: 600
+    empirical_normalization: false
+    save_interval: 100
+    experiment_name: safety_gymnasium_reppo
+    run_name: ""
+    logger: wandb
+    wandb_project: SafeRL
+    wandb_entity: uqerh-kit
+    load_run: -1
+    resume_path: null
+    checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1

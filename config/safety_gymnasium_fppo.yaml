@@ -1,0 +1,77 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: FPPO
+
+  # Standard PPO parameters
+  clip_param: 0.2
+  gamma: 0.99
+  lam: 0.95
+  value_loss_coef: 1.0
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+  entropy_coef: 0.0
+  learning_rate: 0.0003
+  max_grad_norm: 1.0
+  use_clipped_value_loss: true
+  schedule: adaptive
+  desired_kl: 0.01
+  num_learning_epochs: 10
+  num_mini_batches: 32
+  normalize_advantage_per_mini_batch: false
+
+  # Predictor phase
+  delta_kl: 0.01
+  predictor_desired_kl: 0.01
+  predictor_kl_hard_limit: 0.05
+
+  # Corrector phase
+  step_size: 1.0
+  backtrack_coeff: 0.5
+  max_backtracks: 10
+  projection_eps: 1.0e-8
+
+  # Constraint specification (required; override via --cost_limits CLI arg)
+  cost_limits: [25.0]
+
+  # Adaptive constraint curriculum
+  adaptive_constraint_curriculum: true
+  constraint_limits_start: null   # null -> defaults to 2x cost_limits in __init__
+  constraint_curriculum_alpha: 0.8
+  constraint_curriculum_shrink: 0.97
+  constraint_curriculum_ema_decay: 0.95
+  constraint_curriculum_check_interval: 20
+
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  # num_costs is injected at runtime by the runner from len(cost_limits)
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 600
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: safety_gymnasium_fppo
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  load_run: -1
+  resume_path: null
+  checkpoint: -1

@@ -1,0 +1,66 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# Aligned with the user's RSL-RL-style REPPO dataclass for G1 velocity task.
+# Q(s,a) variant: pathwise actor through twin Q critics, target nets, and
+# Polyak updates per minibatch. Two RSL-RL fields could not be mapped 1:1:
+#   - noise_std_type: "sigmoid"   → using "log" (GaussianActor supports scalar/log).
+#   - scale_actions / action_upper_bound / action_lower_bound
+#                                 → handled env-side by clip_actions in
+#                                    unitree_mjlab.py, not on the algorithm.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL constraint
+  desired_kl: 0.1
+  # -- learned dual variables
+  init_alpha_temp: 0.0001
+  init_alpha_kl: 0.01
+  target_entropy: -0.5    # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- target networks (Polyak)
+  tau: 0.005
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: gaussian
+  critic_type: distributional
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 512, 512]
+    activation: elu
+    init_noise_std: 0.1
+    noise_std_type: log         # was "sigmoid" in source — see file header
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -20.0
+    v_max: 20.0
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [1024, 1024, 1024]
+      activation: elu
+      layer_norm: true
+
+runner:
+  num_steps_per_env: 32
+  max_iterations: 100000
+  empirical_normalization: false
+  save_interval: 1000
+  experiment_name: g1_velocity_reppo
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

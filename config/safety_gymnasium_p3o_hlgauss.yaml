@@ -1,0 +1,80 @@
+algorithm:
+  class_name: P3O
+  # PPO Core
+  normalize_advantage_per_mini_batch: true
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.01
+  gamma: 0.99
+  gamma_cost: 0.95       # Shorter cost horizon (~33 steps) — easier targets for the critic
+  lam: 0.95
+  max_grad_norm: 10.0
+  learning_rate: 0.0003  # Reduced for Actor stability
+  cost_critic_lr: 0.001  # Cost critic chases a moving target — give it its own (faster) LR
+  num_learning_epochs: 10
+  num_mini_batches: 32
+  schedule: adaptive
+
+  # Asymmetric Risk-Sensitive Critics
+  cvar_alpha: 0.05       # Perfect. Extracts the 10% catastrophic tail.
+
+  # P3O-specific parameters
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+  rho: 1.1               # Exponential growth multiplier
+  kappa_max: 100.0       # Bumped from 30 — was pegging without resolving Jc; need more headroom.
+  adaptive_penalty: true
+  constraint_margin: 0.85
+  kappa: [1.0]           # Starting factor
+
+  # Keep PPO auxiliary settings so shared training setup stays aligned
+  rnd_cfg:
+      weight: 0.0
+      weight_schedule: null
+      reward_normalization: false
+      state_normalization: true
+      learning_rate: 0.001
+      num_outputs: 1
+      predictor_hidden_dims: [-1]
+      target_hidden_dims: [-1]
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    loss_type: hlgauss
+    num_bins: 101
+    v_min: 0.0
+    v_max: 60.0                  # Was 30 — realized G_t spikes to ~25, support saturated
+    sigma: null                  # null -> 0.75 * bin_width
+    hidden_dims: [512, 512, 512] # Bumped from [256]*3 — cost dynamics have sharp spikes
+    activation: elu
+    layer_norm: true             # Helps with sharp/non-smooth target geometry
+
+runner:
+    num_steps_per_env: 2048
+    max_iterations: 600
+    empirical_normalization: false
+    save_interval: 100
+    experiment_name: safety_gymnasium_p3o_hlgauss
+    run_name: ""
+    logger: wandb
+    wandb_project: SafeRL
+    wandb_entity: uqerh-kit
+    load_run: -1
+    resume_path: null
+    checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1
