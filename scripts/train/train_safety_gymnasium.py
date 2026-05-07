@@ -14,7 +14,7 @@ from safe_rl.runners import OffPolicyRunner, OnPolicyRunner
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
 
 # Algorithms that use on-policy training
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "Distillation"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
 
 
 def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:

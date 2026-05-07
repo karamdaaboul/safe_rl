@@ -53,7 +53,7 @@ except ImportError:
             arg_group.add_argument("--resume", action="store_true", default=False, help="Resume from checkpoint.")
             arg_group.add_argument("--load_run", type=str, default=None, help="Run folder to resume from.")
             arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
-            arg_group.add_argument("--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module.")
+            arg_group.add_argument("--logger", type=str, default=None, choices={"wandb", "tensorboard"}, help="Logger module.")
             arg_group.add_argument("--log_project_name", type=str, default=None, help="Logging project name.")
 
 # add argparse arguments
@@ -424,9 +424,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | ManagerBasedSafeRLEnvCfg, agent_cfg: Rs
             agent_cfg.run_name = args_cli.run_name
         if hasattr(args_cli, 'logger') and args_cli.logger is not None:
             agent_cfg.logger = args_cli.logger
-        if hasattr(args_cli, 'log_project_name') and args_cli.log_project_name is not None and agent_cfg.logger in {"wandb", "neptune"}:
+        if hasattr(args_cli, 'log_project_name') and args_cli.log_project_name is not None and agent_cfg.logger == "wandb":
             agent_cfg.wandb_project = args_cli.log_project_name
-            agent_cfg.neptune_project = args_cli.log_project_name
 
         # specify directory for logging experiments
         log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

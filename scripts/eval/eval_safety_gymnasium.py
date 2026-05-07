@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, Tuple
+from pathlib import Path
+from typing import Any, Dict
 
 import torch
 import yaml
@@ -44,6 +45,29 @@ def parse_cost_limits(cost_limits: str | None) -> list[float] | None:
     return [float(value.strip()) for value in cost_limits.split(",") if value.strip()]
 
 
+def _extract_video_frame(frame: Any) -> torch.Tensor:
+    frame_tensor = torch.as_tensor(frame)
+    if frame_tensor.ndim == 4:
+        frame_tensor = frame_tensor[0]
+    if frame_tensor.dtype != torch.uint8:
+        frame_tensor = frame_tensor.clamp(0, 255).to(torch.uint8)
+    return frame_tensor.cpu()
+
+
+def save_video(frames: list[torch.Tensor], video_path: Path, fps: int) -> None:
+    if not frames:
+        raise ValueError("No frames captured for video export.")
+    import imageio.v2 as imageio
+
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = imageio.get_writer(str(video_path), fps=fps, macro_block_size=1)
+    try:
+        for frame in frames:
+            writer.append_data(frame.cpu().numpy())
+    finally:
+        writer.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Safe-RL agents on Safety-Gymnasium environments.")
     parser.add_argument("--env_id", type=str, required=True, help="Safety-Gymnasium env id (e.g. SafetyCarGoal1-v0).")
@@ -54,19 +78,41 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to evaluate.")
     parser.add_argument("--cost_limits", type=str, default=None, help="Comma-separated cost limits.")
     parser.add_argument("--render_mode", type=str, default=None, help="Render mode (e.g. human, rgb_array).")
-    parser.add_argument("--seed", type=str, default=None, help="Environment seed.")
+    parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
+    parser.add_argument("--video", action="store_true", help="Record the evaluation rollout(s) to mp4.")
+    parser.add_argument("--video_dir", type=str, default=None, help="Directory to store evaluation videos.")
+    parser.add_argument("--video_width", type=int, default=640, help="Rendered frame width (px).")
+    parser.add_argument("--video_height", type=int, default=480, help="Rendered frame height (px).")
+    parser.add_argument(
+        "--camera_name",
+        type=str,
+        default="track",
+        choices=["vision", "track", "fixednear", "fixedfar", "human"],
+        help="Safety-Gymnasium camera: vision=agent first-person, track=third-person chase, fixednear/far=top-down.",
+    )
     args = parser.parse_args()
+
+    if args.video and args.num_envs != 1:
+        raise ValueError("Video recording currently requires --num_envs 1.")
+    if args.video and args.render_mode not in (None, "human", "rgb_array"):
+        raise ValueError("Video recording only supports --render_mode human, rgb_array, or omitting the flag.")
 
     train_cfg = load_train_cfg(args.config)
     cost_limits = parse_cost_limits(args.cost_limits)
-    env = make_env(
-        env_id=args.env_id,
-        num_envs=args.num_envs,
-        device=args.device,
-        render_mode=args.render_mode,
-        cost_limits=cost_limits,
-        seed=args.seed,
-    )
+    render_mode = "rgb_array" if args.video else args.render_mode
+    env_kwargs: Dict[str, Any] = {
+        "device": args.device,
+        "render_mode": render_mode,
+        "cost_limits": cost_limits,
+        "seed": args.seed,
+    }
+    if args.video:
+        env_kwargs.update(
+            width=args.video_width,
+            height=args.video_height,
+            camera_name=args.camera_name,
+        )
+    env = make_env(env_id=args.env_id, num_envs=args.num_envs, **env_kwargs)
 
     runner = OnPolicyRunner(env, train_cfg, log_dir=None, device=args.device)
     runner.load(args.checkpoint, load_optimizer=False)
@@ -74,6 +120,19 @@ def main() -> None:
 
     obs, _ = env.get_observations()
     obs = obs.to(runner.device)
+    video_frames: list[torch.Tensor] = []
+    video_path: Path | None = None
+    video_fps = 30
+    if args.video:
+        checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+        default_video_dir = checkpoint_path.parent / "videos" / "eval"
+        video_dir = Path(args.video_dir).expanduser().resolve() if args.video_dir else default_video_dir
+        video_path = video_dir / f"{checkpoint_path.stem}_eval.mp4"
+        video_fps = int(getattr(getattr(env, "env", None), "metadata", {}).get("render_fps", 30))
+        if args.render_mode == "human":
+            print("[INFO] Ignoring --render_mode human while recording video; using rgb_array instead.")
+        print(f"[INFO] Recording video to {video_dir}")
+        video_frames.append(_extract_video_frame(env.render()))
 
     ep_rewards = []
     ep_costs = []
@@ -87,6 +146,8 @@ def main() -> None:
         obs = obs.to(runner.device)
         rewards = rewards.to(runner.device)
         dones = dones.to(runner.device)
+        if args.video:
+            video_frames.append(_extract_video_frame(env.render()))
 
         costs = infos.get("costs", torch.zeros_like(rewards)).to(runner.device)
         reward_buf += rewards
@@ -98,6 +159,10 @@ def main() -> None:
             ep_costs.extend(cost_buf[done_ids].cpu().tolist())
             reward_buf[done_ids] = 0.0
             cost_buf[done_ids] = 0.0
+
+    if args.video:
+        save_video(video_frames, video_path, fps=video_fps)
+        print(f"[INFO] Saved evaluation video to {video_path}")
 
     mean_reward = sum(ep_rewards[: args.episodes]) / args.episodes
     mean_cost = sum(ep_costs[: args.episodes]) / args.episodes

@@ -113,6 +113,12 @@ def load_train_cfg(task_id: str, checkpoint_path: Path, train_cfg_path: str | No
                 cfg = yaml.safe_load(file)
             cfg.setdefault("algorithm", {}).setdefault("class_name", "PPO")
             cfg.setdefault("policy", {}).setdefault("class_name", "ActorCritic")
+            # Raw training YAMLs nest runner keys under "runner:"; OnPolicyRunner expects
+            # them at the top level. Flatten unless it's an off-policy config (which keeps
+            # the nested structure deliberately).
+            alg_class = cfg.get("algorithm", {}).get("class_name", "PPO")
+            if "runner" in cfg and "num_steps_per_env" not in cfg and alg_class not in OFF_POLICY_ALGORITHMS:
+                cfg.update(cfg.pop("runner"))
             return cfg
 
     agent_cfg = load_rl_cfg(task_id)
@@ -121,9 +127,9 @@ def load_train_cfg(task_id: str, checkpoint_path: Path, train_cfg_path: str | No
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate/play safe_rl PPO agents on Unitree mjlab tasks.")
-    parser.add_argument("task_id", type=str, help="Registered mjlab task id, e.g. Unitree-G1-Flat.")
+    parser.add_argument("--env_id", type=str, required=True, help="Registered mjlab task id, e.g. Unitree-G1-Flat.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.pt).")
-    parser.add_argument("--train_cfg", type=str, default=None, help="Optional path to saved params/agent.yaml.")
+    parser.add_argument("--config", type=str, default=None, help="Optional path to saved params/agent.yaml.")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of vectorized environments.")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for evaluation.")
     parser.add_argument("--episodes", type=int, default=5, help="Number of completed episodes to evaluate.")
@@ -147,15 +153,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    if args.task_id not in list_tasks():
-        raise ValueError(f"Unknown task_id '{args.task_id}'. Run with one of: {', '.join(list_tasks())}")
+    if args.env_id not in list_tasks():
+        raise ValueError(f"Unknown env_id '{args.env_id}'. Run with one of: {', '.join(list_tasks())}")
 
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    train_cfg = load_train_cfg(args.task_id, checkpoint_path, args.train_cfg)
-    env_cfg: ManagerBasedRlEnvCfg = load_env_cfg(args.task_id)
+    train_cfg = load_train_cfg(args.env_id, checkpoint_path, args.config)
+    env_cfg: ManagerBasedRlEnvCfg = load_env_cfg(args.env_id)
     if args.num_envs is not None:
         env_cfg.scene.num_envs = args.num_envs
     if args.seed is not None:
@@ -193,8 +199,8 @@ def main() -> None:
         )
         print(f"[INFO] Recording video to {video_dir}")
 
-    agent_cfg = load_rl_cfg(args.task_id)
-    vec_env = make_env(env_id=args.task_id, env=env, clip_actions=getattr(agent_cfg, "clip_actions", None))
+    agent_cfg = load_rl_cfg(args.env_id)
+    vec_env = make_env(env_id=args.env_id, env=env, clip_actions=getattr(agent_cfg, "clip_actions", None))
 
     alg_name = train_cfg.get("algorithm", {}).get("class_name", "PPO")
     if alg_name in OFF_POLICY_ALGORITHMS:

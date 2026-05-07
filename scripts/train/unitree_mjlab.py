@@ -50,7 +50,7 @@ from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
 
 
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "Distillation"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
 
 
 @dataclass
@@ -209,7 +209,7 @@ def load_safe_rl_yaml(config_path: str) -> tuple[dict[str, Any], int, str, str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Unitree mjlab tasks with safe_rl.")
-    parser.add_argument("task_id", type=str, help="Registered mjlab task id, e.g. Unitree-Go2-Flat.")
+    parser.add_argument("--env_id", type=str, required=True, help="Registered mjlab task id, e.g. Unitree-Go2-Flat.")
     parser.add_argument(
         "--config",
         type=str,
@@ -227,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable_nan_guard", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--log_dir", type=str, default="logs/safe_rl", help="Root directory for logs.")
-    parser.add_argument("--logger", type=str, default="tensorboard", choices=["tensorboard", "wandb", "neptune"])
+    parser.add_argument("--logger", type=str, default="tensorboard", choices=["tensorboard", "wandb"])
     parser.add_argument("--wandb_project", type=str, default="safe_rl")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--experiment_name", type=str, default=None)
@@ -398,10 +398,10 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.task_id not in list_tasks():
-        raise ValueError(f"Unknown task_id '{args.task_id}'. Run with one of: {', '.join(list_tasks())}")
+    if args.env_id not in list_tasks():
+        raise ValueError(f"Unknown env_id '{args.env_id}'. Run with one of: {', '.join(list_tasks())}")
 
-    launch_training(args.task_id, args)
+    launch_training(args.env_id, args)
 
 
 if __name__ == "__main__":
