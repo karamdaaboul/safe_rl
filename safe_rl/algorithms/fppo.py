@@ -103,6 +103,12 @@ class FPPO:
         self.value_loss_coef = value_loss_coef
         self.cost_loss_coef = cost_loss_coef
         self.use_clipped_cost_loss = use_clipped_cost_loss
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss" and self.use_clipped_cost_loss:
+            print(
+                "[FPPO] use_clipped_cost_loss=True is incompatible with HL-Gauss cost critic; "
+                "forcing use_clipped_cost_loss=False."
+            )
+            self.use_clipped_cost_loss = False
         self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
@@ -225,7 +231,7 @@ class FPPO:
             normalize_cost_advantage=not self.normalize_advantage_per_mini_batch,
         )
 
-    def update(self, current_costs=None):
+    def update(self, current_costs=None, iteration=None):
         self._iteration_counter += 1
 
         # Snapshot θ_anchor before predictor — defines the KL trust region for the corrector
@@ -366,7 +372,11 @@ class FPPO:
             cost_value_loss = torch.tensor(0.0, device=self.device)
             if target_cost_values_batch is not None and returns_cost_batch is not None:
                 cost_value_batch = self.policy.evaluate_cost(critic_obs_batch)
-                if self.use_clipped_cost_loss:
+                if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+                    cost_value_loss = self.policy.cost_critic.loss(
+                        self.policy._cost_logits, returns_cost_batch
+                    ).mean()
+                elif self.use_clipped_cost_loss:
                     cost_value_clipped = target_cost_values_batch + (
                         cost_value_batch - target_cost_values_batch
                     ).clamp(-self.clip_param, self.clip_param)
@@ -636,6 +646,9 @@ class FPPO:
     def _validate_and_fix_cost_critic(self):
         if not hasattr(self.policy, "cost_critic"):
             raise ValueError("Policy must have a cost_critic attribute for FPPO.")
+        # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            return
         last_layer = None
         for module in reversed(list(self.policy.cost_critic.modules())):
             if isinstance(module, torch.nn.Linear):

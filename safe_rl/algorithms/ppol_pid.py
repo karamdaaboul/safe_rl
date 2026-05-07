@@ -140,6 +140,12 @@ class PPOL_PID:
         self.use_clipped_value_loss = use_clipped_value_loss
         self.cost_loss_coef = cost_loss_coef
         self.use_clipped_cost_loss = use_clipped_cost_loss
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss" and self.use_clipped_cost_loss:
+            print(
+                "[PPOL_PID] use_clipped_cost_loss=True is incompatible with HL-Gauss cost critic; "
+                "forcing use_clipped_cost_loss=False."
+            )
+            self.use_clipped_cost_loss = False
         
         # RND compatibility
         self.rnd = None
@@ -342,7 +348,11 @@ class PPOL_PID:
             value_loss = (returns_batch - value_batch).pow(2).mean()
         
         # Cost value function losses
-        if self.use_clipped_cost_loss:
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            cost_losses_all = self.policy.cost_critic.loss(
+                self.policy._cost_logits, returns_cost_batch
+            ).mean(dim=0)
+        elif self.use_clipped_cost_loss:
             cost_clipped = target_cost_values_batch + (cost_value_batch_all - target_cost_values_batch).clamp(
                 -self.clip_param, self.clip_param
             )
@@ -351,7 +361,7 @@ class PPOL_PID:
             cost_losses_all = torch.max(cost_value_losses, cost_value_losses_clipped).mean(dim=0)
         else:
             cost_losses_all = (returns_cost_batch - cost_value_batch_all).pow(2).mean(dim=0)
-        
+
         total_cost_critic_loss = self.cost_loss_coef * cost_losses_all.sum()
 
         # Total loss
@@ -368,7 +378,11 @@ class PPOL_PID:
 
         return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item()
 
-    def update(self, current_costs: Optional[List[torch.Tensor]] = None) -> Dict[str, float]:
+    def update(
+        self,
+        current_costs: Optional[List[torch.Tensor]] = None,
+        iteration: Optional[int] = None,
+    ) -> Dict[str, float]:
         """Main update function."""
         # Update Lagrangian multipliers ONCE per iteration BEFORE policy updates
         # This matches OmniSafe's approach and prevents multipliers from jumping to extremes
@@ -491,7 +505,11 @@ class PPOL_PID:
         """Validate cost critic output dimensions."""
         if not hasattr(self.policy, 'cost_critic'):
             raise ValueError("ActorCritic must have a cost_critic attribute for PPOL-PID algorithm")
-        
+
+        # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            return
+
         last_layer = None
         for module in reversed(list(self.policy.cost_critic.modules())):
             if isinstance(module, torch.nn.Linear):

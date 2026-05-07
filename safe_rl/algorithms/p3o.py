@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -26,10 +27,12 @@ class P3O:
         num_mini_batches: int = 1,
         clip_param: float = 0.2,
         gamma: float = 0.998,
+        gamma_cost: Optional[float] = None,
         lam: float = 0.95,
         value_loss_coef: float = 1.0,
         entropy_coef: float = 0.0,
         learning_rate: float = 1e-3,
+        cost_critic_lr: Optional[float] = None,
         max_grad_norm: float = 1.0,
         use_clipped_value_loss: bool = True,
         schedule: str = "fixed",
@@ -45,6 +48,15 @@ class P3O:
         kappa_max: float = 1000.0,
         adaptive_penalty: bool = True,
         constraint_margin: float = 0.85,
+        cvar_alpha: Optional[float] = None,
+        cvar_alpha_start: Optional[float] = None,
+        cvar_alpha_end: Optional[float] = None,
+        cvar_alpha_schedule: str = "constant",
+        cvar_alpha_warmup_iters: int = 0,
+        cvar_alpha_anneal_iters: int = 0,
+        use_cvar_in_gate: bool = False,
+        cvar_gate_coef: float = 1.0,
+        cvar_gate_clip: Optional[float] = None,
         # Backward compatibility
         rnd_cfg: Optional[Dict[str, Any]] = None,
         symmetry_cfg: Optional[Dict[str, Any]] = None,
@@ -79,9 +91,64 @@ class P3O:
         
         # Validate and fix cost critic output dimensions
         self._validate_and_fix_cost_critic()
-        
+
+        # CVaR curriculum + gate anchor. cvar_alpha is the constant fallback when
+        # cvar_alpha_start is not set, so existing configs keep their behavior.
+        # alpha=1 reduces cvar_value to expected_value, so a curriculum starting at
+        # 1.0 is mathematically equivalent to today's expected-value-only training.
+        is_hlgauss = getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss"
+        self.cvar_alpha_start = cvar_alpha_start if cvar_alpha_start is not None else cvar_alpha
+        self.cvar_alpha_end = cvar_alpha_end if cvar_alpha_end is not None else self.cvar_alpha_start
+        self.cvar_alpha_schedule = cvar_alpha_schedule
+        self.cvar_alpha_warmup_iters = int(cvar_alpha_warmup_iters)
+        self.cvar_alpha_anneal_iters = int(cvar_alpha_anneal_iters)
+        if self.cvar_alpha_schedule not in ("constant", "linear", "cosine"):
+            raise ValueError(
+                f"cvar_alpha_schedule must be 'constant', 'linear', or 'cosine'; "
+                f"got {self.cvar_alpha_schedule!r}"
+            )
+        for _name, _val in (("cvar_alpha_start", self.cvar_alpha_start),
+                            ("cvar_alpha_end", self.cvar_alpha_end)):
+            if _val is not None and not (0.0 < _val <= 1.0):
+                raise ValueError(f"{_name} must be in (0, 1]; got {_val}")
+
+        self.use_cvar_in_gate = bool(use_cvar_in_gate)
+        self.cvar_gate_coef = float(cvar_gate_coef)
+        self.cvar_gate_clip = cvar_gate_clip
+        if self.use_cvar_in_gate and not is_hlgauss:
+            raise ValueError(
+                "use_cvar_in_gate=True requires an HL-Gauss cost critic "
+                "(set policy.cost_critic_kwargs.loss_type=hlgauss)."
+            )
+
+        self._current_cvar_alpha = self.cvar_alpha_start
+        if self._current_cvar_alpha is not None and is_hlgauss:
+            self.policy.cost_critic.cvar_alpha = self._current_cvar_alpha
+            print(
+                f"[P3O] CVaR enabled: alpha={self._current_cvar_alpha} "
+                f"schedule={self.cvar_alpha_schedule} "
+                f"warmup={self.cvar_alpha_warmup_iters} anneal={self.cvar_alpha_anneal_iters} "
+                f"gate_anchor={'on' if self.use_cvar_in_gate else 'off'}"
+            )
+
         self.storage = None  # initialized later
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+
+        # Two-group optimizer: actor + value critic share the (KL-adaptive) actor LR;
+        # the cost critic gets its own (typically higher, fixed) LR so it can chase the
+        # moving target without being throttled by the actor's adaptive schedule.
+        self.cost_critic_lr = cost_critic_lr if cost_critic_lr is not None else learning_rate
+        if hasattr(self.policy, "cost_critic") and self.policy.cost_critic is not None:
+            cost_critic_param_ids = {id(p) for p in self.policy.cost_critic.parameters()}
+            actor_value_params = [
+                p for p in self.policy.parameters() if id(p) not in cost_critic_param_ids
+            ]
+            self.optimizer = optim.Adam([
+                {"params": actor_value_params, "lr": learning_rate},
+                {"params": list(self.policy.cost_critic.parameters()), "lr": self.cost_critic_lr},
+            ])
+            print(f"[P3O] Optimizer split: actor/value lr={learning_rate}, cost_critic lr={self.cost_critic_lr}")
+        else:
+            self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
         self.transition = RolloutStorageCMDP.Transition()
 
         # PPO parameters
@@ -91,11 +158,19 @@ class P3O:
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
         self.gamma = gamma
+        # Cost can use a shorter horizon than reward — sharper targets, easier to learn.
+        self.gamma_cost = gamma_cost if gamma_cost is not None else gamma
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         self.cost_loss_coef = cost_loss_coef
         self.use_clipped_cost_loss = use_clipped_cost_loss
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss" and self.use_clipped_cost_loss:
+            print(
+                "[P3O] use_clipped_cost_loss=True is incompatible with HL-Gauss cost critic; "
+                "forcing use_clipped_cost_loss=False."
+            )
+            self.use_clipped_cost_loss = False
         
         # Adaptive penalty parameters
         self.rho = rho  # Penalty factor multiplier (ρ > 1)
@@ -149,14 +224,35 @@ class P3O:
     def _adjust_learning_rate(self, kl_mean: torch.Tensor) -> None:
         """
         Adjust the learning rate based on the KL divergence.
+
+        Only updates the actor/value param group; the cost critic keeps its own
+        (typically higher, fixed) LR so it can chase the moving target without
+        being throttled by the actor's KL-driven schedule.
         """
         if kl_mean > self.desired_kl * 2:
             self.learning_rate = max(1e-5, self.learning_rate / 1.5)
         elif kl_mean < self.desired_kl / 2 and kl_mean > 0:
             self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.learning_rate
+        # param_groups[0] is always actor+value; cost critic (if present) is in group 1.
+        self.optimizer.param_groups[0]['lr'] = self.learning_rate
+
+    def _compute_cvar_alpha(self, iteration: int) -> Optional[float]:
+        a0 = self.cvar_alpha_start
+        if a0 is None:
+            return None
+        a1 = self.cvar_alpha_end
+        w, T = self.cvar_alpha_warmup_iters, self.cvar_alpha_anneal_iters
+        if self.cvar_alpha_schedule == "constant" or T <= 0:
+            return a0
+        if iteration < w:
+            return a0
+        if iteration >= w + T:
+            return a1
+        progress = (iteration - w) / T
+        if self.cvar_alpha_schedule == "linear":
+            return a0 + (a1 - a0) * progress
+        return a1 + 0.5 * (a0 - a1) * (1.0 + math.cos(math.pi * progress))
 
     def constraint_violation_detected(
         self, current_costs: List[torch.Tensor],
@@ -234,7 +330,7 @@ class P3O:
 
     def _update_policy(
         self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None
-    ) -> Tuple[float, float, float, float]:
+    ) -> Dict[str, float]:
         """
         Handle multiple costs with single cost critic having n output neurons.
         """
@@ -243,14 +339,33 @@ class P3O:
          returns_cost_batch, old_actions_log_prob_batch,
          old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, rnd_state_batch) = batch
 
+        # Capture pre-normalization advantage stats for W&B diagnostics. These reveal
+        # whether the cost critic is producing a usable signal (large abs_max + std)
+        # versus being washed out (near-zero std), and whether κ is meaningfully
+        # affecting the actor (cost_penalty_term should scale ~linearly with κ).
+        with torch.no_grad():
+            batch_metrics: Dict[str, float] = {
+                "adv_reward_mean": advantages_batch.mean().item(),
+                "adv_reward_std": advantages_batch.std().item(),
+                "adv_reward_abs_max": advantages_batch.abs().max().item(),
+                "adv_cost_mean": cost_advantages_batch.mean().item(),
+                "adv_cost_std": cost_advantages_batch.std().item(),
+                "adv_cost_abs_max": cost_advantages_batch.abs().max().item(),
+                "adv_cost_positive_frac": (cost_advantages_batch > 0).float().mean().item(),
+            }
+
         # Normalize advantages per mini-batch if enabled
         if self.normalize_advantage_per_mini_batch:
             with torch.no_grad():
                 advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
-                # Normalize cost advantages for each cost
+                # Cost advantages: scale by std only — mean-centering would flip the sign of
+                # roughly half the unsafe samples and tell the policy they are "less unsafe than
+                # average", neutralizing the κ penalty. This is safe to do here because
+                # `evaluate_cost` always decodes V_cost as the expected value (not CVaR), so
+                # cost advantages are already naturally centered around zero.
                 for cost_idx in range(self.num_costs):
                     cost_advantages_batch[:, cost_idx] = (
-                        (cost_advantages_batch[:, cost_idx] - cost_advantages_batch[:, cost_idx].mean())
+                        cost_advantages_batch[:, cost_idx]
                         / (cost_advantages_batch[:, cost_idx].std() + 1e-8)
                     )
 
@@ -265,7 +380,27 @@ class P3O:
         cost_value_batch_all = self.policy.evaluate_cost(
             critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
         )
-        
+
+        # CVaR-anchored gate: decode the worst-α tail off the cached HL-Gauss logits
+        # without a second forward pass. The anchor is detached and clamped to [0, ...]
+        # so it can only ever open the ReLU gate further, never close it; closing the
+        # gate via a biased-upward signal would replicate the §4.1 silent-failure mode.
+        cvar_anchor_per_cost: Optional[torch.Tensor] = None
+        cvar_minus_exp_mean = 0.0
+        if self.use_cvar_in_gate and self._current_cvar_alpha is not None:
+            with torch.no_grad():
+                cvar_batch = self.policy.cost_critic.cvar_value(
+                    self.policy._cost_logits, alpha=self._current_cvar_alpha
+                )
+                cvar_minus_exp = cvar_batch - cost_value_batch_all
+                anchor = cvar_minus_exp.mean(dim=0)
+                if self.cvar_gate_clip is not None:
+                    anchor = anchor.clamp(min=0.0, max=self.cvar_gate_clip)
+                else:
+                    anchor = anchor.clamp(min=0.0)
+                cvar_anchor_per_cost = anchor
+                cvar_minus_exp_mean = float(cvar_minus_exp.mean().item())
+
         mu_batch = self.policy.action_mean
         sigma_batch = self.policy.action_std
         entropy_batch = self.policy.entropy
@@ -289,7 +424,10 @@ class P3O:
         # Cost surrogate calculation for multiple costs
         total_cost_loss = 0
         current_costs_computed = []
-        
+        cost_penalty_acc = 0.0
+        gate_open_acc = 0.0
+        active_cost_heads = 0
+
         for cost_idx in range(self.num_costs):
             if current_costs is None:
                 mean_cost = self.storage.get_mean_episode_costs()[cost_idx]
@@ -299,10 +437,31 @@ class P3O:
             Jc = mean_cost - self.cost_limits[cost_idx]
 
             if Jc > 0:
-                # Unclipped cost surrogate — matches paper and both external reference implementations
+                # Unclipped cost surrogate — matches paper and both external reference implementations.
+                # Gate anchor uses gamma_cost (not gamma): the (1-γ)·Jc term amortizes the discounted
+                # cost violation over the cost horizon, and Jc is in the cost-return space, so it must
+                # use the cost discount. With gamma=0.99 vs gamma_cost=0.97 the anchor is 3× larger,
+                # which is what makes the ReLU gate open reliably during violations.
                 surrogate_cost_loss = (torch.squeeze(cost_advantages_batch[:, cost_idx]) * ratio).mean()
-                cost_penalty = self.kappa[cost_idx] * F.relu(surrogate_cost_loss + (1.0 - self.gamma) * Jc)
+                gate_input = surrogate_cost_loss + (1.0 - self.gamma_cost) * Jc
+                if cvar_anchor_per_cost is not None:
+                    gate_input = gate_input + self.cvar_gate_coef * cvar_anchor_per_cost[cost_idx]
+                cost_penalty = self.kappa[cost_idx] * F.relu(gate_input)
                 total_cost_loss += cost_penalty
+                with torch.no_grad():
+                    cost_penalty_acc += cost_penalty.item()
+                    gate_open_acc += float(gate_input.item() > 0.0)
+                    active_cost_heads += 1
+
+        batch_metrics["cost_penalty_term"] = (
+            cost_penalty_acc / active_cost_heads if active_cost_heads else 0.0
+        )
+        batch_metrics["cost_gate_open_frac"] = (
+            gate_open_acc / active_cost_heads if active_cost_heads else 0.0
+        )
+        if cvar_anchor_per_cost is not None:
+            batch_metrics["cvar_anchor"] = float(cvar_anchor_per_cost.mean().item())
+            batch_metrics["cvar_minus_exp_mean"] = cvar_minus_exp_mean
 
         # Standard PPO reward surrogate (Equation 6)
         surrogate = -torch.squeeze(advantages_batch) * ratio
@@ -331,8 +490,13 @@ class P3O:
 
         # Cost value function losses with vectorized operations
         total_cost_critic_loss = 0
-        
-        if self.use_clipped_cost_loss:
+
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            # _cost_logits cached by evaluate_cost call above
+            cost_losses_all = self.policy.cost_critic.loss(
+                self.policy._cost_logits, returns_cost_batch
+            ).mean(dim=0)
+        elif self.use_clipped_cost_loss:
             # Vectorized operations across all costs simultaneously
             cost_clipped = target_cost_values_batch + (cost_value_batch_all - target_cost_values_batch).clamp(
                 -self.clip_param, self.clip_param
@@ -342,7 +506,7 @@ class P3O:
             cost_losses_all = torch.max(cost_value_losses, cost_value_losses_clipped).mean(dim=0)
         else:
             cost_losses_all = (returns_cost_batch - cost_value_batch_all).pow(2).mean(dim=0)
-        
+
         # Sum across all cost critics
         total_cost_critic_loss = self.cost_loss_coef * cost_losses_all.sum()
 
@@ -354,6 +518,20 @@ class P3O:
         critic_loss = self.value_loss_coef * value_loss
         total_loss = policy_loss + critic_loss + total_cost_critic_loss - self.entropy_coef * entropy_batch.mean()
 
+        # Skip non-finite mini-batches instead of letting NaN poison the network.
+        # max_grad_norm + advantage normalization should prevent this; if it fires
+        # repeatedly, lower kappa_max or cvar_alpha rather than ignoring the warning.
+        if not torch.isfinite(total_loss):
+            print(f"[P3O] Skipping non-finite loss at update: {total_loss.item()}")
+            self.optimizer.zero_grad()
+            batch_metrics.update({
+                "value_loss": value_loss.item() if torch.isfinite(value_loss) else 0.0,
+                "cost_loss": 0.0,
+                "surrogate_loss": surrogate_loss.item() if torch.isfinite(surrogate_loss) else 0.0,
+                "entropy": entropy_batch.mean().item(),
+            })
+            return batch_metrics
+
         # Gradient step
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -362,16 +540,26 @@ class P3O:
 
         # Don't update penalty factors here - moved to update() method to avoid too frequent updates
 
-        return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item(), entropy_batch.mean().item()
+        batch_metrics.update({
+            "value_loss": value_loss.item(),
+            "cost_loss": total_cost_critic_loss.item(),
+            "surrogate_loss": surrogate_loss.item(),
+            "entropy": entropy_batch.mean().item(),
+        })
+        return batch_metrics
 
-    def update(self, current_costs: Optional[List[torch.Tensor]] = None) -> Dict[str, float]:
+    def update(
+        self,
+        current_costs: Optional[List[torch.Tensor]] = None,
+        iteration: Optional[int] = None,
+    ) -> Dict[str, float]:
         """
         Main update function that coordinates the update of actor-critic networks.
         """
-        mean_value_loss = 0
-        mean_cost_loss = 0
-        mean_surrogate_loss = 0
-        mean_entropy = 0
+        if iteration is not None and self.cvar_alpha_start is not None:
+            self._current_cvar_alpha = self._compute_cvar_alpha(iteration)
+            if hasattr(self.policy, "cost_critic") and self.policy.cost_critic is not None:
+                self.policy.cost_critic.cvar_alpha = self._current_cvar_alpha
 
         # Determine the appropriate generator based on whether the model is recurrent
         if self.policy.is_recurrent:
@@ -379,18 +567,16 @@ class P3O:
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
+        metrics_sum: Dict[str, float] = {}
+        n_batches = 0
         for batch in generator:
-            value_loss, cost_loss, surrogate_loss, entropy = self._update_policy(batch, current_costs)
-            mean_value_loss += value_loss
-            mean_cost_loss += cost_loss
-            mean_surrogate_loss += surrogate_loss
-            mean_entropy += entropy
+            batch_metrics = self._update_policy(batch, current_costs)
+            for key, value in batch_metrics.items():
+                metrics_sum[key] = metrics_sum.get(key, 0.0) + value
+            n_batches += 1
 
-        num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_value_loss /= num_updates
-        mean_cost_loss /= num_updates
-        mean_surrogate_loss /= num_updates
-        mean_entropy /= num_updates
+        # Average across mini-batches.
+        mean_metrics = {key: value / max(n_batches, 1) for key, value in metrics_sum.items()}
 
         # Update penalty factors once per iteration (not per mini-batch)
         if current_costs is not None:
@@ -398,13 +584,17 @@ class P3O:
 
         self.storage.clear()
 
-        # Construct the loss dictionary (similar to PPO)
+        # Construct the loss dictionary. Legacy keys are renamed for the runner;
+        # advantage diagnostics flow through unchanged and land under W&B `Loss/adv_*`.
         loss_dict = {
-            "value_function": mean_value_loss,
-            "cost_function": mean_cost_loss,
-            "surrogate": mean_surrogate_loss,
-            "entropy": mean_entropy,
+            "value_function": mean_metrics.pop("value_loss", 0.0),
+            "cost_function": mean_metrics.pop("cost_loss", 0.0),
+            "surrogate": mean_metrics.pop("surrogate_loss", 0.0),
+            "entropy": mean_metrics.pop("entropy", 0.0),
         }
+        loss_dict.update(mean_metrics)
+        if self._current_cvar_alpha is not None:
+            loss_dict["cvar_alpha_current"] = float(self._current_cvar_alpha)
 
         return loss_dict
 
@@ -431,7 +621,7 @@ class P3O:
             timeout_mask = timeout_mask.expand(-1, self.num_costs)
             
             if self.transition.cost_values is not None:
-                cost_bootstrap = self.gamma * self.transition.cost_values * timeout_mask
+                cost_bootstrap = self.gamma_cost * self.transition.cost_values * timeout_mask
                 self.transition.costs += cost_bootstrap
 
         # Record the transition
@@ -467,9 +657,12 @@ class P3O:
         """
         # Single call returns tensor with shape (batch_size, num_costs)
         last_cost_values = self.policy.evaluate_cost(last_critic_obs).detach()
+        # P3O never mean-centers cost advantages: the sign of the cost advantage is what tells
+        # the κ-penalty whether a sample is unsafe. Mean-centering would zero out the penalty in
+        # expectation. (CPO/PCPO use the storage's centering for their trust-region logic.)
         self.storage.compute_cost_returns(
-            last_cost_values, self.gamma, self.lam, 
-            normalize_cost_advantage=not self.normalize_advantage_per_mini_batch
+            last_cost_values, self.gamma_cost, self.lam,
+            normalize_cost_advantage=False,
         )
 
     def get_penalty_info(self) -> Dict[str, Any]:
@@ -497,17 +690,21 @@ class P3O:
         # Check if the policy has a cost_critic attribute
         if not hasattr(self.policy, 'cost_critic'):
             raise ValueError("ActorCritic must have a cost_critic attribute for P3O algorithm")
-        
+
+        # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            return
+
         # Get the last layer of the cost critic to check output dimension
         last_layer = None
         for module in reversed(list(self.policy.cost_critic.modules())):
             if isinstance(module, torch.nn.Linear):
                 last_layer = module
                 break
-        
+
         if last_layer is None:
             raise ValueError("Could not find linear layer in cost critic")
-        
+
         current_outputs = last_layer.out_features
         
         if current_outputs != self.num_costs:

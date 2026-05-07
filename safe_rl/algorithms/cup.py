@@ -546,7 +546,7 @@ class CUP:
 
         return mean_constraint_loss, mean_kl, early_stop_epoch
 
-    def update(self, current_costs=None):
+    def update(self, current_costs=None, iteration=None):
         """
         Main CUP update function implementing the two-phase algorithm.
 
