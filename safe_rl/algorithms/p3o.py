@@ -138,16 +138,19 @@ class P3O:
         # moving target without being throttled by the actor's adaptive schedule.
         self.cost_critic_lr = cost_critic_lr if cost_critic_lr is not None else learning_rate
         if hasattr(self.policy, "cost_critic") and self.policy.cost_critic is not None:
-            cost_critic_param_ids = {id(p) for p in self.policy.cost_critic.parameters()}
-            actor_value_params = [
+            self.cost_critic_params = list(self.policy.cost_critic.parameters())
+            cost_critic_param_ids = {id(p) for p in self.cost_critic_params}
+            self.actor_value_params = [
                 p for p in self.policy.parameters() if id(p) not in cost_critic_param_ids
             ]
             self.optimizer = optim.Adam([
-                {"params": actor_value_params, "lr": learning_rate},
-                {"params": list(self.policy.cost_critic.parameters()), "lr": self.cost_critic_lr},
+                {"params": self.actor_value_params, "lr": learning_rate},
+                {"params": self.cost_critic_params, "lr": self.cost_critic_lr},
             ])
             print(f"[P3O] Optimizer split: actor/value lr={learning_rate}, cost_critic lr={self.cost_critic_lr}")
         else:
+            self.actor_value_params = list(self.policy.parameters())
+            self.cost_critic_params = []
             self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
         self.transition = RolloutStorageCMDP.Transition()
 
@@ -484,9 +487,9 @@ class P3O:
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
 
-        if hasattr(self.policy, 'critic'):
-            for param in self.policy.critic.parameters():
-                value_loss = value_loss + 0.001 * param.pow(2).sum()
+        # No L2 weight decay here: PPO's value loss is plain (clipped) MSE, so
+        # matching it keeps P3O's reward/value path identical to PPO when the
+        # penalty gate is closed.
 
         # Cost value function losses with vectorized operations
         total_cost_critic_loss = 0
@@ -507,12 +510,9 @@ class P3O:
         else:
             cost_losses_all = (returns_cost_batch - cost_value_batch_all).pow(2).mean(dim=0)
 
-        # Sum across all cost critics
+        # Sum across all cost critics. Plain (clipped) MSE — no L2 weight decay,
+        # mirroring the value critic above.
         total_cost_critic_loss = self.cost_loss_coef * cost_losses_all.sum()
-
-        if hasattr(self.policy, 'cost_critic'):
-            for param in self.policy.cost_critic.parameters():
-                total_cost_critic_loss = total_cost_critic_loss + 0.001 * param.pow(2).sum()
 
         # Composite loss
         critic_loss = self.value_loss_coef * value_loss
@@ -535,7 +535,15 @@ class P3O:
         # Gradient step
         self.optimizer.zero_grad()
         total_loss.backward()
-        nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+        # Clip the actor+value and the cost critic separately. A single
+        # clip over self.policy.parameters() lets the cost critic's regression
+        # gradients inflate the global norm and shrink the actor's effective
+        # step — so P3O would not reduce to PPO even when the penalty gate is
+        # closed. Clipping the groups independently keeps the actor update
+        # identical to PPO whenever total_cost_loss == 0.
+        nn.utils.clip_grad_norm_(self.actor_value_params, self.max_grad_norm)
+        if self.cost_critic_params:
+            nn.utils.clip_grad_norm_(self.cost_critic_params, self.max_grad_norm)
         self.optimizer.step()
 
         # Don't update penalty factors here - moved to update() method to avoid too frequent updates
