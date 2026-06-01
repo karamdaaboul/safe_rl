@@ -7,14 +7,22 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
+from safe_rl.algorithms.ppo import PPO
 from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
-class P3O:
+class P3O(PPO):
     """
     Penalized Proximal Policy Optimization (P3O) for Safe Reinforcement Learning
-    
+
+    Subclasses PPO: the reward/value/actor machinery (KL-adaptive LR, clipped
+    surrogate, clipped value loss, multi-GPU grad reduction) is inherited
+    unchanged. P3O overrides only the cost-aware pieces — CMDP rollout storage,
+    a cost critic, GAE on costs, and the κ-weighted ReLU penalty added to the
+    actor loss. When the penalty gate is closed (Jc <= 0) the actor/value update
+    is identical to PPO.
+
     Based on the paper: "Penalized Proximal Policy Optimization for Safe Reinforcement Learning"
     https://arxiv.org/pdf/2205.11814.pdf
     """
@@ -62,16 +70,34 @@ class P3O:
         symmetry_cfg: Optional[Dict[str, Any]] = None,
         multi_gpu_cfg: Optional[Dict[str, Any]] = None,
     ):
-        self.device = device
-        self.desired_kl = desired_kl
-        self.schedule = schedule
-        self.learning_rate = learning_rate
-        self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        # Shared PPO setup: device, multi-GPU, policy, single-group optimizer,
+        # plain transition, and all PPO hyperparameters. P3O uses neither RND nor
+        # symmetry, so those configs are left at their defaults (None). The
+        # optimizer and transition built here are replaced below with the
+        # cost-aware variants.
+        super().__init__(
+            policy,
+            num_learning_epochs=num_learning_epochs,
+            num_mini_batches=num_mini_batches,
+            clip_param=clip_param,
+            gamma=gamma,
+            lam=lam,
+            value_loss_coef=value_loss_coef,
+            entropy_coef=entropy_coef,
+            learning_rate=learning_rate,
+            max_grad_norm=max_grad_norm,
+            use_clipped_value_loss=use_clipped_value_loss,
+            schedule=schedule,
+            desired_kl=desired_kl,
+            device=device,
+            normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            multi_gpu_cfg=multi_gpu_cfg,
+        )
 
         # Initialize cost constraints
         if cost_limits is None:
             raise ValueError("cost_limits must be provided")
-        
+
         self.cost_limits = cost_limits
         self.num_costs = len(cost_limits)
 
@@ -85,10 +111,6 @@ class P3O:
 
         print(f"P3O initialized with {self.num_costs} cost constraints and kappa: {self.kappa}")
 
-        # PPO components
-        self.policy = policy
-        self.policy.to(self.device)
-        
         # Validate and fix cost critic output dimensions
         self._validate_and_fix_cost_critic()
 
@@ -131,9 +153,8 @@ class P3O:
                 f"gate_anchor={'on' if self.use_cvar_in_gate else 'off'}"
             )
 
-        self.storage = None  # initialized later
-
-        # Two-group optimizer: actor + value critic share the (KL-adaptive) actor LR;
+        # Two-group optimizer (replaces PPO's single-group optimizer built in
+        # super().__init__): actor + value critic share the (KL-adaptive) actor LR;
         # the cost critic gets its own (typically higher, fixed) LR so it can chase the
         # moving target without being throttled by the actor's adaptive schedule.
         self.cost_critic_lr = cost_critic_lr if cost_critic_lr is not None else learning_rate
@@ -152,20 +173,12 @@ class P3O:
             self.actor_value_params = list(self.policy.parameters())
             self.cost_critic_params = []
             self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+        # CMDP transition replaces PPO's plain RolloutStorage.Transition.
         self.transition = RolloutStorageCMDP.Transition()
 
-        # PPO parameters
-        self.clip_param = clip_param
-        self.num_learning_epochs = num_learning_epochs
-        self.num_mini_batches = num_mini_batches
-        self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
-        self.gamma = gamma
+        # Cost-specific parameters (the rest of the PPO hyperparameters are set by super)
         # Cost can use a shorter horizon than reward — sharper targets, easier to learn.
         self.gamma_cost = gamma_cost if gamma_cost is not None else gamma
-        self.lam = lam
-        self.max_grad_norm = max_grad_norm
-        self.use_clipped_value_loss = use_clipped_value_loss
         self.cost_loss_coef = cost_loss_coef
         self.use_clipped_cost_loss = use_clipped_cost_loss
         if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss" and self.use_clipped_cost_loss:
@@ -184,9 +197,9 @@ class P3O:
         # Cost history per cost constraint
         self.cost_history = [[] for _ in range(self.num_costs)]
         self.history_length = 10
-        
-        # RND compatibility (P3O doesn't use RND, but runner checks for it)
-        self.rnd = None
+
+        # RND compatibility (super sets self.rnd/self.rnd_optimizer to None; the
+        # runner also reads self.intrinsic_rewards, which P3O never populates).
         self.intrinsic_rewards = None
 
     def init_storage(self, training_type: str, num_envs: int, num_transitions_per_env: int,
@@ -205,24 +218,11 @@ class P3O:
         self.policy.train()
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
-        if self.policy.is_recurrent:
-            self.transition.hidden_states = self.policy.get_hidden_states()
-        
-        # Compute the actions and values
-        self.transition.actions = self.policy.act(obs).detach()
-        self.transition.values = self.policy.evaluate(critic_obs).detach()
-        
-        # Cost critic returns tensor of shape (batch_size, num_costs)
+        # Reuse PPO.act for actions/value/log-prob/obs bookkeeping, then add the
+        # cost-critic value (shape (batch_size, num_costs)) that PPO doesn't track.
+        actions = super().act(obs, critic_obs)
         self.transition.cost_values = self.policy.evaluate_cost(critic_obs).detach()
-        
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.policy.action_mean.detach()
-        self.transition.action_sigma = self.policy.action_std.detach()
-        
-        # Record obs and critic_obs before env.step()
-        self.transition.observations = obs
-        self.transition.privileged_observations = critic_obs
-        return self.transition.actions
+        return actions
 
     def _adjust_learning_rate(self, kl_mean: torch.Tensor) -> None:
         """
