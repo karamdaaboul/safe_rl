@@ -4,17 +4,23 @@ from collections import deque
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
+from safe_rl.algorithms.ppo import PPO
 from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
-class PPOL_PID:
+class PPOL_PID(PPO):
     """
     PPO Lagrangian with PID Controller for Safe Reinforcement Learning
+
+    Subclasses PPO: device/multi-GPU setup, the single-group optimizer,
+    KL-adaptive LR, clipped value loss, and multi-GPU grad reduction are
+    inherited unchanged. PPOL-PID overrides only the cost-aware pieces — CMDP
+    rollout storage, a cost critic, GAE on costs, the PID-controlled Lagrangian
+    multipliers, and the normalized (adv_r - λ·adv_c)/(1+λ) surrogate.
 
     Combines PPO with Lagrangian constraint handling using PID controllers
     to adaptively update Lagrangian multipliers based on constraint violations.
@@ -67,11 +73,29 @@ class PPOL_PID:
         symmetry_cfg: Optional[Dict[str, Any]] = None,
         multi_gpu_cfg: Optional[Dict[str, Any]] = None,
     ):
-        self.device = device
-        self.desired_kl = desired_kl
-        self.schedule = schedule
-        self.learning_rate = learning_rate
-        self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        # Shared PPO setup: device, multi-GPU, policy, single-group optimizer,
+        # plain transition, and all PPO hyperparameters. PPOL-PID uses neither
+        # RND nor symmetry, so those configs are left at their defaults (None).
+        # The single-group optimizer is exactly what PPOL-PID needs; only the
+        # transition is replaced below with the cost-aware variant.
+        super().__init__(
+            policy,
+            num_learning_epochs=num_learning_epochs,
+            num_mini_batches=num_mini_batches,
+            clip_param=clip_param,
+            gamma=gamma,
+            lam=lam,
+            value_loss_coef=value_loss_coef,
+            entropy_coef=entropy_coef,
+            learning_rate=learning_rate,
+            max_grad_norm=max_grad_norm,
+            use_clipped_value_loss=use_clipped_value_loss,
+            schedule=schedule,
+            desired_kl=desired_kl,
+            device=device,
+            normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            multi_gpu_cfg=multi_gpu_cfg,
+        )
 
         # Initialize cost constraints
         if cost_limits is None:
@@ -117,27 +141,14 @@ class PPOL_PID:
         print(f"EMA alphas: P={self.pid_delta_p_ema_alpha}, D={self.pid_delta_d_ema_alpha}, delay={self.pid_d_delay}")
         print(f"Initial lambdas: {self.lambdas}")
 
-        # PPO components
-        self.policy = policy
-        self.policy.to(self.device)
-        
         # Validate cost critic
         self._validate_and_fix_cost_critic()
-        
-        self.storage = None  # initialized later
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+
+        # CMDP transition replaces PPO's plain RolloutStorage.Transition. The
+        # single-group optimizer built by super() is exactly what PPOL-PID uses.
         self.transition = RolloutStorageCMDP.Transition()
 
-        # PPO parameters
-        self.clip_param = clip_param
-        self.num_learning_epochs = num_learning_epochs
-        self.num_mini_batches = num_mini_batches
-        self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
-        self.gamma = gamma
-        self.lam = lam
-        self.max_grad_norm = max_grad_norm
-        self.use_clipped_value_loss = use_clipped_value_loss
+        # Cost-specific parameters (the rest of the PPO hyperparameters are set by super)
         self.cost_loss_coef = cost_loss_coef
         self.use_clipped_cost_loss = use_clipped_cost_loss
         if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss" and self.use_clipped_cost_loss:
@@ -146,9 +157,9 @@ class PPOL_PID:
                 "forcing use_clipped_cost_loss=False."
             )
             self.use_clipped_cost_loss = False
-        
-        # RND compatibility
-        self.rnd = None
+
+        # RND compatibility (super sets self.rnd/self.rnd_optimizer to None; the
+        # runner also reads self.intrinsic_rewards, which PPOL-PID never populates).
         self.intrinsic_rewards = None
 
     def init_storage(self, training_type: str, num_envs: int, num_transitions_per_env: int,
@@ -166,20 +177,11 @@ class PPOL_PID:
         self.policy.train()
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
-        if self.policy.is_recurrent:
-            self.transition.hidden_states = self.policy.get_hidden_states()
-        
-        self.transition.actions = self.policy.act(obs).detach()
-        self.transition.values = self.policy.evaluate(critic_obs).detach()
+        # Reuse PPO.act for actions/value/log-prob/obs bookkeeping, then add the
+        # cost-critic value (shape (batch_size, num_costs)) that PPO doesn't track.
+        actions = super().act(obs, critic_obs)
         self.transition.cost_values = self.policy.evaluate_cost(critic_obs).detach()
-        
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.policy.action_mean.detach()
-        self.transition.action_sigma = self.policy.action_std.detach()
-        
-        self.transition.observations = obs
-        self.transition.privileged_observations = critic_obs
-        return self.transition.actions
+        return actions
 
     def _adjust_learning_rate(self, kl_mean: torch.Tensor) -> None:
         """Adjust the learning rate based on the KL divergence."""
