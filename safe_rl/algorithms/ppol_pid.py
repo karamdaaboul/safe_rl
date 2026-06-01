@@ -4,7 +4,6 @@ from collections import deque
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
 from safe_rl.algorithms.ppo import PPO
@@ -245,7 +244,6 @@ class PPOL_PID(PPO):
             pid_output = self.kp * self.delta_p[cost_idx] + self.pid_i[cost_idx] + self.kd * pid_d
 
             # Apply constraints
-            old_lambda = self.lambdas[cost_idx]
             self.lambdas[cost_idx] = max(0.0, pid_output)
 
             if self.diff_norm:
