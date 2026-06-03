@@ -1,0 +1,85 @@
+# FastTD3 on Unitree-G1-Flat (mjlab, massively-parallel envs)
+# Algorithm/policy mirror config/safety_gymnasium_fast_td3.yaml;
+# runner block mirrors the tuned config/unitree_g1_flat_fast_sac.yaml.
+# Reference: Seo et al., "Learning Sim-to-Real Humanoid Locomotion in 15 Minutes" (arXiv:2512.01996)
+runner_class_name: OffPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: FastTD3
+  # -- Discount and target update
+  gamma: 0.97
+  tau: 0.125
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 8192
+  num_updates_per_step: 8       # update-to-data ratio
+  policy_frequency: 2           # delayed actor + soft-target updates
+
+  # -- Target policy smoothing
+  smoothing_noise: 0.2
+  noise_clip: 0.5
+  action_low: -1.0
+  action_high: 1.0
+
+  # -- Double-Q
+  clipped_double_q: true
+
+  # -- Performance
+  amp: true
+  amp_dtype: bf16
+  weight_decay: 0.001
+  adam_betas: [0.9, 0.95]
+
+policy:
+  class_name: TD3ActorCritic
+
+  # -- Critic type
+  critic_type: distributional
+  num_critics: 2
+
+  # -- Observation normalization
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+
+  # -- Actor: DeterministicActor with per-env exploration noise
+  actor_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: silu
+    layer_norm: true
+    noise_std_min: 0.05
+    noise_std_max: 0.2
+
+  # -- Critic: DistributionalCritic with SimbaV2 backbone
+  critic_kwargs:
+    num_atoms: 101
+    v_min: -20.0
+    v_max: 20.0
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 768
+      num_blocks: 2
+      expansion: 4
+      c_shift: 3.0
+
+runner:
+  num_steps_per_env: 1
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  n_step: 3
+  reward_normalization: true
+  reward_normalization_mode: return
+  reward_normalization_g_max: 20.0  # tie to v_max
+  save_interval: 2000
+  empirical_normalization: false  # handled by actor/critic normalizers
+  experiment_name: unitree_g1_flat_fast_td3
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab
