@@ -18,4 +18,16 @@ try:
 except ImportError:
     SimplexRTAWrapper = None
 
-__all__ = ["VecEnv", "make_env", "SafetyGymnasiumVecEnv", "MjlabVecEnv", "SimplexRTAWrapper"]
+try:
+    from .clf_reward_wrapper import CLFRewardWrapper
+except ImportError:
+    CLFRewardWrapper = None
+
+__all__ = [
+    "VecEnv",
+    "make_env",
+    "SafetyGymnasiumVecEnv",
+    "MjlabVecEnv",
+    "SimplexRTAWrapper",
+    "CLFRewardWrapper",
+]

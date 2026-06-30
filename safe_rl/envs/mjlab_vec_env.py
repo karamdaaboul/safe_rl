@@ -22,6 +22,11 @@ class MjlabVecEnv(VecEnv):
         self.step_dt = float(env.step_dt)
         self.cfg = env.cfg
         self.clip_actions = clip_actions
+        # cost_limits are owned by the env's cost manager (env.cost_limits). Read
+        # them from there; the explicit kwarg only acts as an override/fallback.
+        if cost_limits is None:
+            unwrapped = getattr(env, "unwrapped", env)
+            cost_limits = getattr(unwrapped, "cost_limits", None)
         self.cost_limits = cost_limits
         self._last_obs: torch.Tensor | None = None
         self._last_extras: dict[str, Any] | None = None
