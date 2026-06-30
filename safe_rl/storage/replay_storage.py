@@ -26,6 +26,8 @@ class ReplayStorage:
         action_shape: list[int],
         device: str = "cpu",
         initial_size: int = 0,
+        n_step: int = 1,
+        gamma: float = 0.99,
     ):
         """Initialize the replay buffer.
 
@@ -36,11 +38,31 @@ class ReplayStorage:
             action_shape: Shape of actions.
             device: Device to store tensors on.
             initial_size: Minimum transitions before sampling is allowed.
+            n_step: Horizon for in-buffer n-step return aggregation. ``1`` (default)
+                keeps the plain flat random-sampling behaviour. ``> 1`` enables
+                sample-time n-step targets computed from the per-env transition
+                stride (requires ``max_size`` to be a multiple of ``num_envs``).
+            gamma: Discount factor used for n-step reward aggregation (only used
+                when ``n_step > 1``).
         """
         self.device = device
         self.num_envs = num_envs
         self.obs_shape = obs_shape
         self.action_shape = action_shape
+
+        # N-step aggregation (in-buffer). For n_step > 1 the flat buffer is viewed
+        # as a per-env ring of shape [T, num_envs] (row t, env e -> flat t*num_envs+e),
+        # which requires max_size to be an exact multiple of num_envs so the stride
+        # stays aligned across wrap-around.
+        self.n_step = max(1, int(n_step))
+        self.gamma = float(gamma)
+        if self.n_step > 1:
+            max_size = (max_size // num_envs) * num_envs
+            if max_size < num_envs * self.n_step:
+                raise ValueError(
+                    f"max_size ({max_size}) too small for n_step={self.n_step} "
+                    f"with num_envs={num_envs}; need at least num_envs * n_step transitions."
+                )
 
         # Buffer sizing
         self._max_size = max_size
@@ -185,12 +207,98 @@ class ReplayStorage:
                 f"Buffer not initialized. Need {self._initial_size} samples, have {self._size}."
             )
 
+        if self.n_step > 1:
+            return self._sample_n_step(batch_size)
+
         indices = torch.randint(0, self._size, (batch_size,), device=self.device)
 
         batch = {}
         for name, data in self._data.items():
             batch[name] = self._process_undo(name, data[indices].clone())
 
+        return batch
+
+    def _sample_n_step(self, batch_size: int) -> dict[str, torch.Tensor]:
+        """Sample a batch with in-buffer n-step return aggregation.
+
+        Views the flat buffer as a per-env ring ``[T, num_envs]`` (T = max_size //
+        num_envs) and, for each sampled (env, start) transition, aggregates the
+        discounted reward over the next ``n_step`` transitions of the same env,
+        truncating at the first episode end. Mirrors the reference rsl_rl_sac
+        ``ReplayBuffer._generate_batch`` logic.
+
+        Returns the same keys as :meth:`sample`, with ``rewards`` holding the
+        n-step discounted return, ``next_observations`` / ``dones`` / ``bootstrap``
+        taken at the (possibly truncated) horizon, plus an ``effective_n_steps``
+        tensor so the algorithm can apply ``gamma ** effective_n_steps``.
+        """
+        n = self.n_step
+        num_envs = self.num_envs
+        per_env_len = self._max_size // num_envs  # T (capacity per env)
+        filled_t = self._size // num_envs  # number of fully written columns
+        head = (self._ptr // num_envs) % per_env_len  # next column to write per env
+        full = self._size >= self._max_size
+
+        # Per-env time view of each stored field: [T, num_envs, *feat].
+        def view2d(data: torch.Tensor) -> torch.Tensor:
+            return data.reshape(per_env_len, num_envs, *data.shape[1:])
+
+        # Build the set of valid (start_t, env) starts whose n-step window does not
+        # cross the write head (the oldest/newest boundary in the ring).
+        time_len = per_env_len if full else filled_t
+        start_t = torch.arange(time_len, device=self.device)
+        max_offset = n - 1
+        if full:
+            starts_before_head = start_t < head
+            safe_before = (start_t + max_offset) < head
+            safe_after = (start_t + max_offset) < (per_env_len + head)
+            safe_mask = torch.where(starts_before_head, safe_before, safe_after)
+        else:
+            safe_mask = (start_t + max_offset) < time_len
+        valid_t = start_t[safe_mask]
+        if valid_t.numel() == 0:
+            raise RuntimeError("Not enough contiguous transitions for n-step sampling.")
+
+        # Sample (start_t, env) pairs uniformly over the valid grid.
+        t_idx = valid_t[torch.randint(0, valid_t.numel(), (batch_size,), device=self.device)]
+        e_idx = torch.randint(0, num_envs, (batch_size,), device=self.device)
+
+        step_offsets = torch.arange(n, device=self.device)
+        window_t = (t_idx.unsqueeze(-1) + step_offsets) % per_env_len  # [B, n]
+        e_exp = e_idx.unsqueeze(-1).expand(batch_size, n)
+
+        rewards2d = view2d(self._data["rewards"])  # [T, E, 1]
+        dones2d = view2d(self._data["dones"])  # [T, E, 1]
+        all_rewards = rewards2d[window_t, e_exp].squeeze(-1)  # [B, n]
+        all_dones = dones2d[window_t, e_exp].squeeze(-1)  # [B, n]
+
+        # Zero out rewards after the first done; discounted sum gamma^k * r_k.
+        dones_shifted = torch.cat([torch.zeros_like(all_dones[..., :1]), all_dones[..., :-1]], dim=-1)
+        done_masks = torch.cumprod(1.0 - dones_shifted, dim=-1)
+        discounts = torch.pow(self.gamma, step_offsets)
+        n_step_rewards = (all_rewards * done_masks * discounts.view(1, -1)).sum(dim=-1, keepdim=True)
+
+        # Effective horizon = index of first done (+1), else full n.
+        first_done = torch.argmax((all_dones > 0).float(), dim=-1)
+        no_dones = all_dones.sum(dim=-1) == 0
+        first_done = torch.where(no_dones, torch.full_like(first_done, n - 1), first_done)
+        effective_n_steps = (first_done + 1).unsqueeze(-1).to(torch.long)
+        final_t = window_t.gather(1, first_done.unsqueeze(-1)).squeeze(-1)  # [B]
+
+        batch: dict[str, torch.Tensor] = {}
+        for name, data in self._data.items():
+            d2d = view2d(data)
+            if name == "rewards":
+                value = n_step_rewards
+            elif name in ("next_observations", "next_critic_observations", "dones", "bootstrap"):
+                # Taken at the (possibly truncated) horizon step.
+                value = d2d[final_t, e_idx]
+            else:
+                # State/action/critic-obs taken at the start step.
+                value = d2d[t_idx, e_idx]
+            batch[name] = self._process_undo(name, value.clone())
+
+        batch["effective_n_steps"] = effective_n_steps
         return batch
 
     def batch_generator(

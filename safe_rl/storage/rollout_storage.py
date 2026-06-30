@@ -20,6 +20,9 @@ class RolloutStorage:
             self.action_sigma = None
             self.hidden_states = None
             self.rnd_state = None
+            self.next_observations = None
+            self.next_privileged_observations = None
+            self.truncated = None
 
         def clear(self):
             self.__init__()
@@ -34,6 +37,7 @@ class RolloutStorage:
         actions_shape,
         rnd_state_shape=None,
         device="cpu",
+        store_next_obs: bool = False,
     ):
         # store inputs
         self.training_type = training_type
@@ -74,6 +78,22 @@ class RolloutStorage:
         if rnd_state_shape is not None:
             self.rnd_state = torch.zeros(num_transitions_per_env, num_envs, *rnd_state_shape, device=self.device)
 
+        # Optional next-state buffers (REPPO and other off-policy-style on-policy algorithms)
+        self.store_next_obs = store_next_obs
+        if store_next_obs:
+            self.next_observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+            if privileged_obs_shape is not None:
+                self.next_privileged_observations = torch.zeros(
+                    num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device
+                )
+            else:
+                self.next_privileged_observations = None
+            self.truncated = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        else:
+            self.next_observations = None
+            self.next_privileged_observations = None
+            self.truncated = None
+
         # For RNN networks
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
@@ -108,6 +128,15 @@ class RolloutStorage:
         # For RND
         if self.rnd_state_shape is not None:
             self.rnd_state[self.step].copy_(transition.rnd_state)
+
+        # For algorithms that need next-state info (REPPO)
+        if self.store_next_obs:
+            if transition.next_observations is not None:
+                self.next_observations[self.step].copy_(transition.next_observations)
+            if self.next_privileged_observations is not None and transition.next_privileged_observations is not None:
+                self.next_privileged_observations[self.step].copy_(transition.next_privileged_observations)
+            if transition.truncated is not None:
+                self.truncated[self.step].copy_(transition.truncated.view(-1, 1))
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
