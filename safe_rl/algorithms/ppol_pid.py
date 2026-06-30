@@ -4,17 +4,22 @@ from collections import deque
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
+from safe_rl.algorithms.ppo import PPO
 from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
 
 
-class PPOL_PID:
+class PPOL_PID(PPO):
     """
     PPO Lagrangian with PID Controller for Safe Reinforcement Learning
+
+    Subclasses PPO: device/multi-GPU setup, the single-group optimizer,
+    KL-adaptive LR, clipped value loss, and multi-GPU grad reduction are
+    inherited unchanged. PPOL-PID overrides only the cost-aware pieces — CMDP
+    rollout storage, a cost critic, GAE on costs, the PID-controlled Lagrangian
+    multipliers, and the normalized (adv_r - λ·adv_c)/(1+λ) surrogate.
 
     Combines PPO with Lagrangian constraint handling using PID controllers
     to adaptively update Lagrangian multipliers based on constraint violations.
@@ -67,11 +72,29 @@ class PPOL_PID:
         symmetry_cfg: Optional[Dict[str, Any]] = None,
         multi_gpu_cfg: Optional[Dict[str, Any]] = None,
     ):
-        self.device = device
-        self.desired_kl = desired_kl
-        self.schedule = schedule
-        self.learning_rate = learning_rate
-        self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        # Shared PPO setup: device, multi-GPU, policy, single-group optimizer,
+        # plain transition, and all PPO hyperparameters. PPOL-PID uses neither
+        # RND nor symmetry, so those configs are left at their defaults (None).
+        # The single-group optimizer is exactly what PPOL-PID needs; only the
+        # transition is replaced below with the cost-aware variant.
+        super().__init__(
+            policy,
+            num_learning_epochs=num_learning_epochs,
+            num_mini_batches=num_mini_batches,
+            clip_param=clip_param,
+            gamma=gamma,
+            lam=lam,
+            value_loss_coef=value_loss_coef,
+            entropy_coef=entropy_coef,
+            learning_rate=learning_rate,
+            max_grad_norm=max_grad_norm,
+            use_clipped_value_loss=use_clipped_value_loss,
+            schedule=schedule,
+            desired_kl=desired_kl,
+            device=device,
+            normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            multi_gpu_cfg=multi_gpu_cfg,
+        )
 
         # Initialize cost constraints
         if cost_limits is None:
@@ -112,37 +135,25 @@ class PPOL_PID:
             deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)
         ]
 
-        print(f"PPOL-PID initialized with {self.num_costs} cost constraints (OmniSafe-style)")
-        print(f"PID gains: Kp={self.kp}, Ki={self.ki}, Kd={self.kd}")
-        print(f"EMA alphas: P={self.pid_delta_p_ema_alpha}, D={self.pid_delta_d_ema_alpha}, delay={self.pid_d_delay}")
-        print(f"Initial lambdas: {self.lambdas}")
-
-        # PPO components
-        self.policy = policy
-        self.policy.to(self.device)
-        
         # Validate cost critic
         self._validate_and_fix_cost_critic()
-        
-        self.storage = None  # initialized later
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+
+        # CMDP transition replaces PPO's plain RolloutStorage.Transition. The
+        # single-group optimizer built by super() is exactly what PPOL-PID uses.
         self.transition = RolloutStorageCMDP.Transition()
 
-        # PPO parameters
-        self.clip_param = clip_param
-        self.num_learning_epochs = num_learning_epochs
-        self.num_mini_batches = num_mini_batches
-        self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
-        self.gamma = gamma
-        self.lam = lam
-        self.max_grad_norm = max_grad_norm
-        self.use_clipped_value_loss = use_clipped_value_loss
+        # Cost-specific parameters (the rest of the PPO hyperparameters are set by super)
         self.cost_loss_coef = cost_loss_coef
         self.use_clipped_cost_loss = use_clipped_cost_loss
-        
-        # RND compatibility
-        self.rnd = None
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss" and self.use_clipped_cost_loss:
+            print(
+                "[PPOL_PID] use_clipped_cost_loss=True is incompatible with HL-Gauss cost critic; "
+                "forcing use_clipped_cost_loss=False."
+            )
+            self.use_clipped_cost_loss = False
+
+        # RND compatibility (super sets self.rnd/self.rnd_optimizer to None; the
+        # runner also reads self.intrinsic_rewards, which PPOL-PID never populates).
         self.intrinsic_rewards = None
 
     def init_storage(self, training_type: str, num_envs: int, num_transitions_per_env: int,
@@ -160,20 +171,11 @@ class PPOL_PID:
         self.policy.train()
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
-        if self.policy.is_recurrent:
-            self.transition.hidden_states = self.policy.get_hidden_states()
-        
-        self.transition.actions = self.policy.act(obs).detach()
-        self.transition.values = self.policy.evaluate(critic_obs).detach()
+        # Reuse PPO.act for actions/value/log-prob/obs bookkeeping, then add the
+        # cost-critic value (shape (batch_size, num_costs)) that PPO doesn't track.
+        actions = super().act(obs, critic_obs)
         self.transition.cost_values = self.policy.evaluate_cost(critic_obs).detach()
-        
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.policy.action_mean.detach()
-        self.transition.action_sigma = self.policy.action_std.detach()
-        
-        self.transition.observations = obs
-        self.transition.privileged_observations = critic_obs
-        return self.transition.actions
+        return actions
 
     def _adjust_learning_rate(self, kl_mean: torch.Tensor) -> None:
         """Adjust the learning rate based on the KL divergence."""
@@ -237,7 +239,6 @@ class PPOL_PID:
             pid_output = self.kp * self.delta_p[cost_idx] + self.pid_i[cost_idx] + self.kd * pid_d
 
             # Apply constraints
-            old_lambda = self.lambdas[cost_idx]
             self.lambdas[cost_idx] = max(0.0, pid_output)
 
             if self.diff_norm:
@@ -340,9 +341,13 @@ class PPOL_PID:
             value_loss = torch.max(value_losses, value_losses_clipped).mean()
         else:
             value_loss = (returns_batch - value_batch).pow(2).mean()
-        
+
         # Cost value function losses
-        if self.use_clipped_cost_loss:
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            cost_losses_all = self.policy.cost_critic.loss(
+                self.policy._cost_logits, returns_cost_batch
+            ).mean(dim=0)
+        elif self.use_clipped_cost_loss:
             cost_clipped = target_cost_values_batch + (cost_value_batch_all - target_cost_values_batch).clamp(
                 -self.clip_param, self.clip_param
             )
@@ -351,7 +356,7 @@ class PPOL_PID:
             cost_losses_all = torch.max(cost_value_losses, cost_value_losses_clipped).mean(dim=0)
         else:
             cost_losses_all = (returns_cost_batch - cost_value_batch_all).pow(2).mean(dim=0)
-        
+
         total_cost_critic_loss = self.cost_loss_coef * cost_losses_all.sum()
 
         # Total loss
@@ -368,7 +373,11 @@ class PPOL_PID:
 
         return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item()
 
-    def update(self, current_costs: Optional[List[torch.Tensor]] = None) -> Dict[str, float]:
+    def update(
+        self,
+        current_costs: Optional[List[torch.Tensor]] = None,
+        iteration: Optional[int] = None,
+    ) -> Dict[str, float]:
         """Main update function."""
         # Update Lagrangian multipliers ONCE per iteration BEFORE policy updates
         # This matches OmniSafe's approach and prevents multipliers from jumping to extremes
@@ -415,7 +424,7 @@ class PPOL_PID:
         self.transition.rewards = rewards.clone()
         self.transition.costs = self._format_costs_tensor(costs)
         self.transition.dones = dones
-        
+
         # Bootstrapping on timeouts
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * torch.squeeze(
@@ -423,7 +432,7 @@ class PPOL_PID:
             )
             timeout_mask = infos["time_outs"].unsqueeze(1).to(self.device)
             timeout_mask = timeout_mask.expand(-1, self.num_costs)
-            
+
             if self.transition.cost_values is not None:
                 cost_bootstrap = self.gamma * self.transition.cost_values * timeout_mask
                 self.transition.costs += cost_bootstrap
@@ -436,13 +445,13 @@ class PPOL_PID:
         """Format costs tensor to have shape (batch_size, num_costs)."""
         if isinstance(costs, list):
             return torch.stack([cost.clone() for cost in costs], dim=1)
-        
+
         if costs.dim() == 1:
             if self.num_costs == 1:
                 return costs.unsqueeze(1).clone()
             else:
                 return costs.unsqueeze(1).expand(-1, self.num_costs).clone()
-        
+
         return costs.clone()
 
     def compute_returns(self, last_critic_obs: torch.Tensor) -> None:
@@ -454,7 +463,7 @@ class PPOL_PID:
         """Compute GAE returns for costs."""
         last_cost_values = self.policy.evaluate_cost(last_critic_obs).detach()
         self.storage.compute_cost_returns(
-            last_cost_values, self.gamma, self.lam, 
+            last_cost_values, self.gamma, self.lam,
             normalize_cost_advantage=not self.normalize_advantage_per_mini_batch
         )
 
@@ -491,18 +500,22 @@ class PPOL_PID:
         """Validate cost critic output dimensions."""
         if not hasattr(self.policy, 'cost_critic'):
             raise ValueError("ActorCritic must have a cost_critic attribute for PPOL-PID algorithm")
-        
+
+        # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.
+        if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
+            return
+
         last_layer = None
         for module in reversed(list(self.policy.cost_critic.modules())):
             if isinstance(module, torch.nn.Linear):
                 last_layer = module
                 break
-        
+
         if last_layer is None:
             raise ValueError("Could not find linear layer in cost critic")
-        
+
         current_outputs = last_layer.out_features
-        
+
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but PPOL-PID expects {self.num_costs}.")
             print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
