@@ -29,6 +29,10 @@ This library implements several **on-policy reinforcement learning algorithms** 
   a curiosity driven intrinsic reward.
 * [Symmetry-based Augmentation](https://arxiv.org/abs/2403.04359) - Makes the learned behaviors more symmetrical.
 
+> ⚠️ **Experimental — not ready to try yet:** **GRPO** (group-relative policy optimization) and the
+> **CBF** (control-barrier-function) safety filter are work in progress. They are present in the
+> codebase but have not been validated — please do not rely on them for experiments yet.
+
 All algorithms are designed for **on-policy learning** and support cost-constrained environments for safe reinforcement learning.
 
 We welcome contributions from the community. Please check our contribution guidelines for more
