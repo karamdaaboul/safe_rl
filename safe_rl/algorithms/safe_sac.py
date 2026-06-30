@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from safe_rl.modules.reward_normalization import RewardNormalization
 from safe_rl.modules.safe_sac_actor_critic import SafeSACActorCritic
 from safe_rl.storage.replay_storage import ReplayStorage
 
@@ -35,6 +36,10 @@ class SafeSAC:
 
     policy: SafeSACActorCritic
     """The actor critic module."""
+
+    # The runner stores truthful dones + a separate bootstrap flag for this algo
+    # so the reward/cost Bellman backups can mask via ``bootstrap + (1 - dones)``.
+    uses_bootstrap_channel = True
 
     def __init__(
         self,
@@ -116,6 +121,7 @@ class SafeSAC:
         self.batch_size = batch_size
         self.num_updates_per_step = num_updates_per_step
         self.policy_frequency = max(1, policy_frequency)
+        self.update_step = 0
         self.max_grad_norm = max_grad_norm
 
         # Safe RL parameters
@@ -251,6 +257,7 @@ class SafeSAC:
         cost: torch.Tensor | None = None,
         critic_obs: torch.Tensor | None = None,
         next_critic_obs: torch.Tensor | None = None,
+        bootstrap: torch.Tensor | None = None,
     ) -> None:
         """Store a transition in the replay buffer.
 
@@ -258,9 +265,12 @@ class SafeSAC:
             obs: Current observations.
             action: Actions taken.
             reward: Rewards received.
-            done: Done flags.
+            done: Done flags (truthful episode end when the bootstrap channel is used).
             next_obs: Next observations.
             cost: Costs received (for safe RL).
+            critic_obs: Optional critic observations.
+            next_critic_obs: Optional next critic observations.
+            bootstrap: Optional timeout flag (1 = truncation) for the bootstrap channel.
         """
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
@@ -277,6 +287,8 @@ class SafeSAC:
             extras["critic_observations"] = critic_obs
         if next_critic_obs is not None:
             extras["next_critic_observations"] = next_critic_obs
+        if bootstrap is not None:
+            extras["bootstrap"] = bootstrap.view(-1, 1) if bootstrap.dim() == 1 else bootstrap
         self.storage.add(obs, action, reward, done, next_obs, **extras)
 
     def _format_costs_tensor(self, costs: torch.Tensor) -> torch.Tensor:
@@ -357,7 +369,13 @@ class SafeSAC:
             Dictionary containing loss values for logging.
         """
         if self.storage is None or len(self.storage) < self.batch_size:
-            return {"critic": 0.0, "cost_critic": 0.0, "actor": 0.0, "alpha": 0.0}
+            return {
+                "critic": 0.0,
+                "cost_critic": 0.0,
+                "actor": 0.0,
+                "alpha": float(self.alpha.detach().item()),
+                "alpha_loss": 0.0,
+            }
 
         # Update Lagrangian multipliers if costs provided
         if current_costs is not None:
@@ -381,6 +399,9 @@ class SafeSAC:
             next_obs = batch["next_observations"]
             next_critic_obs = batch.get("next_critic_observations", next_obs)
             costs = batch.get("costs", torch.zeros(self.batch_size, self.num_costs, device=self.device))
+            # Optional bootstrap channel (truthful dones + separate timeout flag).
+            # Absent for plain 1-step buffers (back-compat -> falls back to 1 - dones).
+            bootstrap = batch.get("bootstrap")
 
             # Normalize at sample time (FastSAC-style, eval mode to avoid updating stats)
             if obs_normalizer is not None:
@@ -391,21 +412,30 @@ class SafeSAC:
                 with torch.no_grad():
                     critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
                     next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
-            # Normalize rewards by running std (don't shift mean)
+            # Normalize rewards by running std (don't shift mean). "return" mode uses
+            # a RewardNormalization module (normalize via forward); "empirical" mode
+            # uses EmpiricalNormalization (divide by running std).
             if reward_normalizer is not None:
                 with torch.no_grad():
-                    rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
+                    if isinstance(reward_normalizer, RewardNormalization):
+                        rewards = reward_normalizer(rewards)
+                    else:
+                        rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
             # Update reward critic
-            critic_loss = self._update_reward_critic(critic_obs, actions, rewards, dones, next_critic_obs)
+            critic_loss = self._update_reward_critic(
+                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs, bootstrap=bootstrap
+            )
             total_critic_loss += critic_loss
 
             # Update cost critic
-            cost_critic_loss = self._update_cost_critic(critic_obs, actions, costs, dones, next_critic_obs)
+            cost_critic_loss = self._update_cost_critic(
+                obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs, bootstrap=bootstrap
+            )
             total_cost_critic_loss += cost_critic_loss
 
             # Update actor and alpha
-            if update_idx % self.policy_frequency == 0:
+            if self.update_step % self.policy_frequency == 0:
                 actor_loss, alpha_loss = self._update_actor_and_alpha(obs, critic_obs)
                 total_actor_loss += actor_loss
                 total_alpha_loss += alpha_loss
@@ -413,6 +443,7 @@ class SafeSAC:
 
             # Soft update target networks
             self.policy.soft_update_targets(self.tau)
+            self.update_step += 1
 
         # Average losses
         num_updates = self.num_updates_per_step
@@ -421,42 +452,58 @@ class SafeSAC:
             "critic": total_critic_loss / num_updates,
             "cost_critic": total_cost_critic_loss / num_updates,
             "actor": total_actor_loss / actor_denominator,
-            "alpha": total_alpha_loss / actor_denominator,
+            # Log the entropy coefficient (-> SafeRL/alpha) and the alpha loss (-> Loss/alpha)
+            "alpha": float(self.alpha.detach().item()),
+            "alpha_loss": total_alpha_loss / actor_denominator,
         }
+
+    def _bootstrap_mask(self, dones: torch.Tensor, bootstrap: torch.Tensor | None) -> torch.Tensor:
+        """Bootstrap mask: ``bootstrap + (1 - dones)`` when a timeout flag is given,
+        else ``1 - dones``. Truncated episodes (done=1, bootstrap=1) keep bootstrapping."""
+        if bootstrap is None:
+            return 1.0 - dones
+        return bootstrap + (1.0 - dones)
 
     def _update_reward_critic(
         self,
         obs: torch.Tensor,
+        critic_obs: torch.Tensor,
         actions: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
         next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
     ) -> float:
         """Update reward Q-networks with standard SAC loss.
 
         Args:
-            obs: Current observations.
+            obs: Current actor observations (for sampling next actions).
+            critic_obs: Current critic observations (for Q-value evaluation).
             actions: Actions taken.
             rewards: Rewards received.
             dones: Done flags.
-            next_obs: Next observations.
+            next_obs: Next actor observations.
+            next_critic_obs: Next critic observations.
+            bootstrap: Optional timeout flag for the bootstrap mask.
 
         Returns:
             Reward critic loss value.
         """
         with torch.no_grad():
-            # Sample next actions and compute log probs
+            # Sample next actions and compute log probs (actor-space obs)
             next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
 
-            # Compute target Q-values (min of twin critics)
-            q1_target, q2_target = self.policy.evaluate_q_target(next_obs, next_actions)
+            # Compute target Q-values (min of twin critics, critic-space obs)
+            q1_target, q2_target = self.policy.evaluate_q_target(next_critic_obs, next_actions)
             q_target = torch.min(q1_target, q2_target)
 
-            # Soft Bellman backup: Q_target = r + γ * (1 - d) * (min Q_target - α * log π)
-            target_q = rewards + self.gamma * (1 - dones) * (q_target - self.alpha.detach() * next_log_prob)
+            # Soft Bellman backup: Q_target = r + γ * mask * (min Q_target - α * log π)
+            mask = self._bootstrap_mask(dones, bootstrap)
+            target_q = rewards + self.gamma * mask * (q_target - self.alpha.detach() * next_log_prob)
 
-        # Compute current Q-values
-        q1, q2 = self.policy.evaluate_q(obs, actions)
+        # Compute current Q-values (critic-space obs)
+        q1, q2 = self.policy.evaluate_q(critic_obs, actions)
 
         # Critic loss (MSE)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
@@ -475,36 +522,43 @@ class SafeSAC:
     def _update_cost_critic(
         self,
         obs: torch.Tensor,
+        critic_obs: torch.Tensor,
         actions: torch.Tensor,
         costs: torch.Tensor,
         dones: torch.Tensor,
         next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
     ) -> float:
         """Update cost Q-networks.
 
         Args:
-            obs: Current observations.
+            obs: Current actor observations (for sampling next actions).
+            critic_obs: Current critic observations (for cost Q-value evaluation).
             actions: Actions taken.
             costs: Costs received [batch_size, num_costs].
             dones: Done flags.
-            next_obs: Next observations.
+            next_obs: Next actor observations.
+            next_critic_obs: Next critic observations.
+            bootstrap: Optional timeout flag for the bootstrap mask.
 
         Returns:
             Cost critic loss value.
         """
         with torch.no_grad():
-            # Sample next actions
+            # Sample next actions (actor-space obs)
             next_actions, _ = self.policy.sample_with_log_prob(next_obs)
 
-            # Compute target cost Q-values
-            cost_q_target = self.policy.evaluate_cost_q_target(next_obs, next_actions)
+            # Compute target cost Q-values (critic-space obs)
+            cost_q_target = self.policy.evaluate_cost_q_target(next_critic_obs, next_actions)
 
-            # Cost Bellman backup: Q_c_target = c + γ * (1 - d) * Q_c_target
+            # Cost Bellman backup: Q_c_target = c + γ * mask * Q_c_target
             # Note: No entropy term for cost critics
-            target_cost_q = costs + self.gamma * (1 - dones) * cost_q_target
+            mask = self._bootstrap_mask(dones, bootstrap)
+            target_cost_q = costs + self.gamma * mask * cost_q_target
 
-        # Compute current cost Q-values
-        cost_q = self.policy.evaluate_cost_q(obs, actions)
+        # Compute current cost Q-values (critic-space obs)
+        cost_q = self.policy.evaluate_cost_q(critic_obs, actions)
 
         # Cost critic loss (MSE)
         cost_critic_loss = F.mse_loss(cost_q, target_cost_q)

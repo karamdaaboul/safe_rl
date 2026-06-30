@@ -12,6 +12,7 @@ from .pcpo import PCPO
 from .pcrpo import PCRPO
 from .ppo import PPO
 from .ppol_pid import PPOL_PID
+from .reppo import REPPO
 from .sac import SAC
 from .safe_sac import SafeSAC
 
@@ -28,6 +29,7 @@ __all__ = [
     "PCRPO",
     "PPO",
     "PPOL_PID",
+    "REPPO",
     "SAC",
     "SafeSAC",
 ]

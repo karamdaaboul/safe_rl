@@ -127,7 +127,8 @@ def _critic_loss_distributional(
 
 @torch.compile
 def _actor_loss_fn(
-    obs: torch.Tensor,
+    actor_obs: torch.Tensor,
+    critic_obs: torch.Tensor,
     is_distributional: bool,
     clipped_double_q: bool,
     actor: nn.Module,
@@ -136,8 +137,8 @@ def _actor_loss_fn(
     actor_obs_normalizer: nn.Module,
     critic_obs_normalizer: nn.Module,
 ) -> torch.Tensor:
-    actions = actor(actor_obs_normalizer(obs))
-    obs_norm = critic_obs_normalizer(obs)
+    actions = actor(actor_obs_normalizer(actor_obs))
+    obs_norm = critic_obs_normalizer(critic_obs)
 
     if is_distributional:
         logits_1 = critic_1(obs_norm, actions)
@@ -325,7 +326,7 @@ class FastTD3:
             total_critic_loss += critic_loss
 
             if update_idx % self.policy_frequency == 0:
-                actor_loss = self._update_actor(obs)
+                actor_loss = self._update_actor(obs, critic_obs)
                 total_actor_loss += actor_loss
                 actor_updates += 1
 
@@ -380,10 +381,10 @@ class FastTD3:
         self.scaler.update()
         return loss.item()
 
-    def _update_actor(self, obs: torch.Tensor) -> float:
+    def _update_actor(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> float:
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
             actor_loss = _actor_loss_fn(
-                obs, self.policy.is_distributional_critic, self.clipped_double_q,
+                obs, critic_obs, self.policy.is_distributional_critic, self.clipped_double_q,
                 self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                 self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
             )
