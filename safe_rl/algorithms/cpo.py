@@ -37,6 +37,7 @@ class CPO:
         num_mini_batches: int = 4,
         clip_param: float = 0.2,
         gamma: float = 0.99,
+        gamma_cost: Optional[float] = None,
         lam: float = 0.95,
         value_loss_coef: float = 1.0,
         cost_value_loss_coef: float = 1.0,
@@ -83,6 +84,8 @@ class CPO:
         self.num_mini_batches = num_mini_batches
         self.clip_param = clip_param
         self.gamma = gamma
+        # Cost can use a shorter horizon than reward — sharper targets, easier to learn.
+        self.gamma_cost = gamma_cost if gamma_cost is not None else gamma
         self.lam = lam
         self.value_loss_coef = value_loss_coef
         self.cost_value_loss_coef = cost_value_loss_coef
@@ -202,7 +205,7 @@ class CPO:
             )
             timeout_mask = infos["time_outs"].unsqueeze(1).to(self.device).expand(-1, self.num_costs)
             if self.transition.cost_values is not None:
-                self.transition.costs += self.gamma * self.transition.cost_values * timeout_mask
+                self.transition.costs += self.gamma_cost * self.transition.cost_values * timeout_mask
 
         self.storage.add_transitions(self.transition)
         self.transition.clear()
@@ -218,7 +221,7 @@ class CPO:
         last_cost_values = self.policy.evaluate_cost(last_critic_obs).detach()
         self.storage.compute_cost_returns(
             last_cost_values,
-            self.gamma,
+            self.gamma_cost,
             self.lam,
             normalize_cost_advantage=not self.normalize_advantage_per_mini_batch,
         )
@@ -593,7 +596,11 @@ class CPO:
         num_updates = self.num_learning_epochs * self.num_mini_batches
         return mean_value_loss / num_updates, mean_cost_value_loss / num_updates
 
-    def update(self, current_costs: Optional[List[float]] = None) -> Dict[str, float]:
+    def update(
+        self,
+        current_costs: Optional[List[float]] = None,
+        iteration: Optional[int] = None,
+    ) -> Dict[str, float]:
         actor_metrics = self._update_actor(current_costs)
         mean_value_loss, mean_cost_value_loss = self._update_value_functions()
         self.storage.clear()
