@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from safe_rl.modules.actor import DeterministicActor, GaussianActor
-from safe_rl.modules.critic import DistributionalCritic, StandardCritic
+from safe_rl.modules.critic import DistributionalCritic, HLGaussCostCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
 
 
@@ -132,15 +132,29 @@ class ActorCritic(nn.Module):
         # ==================== Cost critic (optional) ====================
         # Built only for safe RL algorithms; runner injects num_costs from len(cost_limits).
         if num_costs > 0:
-            self.cost_critic = StandardCritic(
-                num_obs=num_critic_obs,
-                num_actions=0,
-                output_dim=num_costs,
-                **cost_critic_kwargs,
-            )
-            print(f"Cost critic: {self.cost_critic}")
+            loss_type = cost_critic_kwargs.pop("loss_type", "mse")
+            self.cost_critic_loss_type = loss_type
+            if loss_type == "mse":
+                self.cost_critic = StandardCritic(
+                    num_obs=num_critic_obs,
+                    num_actions=0,
+                    output_dim=num_costs,
+                    **cost_critic_kwargs,
+                )
+            elif loss_type == "hlgauss":
+                self.cost_critic = HLGaussCostCritic(
+                    num_obs=num_critic_obs,
+                    num_costs=num_costs,
+                    **cost_critic_kwargs,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown cost_critic loss_type: {loss_type!r}. Must be 'mse' or 'hlgauss'."
+                )
+            print(f"Cost critic ({loss_type}): {self.cost_critic}")
         else:
             self.cost_critic = None
+            self.cost_critic_loss_type = None
 
     def reset(self, dones: torch.Tensor | None = None) -> None:
         pass
@@ -179,6 +193,13 @@ class ActorCritic(nn.Module):
         if not self.is_distributional_critic:
             raise RuntimeError("value_dist only available for distributional critic")
         return self._value_dist
+
+    @property
+    def cost_logits(self) -> torch.Tensor:
+        """Return cached cost logits from last evaluate_cost call (HL-Gauss cost critic only)."""
+        if self.cost_critic_loss_type != "hlgauss":
+            raise RuntimeError("cost_logits only available when cost_critic loss_type is 'hlgauss'")
+        return self._cost_logits
 
     def update_distribution(self, observations: torch.Tensor) -> None:
         """Update the action distribution (for Gaussian actor only)."""
@@ -253,7 +274,52 @@ class ActorCritic(nn.Module):
         if self.cost_critic is None:
             raise RuntimeError("evaluate_cost requires num_costs > 0 (no cost_critic was built)")
         critic_observations = self.critic_obs_normalizer(critic_observations)
+        if self.cost_critic_loss_type == "hlgauss":
+            logits = self.cost_critic(critic_observations)
+            self._cost_logits = logits
+            # Always decode as the expected value here. GAE requires an unbiased
+            # baseline, so the standard `evaluate_cost` path must not return CVaR
+            # (which is the upper-tail expectation and biases A_C globally negative,
+            # closing the P3O ReLU gate). Risk-sensitive callers should call
+            # `evaluate_cost_cvar` explicitly.
+            return self.cost_critic.expected_value(logits)
         return self.cost_critic(critic_observations)
+
+    def evaluate_cost_cvar(
+        self,
+        critic_observations: torch.Tensor,
+        alpha: float | None = None,
+        **kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """Risk-sensitive cost-value evaluation (HL-Gauss critic only).
+
+        Decodes the predicted cost-return distribution as CVaR over the worst
+        ``alpha`` tail. Used by safety-gate / κ-adaptation logic that wants to
+        react to predicted catastrophic outcomes; *not* used as the GAE baseline.
+
+        Args:
+            critic_observations: same shape contract as ``evaluate_cost``.
+            alpha: tail fraction in (0, 1]. Defaults to ``self.cost_critic.cvar_alpha``
+                if set on the critic; raises if neither is provided.
+        """
+        if self.cost_critic is None:
+            raise RuntimeError("evaluate_cost_cvar requires num_costs > 0 (no cost_critic was built)")
+        if self.cost_critic_loss_type != "hlgauss":
+            raise RuntimeError(
+                "evaluate_cost_cvar requires the HL-Gauss cost critic; "
+                f"got loss_type={self.cost_critic_loss_type!r}"
+            )
+        if alpha is None:
+            alpha = getattr(self.cost_critic, "cvar_alpha", None)
+        if alpha is None:
+            raise ValueError(
+                "evaluate_cost_cvar called without an alpha; either pass alpha=... "
+                "or set cost_critic.cvar_alpha"
+            )
+        critic_observations = self.critic_obs_normalizer(critic_observations)
+        logits = self.cost_critic(critic_observations)
+        self._cost_logits = logits
+        return self.cost_critic.cvar_value(logits, alpha)
 
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
         """Update observation normalizers."""

@@ -74,9 +74,12 @@ class SACActorCritic(nn.Module):
         init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
 
         if actor_type == "stochastic":
+            # init_noise_std also feeds the actor's tuned log_std-head init (head_init="tuned");
+            # it still sets the compat self.std param below.
             self.actor = StochasticActor(
                 num_actor_obs,
                 num_actions,
+                init_noise_std=init_noise_std,
                 **actor_kwargs,
             )
         else:
@@ -306,9 +309,16 @@ class SACActorCritic(nn.Module):
                 target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
     def sample_random_action(self, num_envs: int) -> torch.Tensor:
-        """Sample random actions for initial exploration."""
+        """Sample random actions for initial exploration.
+
+        Uniform in [-1, 1] by default, or in the actor's per-joint [action_low,
+        action_high] when bounded action scaling is enabled (calibrated warmup).
+        """
         device = next(self.parameters()).device
-        return torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
+        unit = torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
+        if getattr(self.actor, "scaled_actions", False):
+            return self.actor.action_b + self.actor.action_c * unit
+        return unit
 
     def as_onnx(self, obs_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
         """Return an ONNX-exportable actor: obs_normalizer → actor_obs_normalizer → backbone → tanh(mean)."""

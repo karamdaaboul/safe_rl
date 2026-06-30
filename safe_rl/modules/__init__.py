@@ -5,6 +5,7 @@ from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .critic import DistributionalCritic, StandardCritic
 from .normalizer import EmpiricalNormalization
+from .reppo_actor_critic import REPPOActorCritic
 from .reward_normalization import RewardNormalization
 from .rnd import RandomNetworkDistillation
 from .sac_actor_critic import SACActorCritic
@@ -21,6 +22,7 @@ __all__ = [
     "EmpiricalNormalization",
     "GaussianActor",
     "RandomNetworkDistillation",
+    "REPPOActorCritic",
     "RewardNormalization",
     "SACActorCritic",
     "SafeSACActorCritic",
