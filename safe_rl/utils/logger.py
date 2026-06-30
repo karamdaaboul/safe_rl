@@ -123,8 +123,14 @@ class Logger:
         loss_dict: dict[str, Any],
         width: int = 80,
         pad: int = 40,
+        num_iters: int = 1,
     ) -> None:
-        """Write metrics to the external logger and print console output."""
+        """Write metrics to the external logger and print console output.
+
+        ``collect_time`` / ``learn_time`` may cover ``num_iters`` iterations when the
+        caller batches logging over a window; the step count and FPS are scaled
+        accordingly so they reflect the whole window.
+        """
         if self.log_dir is None:
             return
 
@@ -132,7 +138,7 @@ class Logger:
         iteration_time = collect_time + learn_time
         self.tot_time += iteration_time
         num_steps_per_env = int(self.runner_cfg.get("num_steps_per_env", 1))
-        collection_size = num_steps_per_env * self.num_envs
+        collection_size = num_steps_per_env * self.num_envs * num_iters
         self.tot_timesteps += collection_size
         fps = int(collection_size / max(iteration_time, 1e-6))
 

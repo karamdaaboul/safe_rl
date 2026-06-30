@@ -33,6 +33,15 @@ def conjugate_gradients(
     return vector_x
 
 
+def resolve_optimizer(name: str) -> type[torch.optim.Optimizer]:
+    """Map an optimizer name to its torch.optim class (case-insensitive)."""
+    optimizers = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
+    key = str(name).lower()
+    if key not in optimizers:
+        raise ValueError(f"Unknown optimizer '{name}'. Supported: {sorted(optimizers)}")
+    return optimizers[key]
+
+
 def trainable_parameters(parameters: Iterable[torch.nn.Parameter]) -> list[torch.nn.Parameter]:
     """Materialize trainable parameters while preserving iteration order."""
     return [parameter for parameter in parameters if parameter.requires_grad]
