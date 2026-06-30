@@ -16,11 +16,13 @@ from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.cup import CUP
 from safe_rl.algorithms.focops import FOCOPS
 from safe_rl.algorithms.fppo import FPPO
+from safe_rl.algorithms.reppo import REPPO
 from safe_rl.envs import VecEnv
 from safe_rl.modules import (
     ActorCritic,
     ActorCriticRecurrent,
     EmpiricalNormalization,
+    REPPOActorCritic,
     StudentTeacher,
     StudentTeacherRecurrent,
 )
@@ -43,6 +45,8 @@ class OnPolicyRunner:
         # resolve training type depending on the algorithm
         if self.alg_cfg["class_name"] == "PPO":
             self.training_type = "rl"
+        elif self.alg_cfg["class_name"] == "REPPO":
+            self.training_type = "rl"  # REPPO is on-policy reward-only RL
         elif self.alg_cfg["class_name"] == "P3O":
             self.training_type = "saferl"  # P3O is also RL but with cost constraints
         elif self.alg_cfg["class_name"] == "PPOL_PID":
@@ -157,6 +161,19 @@ class OnPolicyRunner:
             [self.env.num_actions],
         )
 
+        # CBF action filter (optional — enabled via cfg["cbf"]["enabled"])
+        cbf_cfg = self.cfg.get("cbf", None)
+        self.cbf_filter = None
+        if cbf_cfg and cbf_cfg.get("enabled", False):
+            from safe_rl.cbf import SafetyGymnasiumCBFFilter
+            self.cbf_filter = SafetyGymnasiumCBFFilter(
+                alpha=cbf_cfg.get("alpha", 0.5),
+                d_min=cbf_cfg.get("d_min", 0.35),
+                v_scale=cbf_cfg.get("v_scale", 1.0),
+                max_iter=cbf_cfg.get("max_iter", 5),
+                device=self.device,
+            )
+
         # Decide whether to disable logging
         # We only log from the process with rank 0 (main process)
         self.disable_logs = self.is_distributed and self.gpu_global_rank != 0
@@ -246,6 +263,9 @@ class OnPolicyRunner:
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
                     actions = self.alg.act(obs, privileged_obs)
+                    # Apply CBF action filter if enabled
+                    if self.cbf_filter is not None:
+                        actions = self.cbf_filter.filter(actions, self.env)
                     # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
@@ -268,6 +288,10 @@ class OnPolicyRunner:
                     # process the step
                     if is_saferl:
                         self.alg.process_env_step(rewards, costs, dones, infos)
+                    elif isinstance(self.alg, REPPO):
+                        self.alg.process_env_step(
+                            rewards, dones, infos, next_obs=obs, next_critic_obs=privileged_obs
+                        )
                     else:
                         self.alg.process_env_step(rewards, dones, infos)
 
@@ -336,7 +360,7 @@ class OnPolicyRunner:
                 current_costs = None
                 if "costbuffers" in locals() and all(len(buf) > 0 for buf in costbuffers):
                     current_costs = [statistics.mean(buf) for buf in costbuffers]
-                loss_dict = self.alg.update(current_costs=current_costs)
+                loss_dict = self.alg.update(current_costs=current_costs, iteration=it)
             else:
                 loss_dict = self.alg.update()
 
@@ -412,6 +436,8 @@ class OnPolicyRunner:
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
+        if self.cbf_filter is not None:
+            self.writer.add_scalar("CBF/solve_time_ms", self.cbf_filter.last_solve_ms, locs["it"])
 
         # -- Training
         if len(locs["rewbuffer"]) > 0:

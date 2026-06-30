@@ -130,13 +130,27 @@ class OffPolicyRunner:
         # Training configuration
         self.num_steps_per_env = int(self.runner_cfg.get("num_steps_per_env", 1))
         self.save_interval = int(self.runner_cfg.get("save_interval", 50))
+        # Console/scalar logging interval (in iterations). Off-policy iterations are
+        # tiny (often num_steps_per_env=1), so logging every iteration floods the
+        # console; only log every `log_interval` iterations (rsl_rl_sac default: 20).
+        self.log_interval = int(self.runner_cfg.get("log_interval", 20))
         self.start_random_steps = int(self.runner_cfg.get("start_random_steps", 10000))
         self.update_after = int(self.runner_cfg.get("update_after", 1000))
         self.gamma = float(self.alg_cfg.get("gamma", 0.99))
 
+        # Whether the algorithm aggregates n-step returns inside its own storage
+        # (at sample time). If so, the runner stores raw 1-step transitions and
+        # skips the runner-level NStepReturnAggregator.
+        self.storage_native_n_step = self.n_step > 1 and getattr(self.alg, "supports_storage_n_step", False)
+        # Whether the algorithm reads a separate bootstrap (timeout) channel, in
+        # which case the runner stores truthful dones + a bootstrap flag instead
+        # of the collapsed terminal signal.
+        self.uses_bootstrap_channel = getattr(self.alg, "uses_bootstrap_channel", False)
+
         # N-step return buffer (optional). When enabled, transitions are aggregated
-        # into n-step returns before being written to the replay buffer.
-        if self.n_step > 1:
+        # into n-step returns before being written to the replay buffer. Skipped
+        # when the algorithm handles n-step natively inside its storage.
+        if self.n_step > 1 and not self.storage_native_n_step:
             self.n_step_buffer: NStepReturnAggregator | None = NStepReturnAggregator(
                 n_step=self.n_step,
                 gamma=self.gamma,
@@ -227,6 +241,13 @@ class OffPolicyRunner:
         start_iter = self.current_learning_iteration
         tot_iter = start_iter + num_learning_iterations
 
+        # Windowed logging accumulators (rsl_rl_sac style): timing is summed across
+        # the iterations between two log points so reported FPS/timing covers the
+        # whole window rather than a single iteration.
+        log_window_collect_time = 0.0
+        log_window_learn_time = 0.0
+        log_window_iters = 0
+
         for it in range(start_iter, tot_iter):
             start = time.time()
 
@@ -278,6 +299,15 @@ class OffPolicyRunner:
                         time_outs = torch.zeros_like(dones, dtype=torch.float32)
                         terminal = dones
 
+                    # Bootstrap channel: algorithms that read it get truthful dones +
+                    # a separate timeout flag; others get the collapsed terminal signal.
+                    if self.uses_bootstrap_channel:
+                        store_done = dones.float()
+                        store_bootstrap = time_outs
+                    else:
+                        store_done = terminal
+                        store_bootstrap = None
+
                     # Preserve final observations for timeouts when the env provides them.
                     final_obs = infos.get("observations", {}).get("final", {})
                     if isinstance(final_obs, dict) and "time_outs" in infos:
@@ -307,11 +337,12 @@ class OffPolicyRunner:
                             obs,
                             action,
                             rewards,
-                            terminal,
+                            store_done,
                             next_obs,
                             cost=costs,
                             critic_obs=critic_obs,
                             next_critic_obs=next_critic_obs,
+                            bootstrap=store_bootstrap,
                         )
                     elif self.n_step_buffer is not None:
                         self.n_step_buffer.push(
@@ -325,12 +356,24 @@ class OffPolicyRunner:
                             critic_obs=critic_obs,
                             next_critic_obs=next_critic_obs,
                         )
+                    elif store_bootstrap is not None:
+                        # Algorithm reads the bootstrap channel (truthful dones + flag).
+                        self.alg.store_transition(
+                            obs,
+                            action,
+                            rewards,
+                            store_done,
+                            next_obs,
+                            critic_obs=critic_obs,
+                            next_critic_obs=next_critic_obs,
+                            bootstrap=store_bootstrap,
+                        )
                     else:
                         self.alg.store_transition(
                             obs,
                             action,
                             rewards,
-                            terminal,  # Use terminal instead of dones for proper bootstrapping
+                            store_done,  # collapsed terminal for algos without the bootstrap channel
                             next_obs,
                             critic_obs=critic_obs,
                             next_critic_obs=next_critic_obs,
@@ -379,6 +422,12 @@ class OffPolicyRunner:
                         loss_dict["critic_loss"] = update_result.get("critic", update_result.get("critic_loss", 0.0))
                         loss_dict["actor_loss"] = update_result.get("actor", update_result.get("actor_loss", 0.0))
                         loss_dict["noise_std"] = update_result.get("noise_std", 0.0)
+                        # Entropy coefficient (-> SafeRL/alpha) and its loss (-> Loss/alpha).
+                        # For safe RL these may be overridden by get_penalty_info() below.
+                        if "alpha" in update_result:
+                            loss_dict["alpha"] = update_result["alpha"]
+                        if "alpha_loss" in update_result:
+                            loss_dict["alpha_loss"] = update_result["alpha_loss"]
                         if self.is_safe_rl:
                             loss_dict["cost_critic_loss"] = update_result.get("cost_critic", update_result.get("cost_critic_loss", 0.0))
 
@@ -404,6 +453,13 @@ class OffPolicyRunner:
                 elif hasattr(self.actor_critic, 'std'):
                     loss_dict["noise_std"] = self.actor_critic.std.mean().item()
 
+            # Log the actor learning rate (rsl_rl_sac logs this each window).
+            if "learning_rate" not in loss_dict:
+                if hasattr(self.alg, "actor_learning_rate"):
+                    loss_dict["learning_rate"] = self.alg.actor_learning_rate
+                elif hasattr(self.alg, "actor_optimizer"):
+                    loss_dict["learning_rate"] = self.alg.actor_optimizer.param_groups[0]["lr"]
+
             stop = time.time()
             learn_time = stop - start
 
@@ -411,18 +467,30 @@ class OffPolicyRunner:
             self.tot_timesteps = global_step
             self.current_learning_iteration = it
 
-            # Log
-            self.logger.log(
-                it=it,
-                start_it=start_iter,
-                total_it=tot_iter,
-                collect_time=collection_time,
-                learn_time=learn_time,
-                loss_dict=loss_dict,
-            )
+            # Accumulate this iteration's timing into the current log window.
+            log_window_collect_time += collection_time
+            log_window_learn_time += learn_time
+            log_window_iters += 1
 
-            # Save model
-            if self.log_dir is not None and it % self.save_interval == 0:
+            # Log only every `log_interval` iterations (and on the final iteration),
+            # passing the windowed timing and the number of iterations it covers.
+            should_log = (it % self.log_interval == 0) or (it == tot_iter - 1)
+            if should_log:
+                self.logger.log(
+                    it=it,
+                    start_it=start_iter,
+                    total_it=tot_iter,
+                    collect_time=log_window_collect_time,
+                    learn_time=log_window_learn_time,
+                    loss_dict=loss_dict,
+                    num_iters=log_window_iters,
+                )
+                log_window_collect_time = 0.0
+                log_window_learn_time = 0.0
+                log_window_iters = 0
+
+            # Save model (skip iter 0: nothing has been learned yet)
+            if self.log_dir is not None and it % self.save_interval == 0 and it != 0:
                 self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
         # Save final model
