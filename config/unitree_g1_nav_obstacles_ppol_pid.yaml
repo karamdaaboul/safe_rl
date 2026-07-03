@@ -1,0 +1,114 @@
+# PPOL-PID (PID-Lagrangian) config for Unitree-G1-Nav-Obstacles-Safe-Collision
+#
+# Run #6 of the safe-nav tuning. Runs #2-#5 used P3O; its multiplicative penalty
+# factor kappa (ratchet: kappa*=rho on violation, /rho when safe) caused large
+# reward oscillations -- the policy reached a good+safe region (reward ~+8,
+# distance ~1.5m, falls ~0-2, collision ~1-3) but kept swinging out of it.
+# Run #5's collision cost budget (2.0) cured the *permanent* divergence (kappa
+# could finally decay) but the swing amplitude stayed large.
+#
+# PPOL-PID replaces the kappa ratchet with a PID controller on the Lagrange
+# multiplier lambda (proportional + integral + derivative on the constraint
+# error cost - cost_limit). The derivative/EMA terms damp overshoot, which is
+# exactly the oscillation we want to remove -- smoother constraint satisfaction.
+#
+# All shared params (entropy, desired_kl, lr, reward tuning via the env, and the
+# per-constraint cost budgets [0.0 fall, 2.0 collision]) are carried over from the
+# tuned P3O run so the ONLY change is the constraint mechanism.
+#
+# Run:
+#   python scripts/train/unitree_mjlab.py \
+#     --env_id Unitree-G1-Nav-Obstacles-Safe-Collision \
+#     --num_envs 4096 \
+#     --config config/unitree_g1_nav_obstacles_ppol_pid.yaml
+
+algorithm:
+  class_name: PPOL_PID
+
+  # -- shared params (carried over from the tuned P3O config) --
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.005       # tuned stabiliser (small, conservative updates)
+  entropy_coef: 0.01      # tuned exploration floor (anti-collapse)
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.0003   # lowered (5e-4 -> 3e-4) to hold the good region: on the
+                          # fixed env the policy reaches goals (best at_goal ~0.25,
+                          # distance ~0.7m, run #10 iter 80-400) but then diverges
+                          # into a rush-and-fall regime (falls -> 48); slower updates
+                          # damp that late drift.
+  num_learning_epochs: 5  # matched to the 4096-env x 8-step data regime (NOT the
+                          # safety_gymnasium reference's 40, which assumes few envs)
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # -- PID-Lagrangian specific --
+  # Run #6 fix: with lambda_max=100 and Ki=0.01 the collision multiplier wound up
+  # to lambda=22.9 (vs fall lambda=10.8) and the policy GAMED the collision
+  # constraint by falling immediately -- a robot that face-plants in ~26 steps
+  # never walks far enough to hit an obstacle (collision cost -> 0.02, falls ->
+  # 158/batch, reward -12.5). Two fixes:
+  #   - lambda_max 100 -> 10: bound collision pressure at the level P3O used
+  #     (kappa<=10 never gamed), and keep it balanced against the fall multiplier
+  #     so falling cannot "win" over walking-safely.
+  #   - Ki 0.01 -> 0.003: slow the integral term so it cannot wind up and pin
+  #     lambda at the runaway value.
+  lagrangian_pid: [0.1, 0.003, 0.01]  # [Kp, Ki, Kd]
+  # One entry per constraint, indexed in cost-manager dict order:
+  # [fall, collision, velocity]. The velocity term is a speed-limit constraint
+  # (cost_limit=0) that holds the high-level command inside the frozen walker's
+  # trained range (vx<=1.0, |yaw|<=1.0); without it the unconstrained Gaussian
+  # commands speeds far outside the walker's action space and it collapses.
+  lambda_init: [0.001, 0.001, 0.001]
+  # Run #15 stability fix: with the goal-on-obstacle bug fixed (flat-patch goals),
+  # run #14 reached an excellent good+safe policy early (iter ~121: at_goal 0.83,
+  # falls 0.25, collision 0.02) but DEGRADED past iter ~400 as the collision
+  # multiplier lambda kept winding up (3 -> 9.4 toward the cap). The policy was
+  # good while lambda sat in ~3-6 (iter 60-360) and only destabilised as lambda
+  # climbed past ~6-7. Lowering lambda_max 10 -> 5 caps the collision pressure
+  # inside the regime where the policy was good+safe, so it cannot grow into the
+  # destabilising zone -- holding the good region through to convergence. (The
+  # good early policy operated at lambda ~3-5 with collision ~0.02-0.3, so 5 is
+  # ample to keep collisions in check.)
+  lambda_max: 5.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # Cost critic loss
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: true
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+
+runner:
+  experiment_name: g1_navigation_obstacles_ppol_pid
+  max_iterations: 2000
+  num_steps_per_env: 8
+  save_interval: 50
+  empirical_normalization: false
+  logger: tensorboard
+  wandb_project: safe_rl
+  run_name: ""
+
+runner_class_name: OnPolicyRunner
+seed: 1

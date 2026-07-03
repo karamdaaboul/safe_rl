@@ -1,0 +1,318 @@
+from __future__ import annotations
+
+import argparse
+import os
+import time
+from typing import Any, Dict, Tuple
+
+import yaml
+
+from safe_rl.envs import make_env
+from safe_rl.runners import MetaOnPolicyRunner, OffPolicyRunner, OnPolicyRunner
+
+# Algorithms that use off-policy training
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
+
+# Algorithms that use on-policy training
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
+
+
+def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
+    """Load training configuration from YAML file.
+
+    Returns:
+        Tuple of (train_cfg dict, max_iterations, runner_class_name, experiment_name)
+    """
+    with open(config_path, "r", encoding="utf-8") as file:
+        cfg = yaml.safe_load(file)
+
+    algorithm_cfg = cfg["algorithm"]
+    policy_cfg = cfg["policy"]
+    runner_cfg = cfg.get("runner", {})
+    experiment_name = runner_cfg.get("experiment_name", "")
+
+    # Determine runner class from config or algorithm type
+    algorithm_name = algorithm_cfg.get("class_name", "PPO")
+    if algorithm_name in OFF_POLICY_ALGORITHMS:
+        default_runner = "OffPolicyRunner"
+    else:
+        default_runner = "OnPolicyRunner"
+    runner_class_name = cfg.get("runner_class_name", default_runner)
+
+    # Build train_cfg based on runner type
+    if runner_class_name == "OffPolicyRunner":
+        train_cfg = {
+            "algorithm": algorithm_cfg,
+            "policy": policy_cfg,
+            "runner": {
+                "num_steps_per_env": runner_cfg.get("num_steps_per_env", 1),
+                "save_interval": runner_cfg.get("save_interval", 50),
+                "log_interval": runner_cfg.get("log_interval", 1),
+                "empirical_normalization": runner_cfg.get("empirical_normalization", False),
+                "logger": runner_cfg.get("logger", "tensorboard"),
+                "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
+                "wandb_entity": runner_cfg.get("wandb_entity"),
+                "wandb_dir": runner_cfg.get("wandb_dir"),
+                # Off-policy specific
+                "max_size": runner_cfg.get("max_size", 1_000_000),
+                "start_random_steps": runner_cfg.get("start_random_steps", 10000),
+                "update_after": runner_cfg.get("update_after", 1000),
+                "update_every": runner_cfg.get("update_every", 50),
+            },
+        }
+    else:
+        train_cfg = {
+            "algorithm": algorithm_cfg,
+            "policy": policy_cfg,
+            "num_steps_per_env": runner_cfg.get("num_steps_per_env", 24),
+            "save_interval": runner_cfg.get("save_interval", 50),
+            "empirical_normalization": runner_cfg.get("empirical_normalization", False),
+            "logger": runner_cfg.get("logger", "tensorboard"),
+            "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
+            "wandb_entity": runner_cfg.get("wandb_entity"),
+            "wandb_dir": runner_cfg.get("wandb_dir"),
+        }
+        # Handle symmetry config for on-policy algorithms
+        symmetry_cfg = algorithm_cfg.get("symmetry_cfg")
+        if symmetry_cfg is not None:
+            if not symmetry_cfg.get("data_augmentation_func"):
+                algorithm_cfg["symmetry_cfg"] = None
+        # Carry the cMAML meta block through (used by MetaOnPolicyRunner).
+        train_cfg["meta"] = cfg.get("meta", {}) or {}
+        # Carry the CBF config block through (used by OnPolicyRunner and make_env).
+        train_cfg["cbf"] = cfg.get("cbf", None)
+
+    max_iterations = runner_cfg.get("max_iterations", 1000)
+    return train_cfg, max_iterations, runner_class_name, experiment_name
+
+
+def parse_cost_limits(cost_limits: str | None) -> list[float] | None:
+    if cost_limits is None:
+        return None
+    return [float(value.strip()) for value in cost_limits.split(",") if value.strip()]
+
+
+def parse_task_seeds(task_seeds: str | None) -> list[int] | None:
+    if task_seeds is None:
+        return None
+    return [int(value.strip()) for value in task_seeds.split(",") if value.strip()]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train Safe-RL agents on Safety-Gymnasium environments.")
+    parser.add_argument("--env_id", type=str, required=True, help="Safety-Gymnasium env id (e.g. SafetyCarGoal1-v0).")
+    parser.add_argument("--num_envs", type=int, default=8, help="Number of vectorized environments.")
+    parser.add_argument("--config", type=str, default="config/dummy_config.yaml", help="Path to training config.")
+    parser.add_argument("--device", type=str, default="cpu", help="Torch device for training.")
+    parser.add_argument("--max_iterations", type=int, default=None, help="Override max iterations from config.")
+    parser.add_argument("--cost_limits", type=str, default=None, help="Comma-separated cost limits.")
+    parser.add_argument("--render_mode", type=str, default=None, help="Render mode (e.g. human, rgb_array).")
+    parser.add_argument("--log_dir", type=str, default="logs/safety_gymnasium", help="Root log directory.")
+    parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
+    parser.add_argument("--task_seeds", type=str, default=None, help="Comma-separated env seeds to train jointly as a fixed task set (hidden-goal multi-task baseline); spread round-robin across num_envs and overrides --seed for the env layout.")
+    parser.add_argument("--disable_rnd", action="store_true", help="Disable RND even if configured.")
+    parser.add_argument("--wandb_project", type=str, default=None, help="Override wandb project name from config.")
+
+    # Sweep-friendly hyperparameters (override config values)
+    parser.add_argument("--learning_rate", type=float, default=None, help="Learning rate (overrides config).")
+    parser.add_argument("--num_learning_epochs", type=int, default=None, help="Number of learning epochs.")
+    parser.add_argument("--num_mini_batches", type=int, default=None, help="Number of mini batches.")
+    parser.add_argument("--clip_param", type=float, default=None, help="PPO clip parameter.")
+    parser.add_argument("--gamma", type=float, default=None, help="Discount factor.")
+    parser.add_argument("--lam", type=float, default=None, help="GAE lambda.")
+    parser.add_argument("--entropy_coef", type=float, default=None, help="Entropy coefficient.")
+    parser.add_argument("--max_grad_norm", type=float, default=None, help="Max gradient norm.")
+    parser.add_argument("--num_steps_per_env", type=int, default=None, help="Steps per env per iteration.")
+
+    # HL-Gauss cost-critic discretization (sweep-friendly; override policy.cost_critic_kwargs)
+    parser.add_argument("--num_bins", type=int, default=None, help="HL-Gauss cost critic: number of bins.")
+    parser.add_argument(
+        "--sigma_to_bin_ratio", type=float, default=None,
+        help="HL-Gauss cost critic: sigma as a multiple of bin width.",
+    )
+    parser.add_argument(
+        "--support_transform", type=str, default=None, choices=["linear", "symlog"],
+        help="HL-Gauss cost critic: support spacing.",
+    )
+    parser.add_argument("--cost_v_max", type=float, default=None, help="HL-Gauss cost critic: v_max upper bound.")
+
+    # cMAML (MetaOnPolicyRunner) overrides
+    parser.add_argument("--inner_steps", type=int, default=None, help="Inner-loop adaptation steps per task.")
+    parser.add_argument("--num_tasks", type=int, default=None, help="Tasks sampled per meta iteration.")
+    parser.add_argument("--meta_lr", type=float, default=None, help="Reptile meta (outer) learning rate.")
+    parser.add_argument("--meta_lr_head", type=float, default=None, help="Reptile step size for the actor head (ANIL slow-trunk/fast-head).")
+    parser.add_argument("--eta_adaptive", action="store_true", help="Enable the eta meta-safety dual (sec. 7.5).")
+    parser.add_argument("--eta_penalized", action="store_true", help="Enable the eta-penalized meta cost step (sec. 7.5).")
+    parser.add_argument("--no_protect_std", action="store_true", help="Let the eta cost step update the exploration std too (disables Fix A; for the diagnostic run).")
+    parser.add_argument("--no_eta_deadband", action="store_true", help="Fire the eta cost step every iter even when already safe (disables the deadband; old behavior).")
+    parser.add_argument("--hidden_goal", action="store_true", help="Hidden-goal meta-RL task: mask goal_lidar, one fixed goal per task, terminate on reach.")
+    parser.add_argument("--hidden_goal_continue", action="store_true", help="With --hidden_goal: respawn a new hidden goal on reach (continue_goal=True) instead of terminating; measures goals reached per episode.")
+
+    # PPOL-PID specific parameters
+    parser.add_argument("--pid_kp", type=float, default=None, help="PID proportional gain.")
+    parser.add_argument("--pid_ki", type=float, default=None, help="PID integral gain.")
+    parser.add_argument("--pid_kd", type=float, default=None, help="PID derivative gain.")
+    parser.add_argument("--lambda_max", type=float, default=None, help="Maximum Lagrangian multiplier.")
+    parser.add_argument("--pid_delta_p_ema_alpha", type=float, default=None, help="EMA alpha for P term.")
+    parser.add_argument("--pid_delta_d_ema_alpha", type=float, default=None, help="EMA alpha for D term.")
+    parser.add_argument("--pid_d_delay", type=int, default=None, help="Delay steps for D term.")
+
+    args = parser.parse_args()
+
+    train_cfg, max_iterations, runner_class_name, experiment_name = load_train_cfg(args.config)
+    algorithm_cfg = train_cfg["algorithm"]
+
+    # Apply CLI overrides to algorithm config
+    if args.learning_rate is not None:
+        algorithm_cfg["learning_rate"] = args.learning_rate
+    if args.num_learning_epochs is not None:
+        algorithm_cfg["num_learning_epochs"] = args.num_learning_epochs
+    if args.num_mini_batches is not None:
+        algorithm_cfg["num_mini_batches"] = args.num_mini_batches
+    if args.clip_param is not None:
+        algorithm_cfg["clip_param"] = args.clip_param
+    if args.gamma is not None:
+        algorithm_cfg["gamma"] = args.gamma
+    if args.lam is not None:
+        algorithm_cfg["lam"] = args.lam
+    if args.entropy_coef is not None:
+        algorithm_cfg["entropy_coef"] = args.entropy_coef
+    if args.max_grad_norm is not None:
+        algorithm_cfg["max_grad_norm"] = args.max_grad_norm
+
+    # Apply HL-Gauss cost-critic overrides (sweep-friendly)
+    cost_critic_kwargs = train_cfg.get("policy", {}).get("cost_critic_kwargs")
+    if cost_critic_kwargs is not None:
+        if args.num_bins is not None:
+            cost_critic_kwargs["num_bins"] = args.num_bins
+        if args.sigma_to_bin_ratio is not None:
+            # `sigma` and `sigma_to_bin_ratio` are mutually exclusive; clear the scalar.
+            cost_critic_kwargs["sigma"] = None
+            cost_critic_kwargs["sigma_to_bin_ratio"] = args.sigma_to_bin_ratio
+        if args.support_transform is not None:
+            cost_critic_kwargs["support_transform"] = args.support_transform
+        if args.cost_v_max is not None:
+            cost_critic_kwargs["v_max"] = args.cost_v_max
+
+    # Apply runner config overrides
+    if args.num_steps_per_env is not None:
+        if runner_class_name == "OffPolicyRunner":
+            train_cfg["runner"]["num_steps_per_env"] = args.num_steps_per_env
+        else:
+            train_cfg["num_steps_per_env"] = args.num_steps_per_env
+
+    # Apply PPOL-PID specific overrides
+    if algorithm_cfg.get("class_name") == "PPOL_PID":
+        # Update PID gains if any are provided
+        current_pid = algorithm_cfg.get("lagrangian_pid", [0.1, 0.01, 0.01])
+        if args.pid_kp is not None:
+            current_pid[0] = args.pid_kp
+        if args.pid_ki is not None:
+            current_pid[1] = args.pid_ki
+        if args.pid_kd is not None:
+            current_pid[2] = args.pid_kd
+        algorithm_cfg["lagrangian_pid"] = current_pid
+
+        if args.lambda_max is not None:
+            algorithm_cfg["lambda_max"] = args.lambda_max
+        if args.pid_delta_p_ema_alpha is not None:
+            algorithm_cfg["pid_delta_p_ema_alpha"] = args.pid_delta_p_ema_alpha
+        if args.pid_delta_d_ema_alpha is not None:
+            algorithm_cfg["pid_delta_d_ema_alpha"] = args.pid_delta_d_ema_alpha
+        if args.pid_d_delay is not None:
+            algorithm_cfg["pid_d_delay"] = args.pid_d_delay
+
+    # Handle RND config (only for on-policy algorithms)
+    if runner_class_name == "OnPolicyRunner":
+        rnd_cfg = algorithm_cfg.get("rnd_cfg")
+        if args.disable_rnd or (rnd_cfg is not None and rnd_cfg.get("weight", 0.0) == 0.0):
+            algorithm_cfg["rnd_cfg"] = None
+
+    # Apply cMAML meta overrides
+    if runner_class_name == "MetaOnPolicyRunner":
+        meta_cfg = train_cfg.setdefault("meta", {})
+        if args.inner_steps is not None:
+            meta_cfg["inner_steps"] = args.inner_steps
+        if args.num_tasks is not None:
+            meta_cfg["num_tasks"] = args.num_tasks
+        if args.meta_lr is not None:
+            meta_cfg["meta_lr"] = args.meta_lr
+        if args.meta_lr_head is not None:
+            meta_cfg["meta_lr_head"] = args.meta_lr_head
+        if args.eta_adaptive:
+            meta_cfg["eta_adaptive"] = True
+        if args.eta_penalized:
+            meta_cfg["eta_penalized"] = True
+        if args.no_protect_std:
+            meta_cfg["meta_cost_protect_std"] = False
+        if args.no_eta_deadband:
+            meta_cfg["eta_deadband"] = False
+
+    if args.max_iterations is not None:
+        max_iterations = args.max_iterations
+
+    if args.wandb_project is not None:
+        if runner_class_name == "OffPolicyRunner":
+            train_cfg["runner"]["wandb_project"] = args.wandb_project
+        else:
+            train_cfg["wandb_project"] = args.wandb_project
+
+    # Resolve cost_limits: CLI takes precedence, then config, then None
+    cost_limits = parse_cost_limits(args.cost_limits)
+    if cost_limits is None and "cost_limits" in algorithm_cfg:
+        # Use cost_limits from config if not provided via CLI
+        cost_limits = algorithm_cfg["cost_limits"]
+
+    # Pass cost_limits to algorithm config for Safe RL algorithms
+    if algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID", "P3O", "CUP") and cost_limits is not None:
+        algorithm_cfg["cost_limits"] = cost_limits
+
+    cbf_cfg = train_cfg.get("cbf", None)
+    cbf_state = bool(cbf_cfg and cbf_cfg.get("enabled", False))
+
+    env = make_env(
+        env_id=args.env_id,
+        num_envs=args.num_envs,
+        device=args.device,
+        render_mode=args.render_mode,
+        cost_limits=cost_limits,
+        seed=args.seed,
+        hidden_goal=args.hidden_goal,
+        hidden_goal_continue=args.hidden_goal_continue,
+        task_seeds=parse_task_seeds(args.task_seeds),
+        cbf_state=cbf_state,
+    )
+
+    alg_name = algorithm_cfg.get("class_name", "unknown")
+    log_dir = os.path.join(args.log_dir, args.env_id, alg_name, time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Set wandb run name from experiment_name + num_envs (+ cost_limit for single-constraint safe RL)
+    if experiment_name:
+        run_name = f"{experiment_name}_{args.num_envs}"
+        if cost_limits is not None and len(cost_limits) == 1:
+            cl = cost_limits[0]
+            cl_str = str(int(cl)) if float(cl).is_integer() else str(cl)
+            run_name = f"{run_name}_cl{cl_str}"
+        if runner_class_name == "OffPolicyRunner":
+            train_cfg["runner"]["run_name"] = run_name
+        else:
+            train_cfg["run_name"] = run_name
+
+    # Select runner based on algorithm type
+    if runner_class_name == "OffPolicyRunner":
+        print(f"[INFO] Using OffPolicyRunner for algorithm: {algorithm_cfg.get('class_name')}")
+        runner = OffPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+    elif runner_class_name == "MetaOnPolicyRunner":
+        print(f"[INFO] Using MetaOnPolicyRunner (cMAML) for algorithm: {algorithm_cfg.get('class_name')}")
+        runner = MetaOnPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+    else:
+        print(f"[INFO] Using OnPolicyRunner for algorithm: {algorithm_cfg.get('class_name')}")
+        runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+
+    runner.learn(max_iterations)
+    env.close()
+
+
+if __name__ == "__main__":
+    main()

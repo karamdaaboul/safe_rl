@@ -1,0 +1,85 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# CLF-RL (LIP-CLF) reward shaping for the Unitree G1 flat velocity task.
+#
+# CLF-RL is reward shaping on top of plain PPO -- no constrained/safe-RL
+# machinery is used. The `clf:` block below is read by scripts/train/unitree_mjlab.py
+# and used to wrap the env in safe_rl.envs.CLFRewardWrapper, which adds the
+# CLF tracking + decay rewards on top of mjlab's base reward.
+#
+# Reference: Li, Olkin et al., "CLF-RL: Control Lyapunov Function Guided
+# Reinforcement Learning" (RA-L 2025).
+# ===========================================================================
+
+algorithm:
+  class_name: PPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.005
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+
+# CLF-RL reward shaping. Removing this block trains plain PPO on mjlab's reward.
+clf:
+  # Reference outputs tracked by the CLF. Velocity-based defaults track robustly
+  # from the base state alone (no swing-foot bookkeeping). Add "swing_foot_z"
+  # (with left/right_foot_pattern) for a Bezier swing-height term.
+  outputs: [lin_vel_x, lin_vel_y, lin_vel_z, ang_vel_z]
+  command_name: twist
+  robot_name: robot
+
+  # Reward weights (paper Table I).
+  w_v: 10.0          # CLF tracking reward weight
+  w_vdot: 2.0        # CLF decay penalty weight
+  lam: 1.0           # desired CLF decrease rate
+  base_scale: 1.0    # keep mjlab's base reward alongside the CLF terms
+
+  # CARE weights for the constant CLF matrix P (double-integrator eta-system).
+  q_pos: 1.0
+  q_vel: 0.1
+  r: 1.0
+
+  # Normalization bounds for sigma_v / sigma_vdot (empirical error bounds).
+  eta_max: 1.0
+  eta_dot_max: 5.0
+
+  # H-LIP reference parameters.
+  step_period: 0.4   # single-support step duration (s); 0.8 s full gait cycle
+  com_height: 0.74   # nominal G1 CoM height (m)
+  gravity: 9.81
+  swing_height: 0.08
+
+runner:
+  num_steps_per_env: 24
+  max_iterations: 2000
+  empirical_normalization: false
+  save_interval: 200
+  experiment_name: g1_flat_ppo_clf
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

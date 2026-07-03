@@ -1,0 +1,36 @@
+# P3O HL-Gauss cost-critic discretization sweep.
+#
+# Tunes how the distributional cost critic discretizes the cost-return support:
+# number of bins, Gaussian smoothing width (as a multiple of bin width), and the
+# support spacing (linear vs symlog). These are passed as sweep-friendly CLI flags
+# that override policy.cost_critic_kwargs in the base config.
+#
+# Launch:  wandb sweep sweeps/p3o_hlgauss_sweep.yaml
+#          wandb agent <USER>/<PROJECT>/<SWEEP_ID>
+program: scripts/train/train_safety_gymnasium.py
+method: grid
+metric:
+  # Primary safety objective: drive mean episodic cost down. Switch to
+  # "Train/episode_reward" with goal: maximize if reward is the priority.
+  goal: minimize
+  name: "Train/mean_cost"
+parameters:
+  # ---- swept: cost-critic discretization ----
+  num_bins:
+    values: [51, 101, 201]
+  sigma_to_bin_ratio:
+    values: [0.5, 0.75, 1.0]
+  support_transform:
+    values: ["linear", "symlog"]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --env_id
+  - SafetyCarGoal1-v0
+  - --config
+  - config/safety_gymnasium_p3o_hlgauss.yaml
+  - --cost_limits
+  - "25.0"
+  - ${args}

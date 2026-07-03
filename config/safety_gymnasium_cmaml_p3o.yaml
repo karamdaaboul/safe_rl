@@ -1,0 +1,75 @@
+algorithm:
+  class_name: P3O
+  # training parameters copied from PPO for closer comparison
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 10
+  num_mini_batches: 32
+  schedule: adaptive
+
+  # P3O-specific parameters
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+  rho: 1.1
+  kappa_max: 1000.0
+  adaptive_penalty: true
+  constraint_margin: 0.85
+  kappa: [1.0]
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 256]
+    activation: elu
+
+# cMAML (Reptile) outer loop over a P3O inner loop.
+meta:
+  inner_steps: 3            # P3O updates per task (thesis uses 3)
+  num_tasks: 20             # tasks (= seeds) sampled per meta iteration
+  meta_lr: 0.5              # Reptile outer step size (actor trunk)
+  meta_lr_head: 0.5         # Reptile step size for the output head (ANIL: raise above meta_lr for slow-trunk/fast-head)
+  cost_limit: 15.0          # eta meta-safety limit d (sec. 7.5); aligned with the inner P3O --cost_limits
+  eta_adaptive: false       # enable the eta meta-safety dual (dual ascent on eta)
+  eta_init: 0.0
+  eta_lr: 0.05
+  # eta-penalized meta cost step (sec. 7.5): cost-reducing gradient step on the
+  # meta-actor, weighted by eta. Needs eta_adaptive too (eta must move).
+  eta_penalized: false
+  meta_cost_lr: 0.0005      # outer cost step size
+  meta_cost_epochs: 4
+  meta_cost_clip: 0.2       # PPO-style ratio clip on the cost surrogate
+  meta_cost_target_kl: 0.02 # KL early-stop, guards the reward init from large eta
+  meta_cost_protect_std: true # Fix A: keep exploration std out of the cost step (only reshape the mean)
+  eta_deadband: true        # only run the cost step while meta_policy_cost > limit (stop eroding reward once safe)
+  seed_pool: [0, 1, 3, 4, 5, 7, 8, 14, 16, 18, 19, 22, 23, 24, 25, 26, 30, 34, 35, 38]
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 100
+  empirical_normalization: false
+  save_interval: 25
+  experiment_name: safety_gymnasium_cmaml_p3o
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+
+runner_class_name: MetaOnPolicyRunner
+seed: 1

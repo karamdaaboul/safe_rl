@@ -1,0 +1,104 @@
+# P3O config for Unitree-G1-Nav-Obstacles-Safe-Collision
+#
+# Constrained navigation among obstacles. The env exposes TWO cost constraints
+# (order = env cost-manager active_terms): [fall, collision], both with
+# cost_limit = 0.0 (strict: zero falls, zero obstacle collisions). cost_limits
+# are read from the env's cost manager at runtime and are NOT set here.
+#
+# Hyperparameters mirror the in-repo nav-obstacles PPO runner
+# (src/tasks/navigation/config/g1/rl_cfg.py: unitree_g1_nav_obstacles_ppo_runner_cfg)
+# plus the P3O penalty machinery from config/safety_gymnasium_p3o.yaml.
+#
+# Run:
+#   python scripts/train/unitree_mjlab.py \
+#     --env_id Unitree-G1-Nav-Obstacles-Safe-Collision \
+#     --num_envs 4096 \
+#     --config config/unitree_g1_nav_obstacles_p3o.yaml
+#
+# Requires the low-level velocity policy to be discoverable by the nav env
+# (default logs/velocity/g1_flat, or set G1_VELOCITY_POLICY_PATH).
+
+algorithm:
+  class_name: P3O
+
+  # -- shared PPO params (matched to the nav-obstacles PPO runner) --
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  # Run #3 (entropy 0.01 + goal-reward tuning) reached the best region yet
+  # (~iter 500: reward +7, distance ~1.5m, collision ~2, falls ~1.4) but then
+  # DIVERGED late (iter 1400+: reward -8, collision 10-15, falls 10-19) and never
+  # recovered -- same reach-then-collapse pattern as run #2. With an adaptive-KL
+  # LR schedule, holding a good region needs smaller, more conservative updates,
+  # so halve the per-update KL target (0.01 -> 0.005).
+  desired_kl: 0.005
+  # Run #2 (entropy_coef 0.005) reached a good+safe region by iter ~500-700
+  # (reward ~0, collision cost ~1-2) then COLLAPSED: action-noise std decayed to
+  # ~0.49, the over-confident policy overshot, falls spiked and collisions/reward
+  # regressed. The P3O cost penalty injects large gradients (adv_cost_abs_max ~40)
+  # that destabilise a low-entropy policy. Raise the entropy floor to sustain
+  # exploration and hold the good region instead of chasing it. (Base nav PPO
+  # also uses 0.005, but it has no cost-penalty gradient to fight.)
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  # Lower the LR ceiling (1e-3 -> 5e-4) so the adaptive schedule can't overshoot
+  # into the late-training divergence seen in runs #2/#3.
+  learning_rate: 0.0005
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # -- P3O-specific (penalty-based constrained RL) --
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+  rho: 1.1               # penalty multiplier (>1): kappa *= rho on violation
+  # Cap the cost:reward gradient ratio at 10:1. With cost_limit=0.0 every nonzero
+  # cost is a "violation", so kappa would otherwise ratchet to kappa_max within
+  # ~70 iters (log(max)/log(rho)) and the penalty crushes the reward signal --
+  # the policy never learns to navigate. 10.0 matches the maintainers' tuned
+  # kmax10 P3O config; the policy learns the task while safety pressure
+  # self-regulates (kappa decays by /rho on safe iterations).
+  kappa_max: 10.0
+  adaptive_penalty: true
+  constraint_margin: 0.85
+  # One penalty coefficient per cost constraint, in env order [fall, collision].
+  # (A single-element list would be broadcast to both.)
+  kappa: [1.0, 1.0]
+
+  # NOTE: deliberately no rnd_cfg / symmetry_cfg. P3O uses neither (see p3o.py:
+  # "P3O uses neither RND nor symmetry"). The OnPolicyRunner treats a non-null
+  # rnd_cfg as a hard requirement for an 'rnd_state' observation group the nav
+  # env does not expose (-> ValueError), and a symmetry_cfg with
+  # use_data_augmentation would call a null augmentation func in the PPO base.
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+
+runner:
+  experiment_name: g1_navigation_obstacles_p3o
+  max_iterations: 2000
+  num_steps_per_env: 8
+  save_interval: 50
+  empirical_normalization: false
+  logger: tensorboard
+  wandb_project: safe_rl
+  run_name: ""
+
+runner_class_name: OnPolicyRunner
+seed: 1

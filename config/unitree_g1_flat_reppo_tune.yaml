@@ -1,0 +1,77 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO tuning config for Unitree-G1-Flat, sized to match the PPO baseline
+# (num_envs=4096, num_steps_per_env=24 => ~98k env steps/iter, gamma 0.99,
+# lam 0.95, actor/critic [512,256,128] elu, obs normalization on).
+# Mirrors the SAC `_tune` pattern: tensorboard logger for local curve parsing,
+# distinct experiment_name. Original unitree_g1_flat_reppo.yaml is left as-is.
+#
+# Starting point (config-first; patch reppo.py only if probes underperform):
+#   - init_alpha_temp 0.05 (original 0.0001 is too low to drive the entropy dual)
+#   - desired_kl 0.03 (between PPO's 0.01 and REPPO default 0.1 trust region)
+#   - v_min/v_max = [-20, 20] brackets the soft-Q lambda-return (G1 eval ~53 over
+#     ~1000 steps, gamma 0.99 => Q ~ O(5)); 151 atoms for resolution near 0.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL trust region
+  desired_kl: 0.03
+  # -- learned dual variables
+  # alpha_temp is LEARNED; start small so the entropy bonus does not inflate the
+  # soft-Q target past the critic support (0.05 saturated v_max=20 -> critic dead
+  # -> pathwise grad died -> sigma exploded 1.0->3.2). Dual raises it only if
+  # entropy collapses below target.
+  init_alpha_temp: 0.001
+  init_alpha_kl: 0.1
+  target_entropy: -0.5    # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- target networks (Polyak)
+  tau: 0.005
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: gaussian
+  critic_type: distributional
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: log
+  critic_kwargs:
+    # Wide support: early-training soft-Q returns run negative (~-0.4/step ->
+    # discounted ~ -40), and improve toward ~+5. [-50,50] brackets both ends;
+    # 251 atoms keeps ~0.4 resolution.
+    num_atoms: 251
+    v_min: -50.0
+    v_max: 50.0
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [512, 512]
+      activation: elu
+      layer_norm: true
+
+runner:
+  num_steps_per_env: 24
+  max_iterations: 100000
+  empirical_normalization: false
+  save_interval: 200
+  experiment_name: g1_reppo_tune
+  run_name: ""
+  logger: tensorboard
+  wandb_project: mjlab

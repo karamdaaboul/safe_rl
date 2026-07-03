@@ -1,0 +1,73 @@
+algorithm:
+  class_name: FOCOPS
+  # training parameters
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 40.0
+  learning_rate: 0.0003
+  num_learning_epochs: 40
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # FOCOPS-specific parameters
+  focops_lam: 1.5                 # loss scaling (1/lam multiplies the surrogate term)
+  focops_eta: 0.02                # KL threshold for the per-sample indicator gate
+  nu_lr: 0.01                     # Lagrange multiplier learning rate
+  nu_max: 2.0                     # upper bound for nu
+  nu_init: 0.0                    # initial nu
+
+  # Cost GAE parameters
+  c_gamma: 0.99
+  c_gae_lam: 0.95
+
+  # Cost critic loss
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: true
+  l2_reg: 0.0                     # L2 weight decay on critic params (off by default)
+
+  # Cost limits (per constraint)
+  cost_limits: [25.0]
+
+  # Disable extra features by default
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [64, 64]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [64, 64]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 256]
+    activation: elu
+  # num_costs is injected at runtime by the runner
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 500
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: safety_gymnasium_focops
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1

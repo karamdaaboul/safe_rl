@@ -1,0 +1,81 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REFERENCE-MATCH: _ref config + num_learning_epochs 4 -> 8 (the cvoelcker
+# torchrl REPPO reference does 8 epochs/rollout; we were doing half the updates
+# per batch). Also benefits from the truncation lambda-trace fix now in
+# reppo.py (compute_returns cuts the trace on timeout, matching reference
+# compute_gve). This is the "match the reference exactly" test against the
+# _ref run that scored eval 34.4.
+#
+# Inherits from the upstream mjlab reference. Deviations from it:
+#   - logger: tensorboard  (local curve parsing, as with the SAC/_tune runs)
+#   - save_interval: 200   (the reference's 1000 is too coarse to catch the
+#     reward peak; the prior _tune run peaked ~iter 500 then decayed)
+#   - max_iterations: 2000 (4096 envs x 32 steps = 131k/iter -> ~262M env
+#     steps, comfortably past PPO's ~147M budget)
+#   - distinct experiment_name
+# Runs against the soft-Lagrangian-KL actor loss now in reppo.py (matches the
+# cvoelcker reference), NOT the old hard KL gate.
+#
+# Why this over _tune: the _tune config shrank the critic ~8x (512x512 vs
+# 1024^3) and tightened the trust region 3x (desired_kl 0.03 vs 0.1). Best
+# _tune eval was 31.5 (PPO 53.3); the small critic plausibly caps the pathwise
+# mean policy and the tight KL caps improvement. This restores both.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL trust region (reference: wide 0.1)
+  desired_kl: 0.1
+  # -- learned dual variables (reference values; alpha_temp is learned so the
+  #    tiny init is safe — it grows only if entropy collapses below target)
+  init_alpha_temp: 0.0001
+  init_alpha_kl: 0.01
+  target_entropy: -0.5    # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- target networks (Polyak)
+  tau: 0.005
+  # -- training
+  num_learning_epochs: 8    # <-- matches torchrl reference (was 4)
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: gaussian
+  critic_type: distributional
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 512, 512]
+    activation: elu
+    init_noise_std: 0.1
+    noise_std_type: log
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -20.0
+    v_max: 20.0
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [1024, 1024, 1024]
+      activation: elu
+      layer_norm: true
+
+runner:
+  num_steps_per_env: 32
+  max_iterations: 2000
+  empirical_normalization: false
+  save_interval: 200
+  experiment_name: g1_reppo_refmatch
+  run_name: ""
+  logger: tensorboard
+  wandb_project: mjlab

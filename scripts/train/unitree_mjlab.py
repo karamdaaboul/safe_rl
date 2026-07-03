@@ -1,0 +1,494 @@
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+def _add_unitree_repo_to_path() -> None:
+    explicit_repo = os.environ.get("UNITREE_RL_MJLAB_PATH")
+    candidates = [explicit_repo] if explicit_repo else []
+    candidates.extend(
+        [
+            "/opt/unitree_rl_mjlab",
+            str(Path.home() / "workspaces" / "unitree_rl_mjlab"),
+            str(Path(__file__).resolve().parents[3] / "unitree_rl_mjlab"),
+        ]
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).exists() and candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            break
+
+
+_add_unitree_repo_to_path()
+
+# Import mjlab before torch: mjlab transitively loads libicui18n.so.78, which
+# needs CXXABI_1.3.15 from the conda env's newer libstdc++. If torch imports
+# first, it pins the host's older libstdc++ and later mjlab imports fail.
+import mjlab  # noqa: E402
+import mjlab.tasks  # noqa: E402,F401
+import tyro  # noqa: E402
+from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg  # noqa: E402
+from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks  # noqa: E402
+from mjlab.tasks.tracking.mdp import MotionCommandCfg  # noqa: E402
+from mjlab.utils.gpu import select_gpus  # noqa: E402
+from mjlab.utils.torch import configure_torch_backends  # noqa: E402
+from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
+
+import src.tasks  # noqa: E402,F401
+
+import torch  # noqa: E402
+import yaml  # noqa: E402
+
+from safe_rl.envs import make_env  # noqa: E402
+from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
+
+
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
+
+
+@dataclass
+class OffPolicyRunnerCfg:
+    num_steps_per_env: int = 1
+    save_interval: int = 50
+    log_interval: int = 1
+    empirical_normalization: bool = False
+    logger: str = "tensorboard"
+    wandb_project: str = "safe_rl"
+    wandb_entity: str | None = None
+    wandb_dir: str | None = None
+    max_size: int = 1_000_000
+    start_random_steps: int = 10000
+    update_after: int = 1000
+    update_every: int = 50
+    n_step: int = 1
+    reward_normalization: bool = True
+    reward_normalization_mode: str = "empirical"
+    reward_normalization_g_max: float = 10.0
+    run_name: str = ""
+
+
+@dataclass
+class OnPolicyRunnerCfg:
+    num_steps_per_env: int = 24
+    save_interval: int = 50
+    empirical_normalization: bool = False
+    logger: str = "tensorboard"
+    wandb_project: str = "safe_rl"
+    wandb_entity: str | None = None
+    wandb_dir: str | None = None
+    run_name: str = ""
+
+
+class _YamlDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_fallback(dumper: yaml.Dumper, data: Any) -> yaml.Node:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", repr(data))
+
+
+_YamlDumper.add_representer(None, _represent_fallback)
+
+
+def _dump_yaml(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        yaml.dump(data, file, Dumper=_YamlDumper, sort_keys=False)
+
+
+def convert_mjlab_ppo_cfg(agent_cfg: Any, logger: str, wandb_project: str, wandb_entity: str | None) -> dict[str, Any]:
+    cfg = asdict(agent_cfg)
+    actor_cfg = cfg["actor"]
+    critic_cfg = cfg["critic"]
+    algorithm_cfg = cfg["algorithm"]
+    distribution_cfg = actor_cfg.get("distribution_cfg", {})
+
+    return {
+        "algorithm": {
+            "class_name": "PPO",
+            "normalize_advantage_per_mini_batch": algorithm_cfg.get("normalize_advantage_per_mini_batch", False),
+            "value_loss_coef": algorithm_cfg["value_loss_coef"],
+            "clip_param": algorithm_cfg["clip_param"],
+            "use_clipped_value_loss": algorithm_cfg["use_clipped_value_loss"],
+            "desired_kl": algorithm_cfg["desired_kl"],
+            "entropy_coef": algorithm_cfg["entropy_coef"],
+            "gamma": algorithm_cfg["gamma"],
+            "lam": algorithm_cfg["lam"],
+            "max_grad_norm": algorithm_cfg["max_grad_norm"],
+            "learning_rate": algorithm_cfg["learning_rate"],
+            "num_learning_epochs": algorithm_cfg["num_learning_epochs"],
+            "num_mini_batches": algorithm_cfg["num_mini_batches"],
+            "schedule": algorithm_cfg["schedule"],
+            "rnd_cfg": None,
+            "symmetry_cfg": None,
+        },
+        "policy": {
+            "class_name": "ActorCritic",
+            "actor_type": "gaussian",
+            "critic_type": "standard",
+            "actor_obs_normalization": actor_cfg.get("obs_normalization", False),
+            "critic_obs_normalization": critic_cfg.get("obs_normalization", False),
+            "actor_kwargs": {
+                "hidden_dims": list(actor_cfg["hidden_dims"]),
+                "activation": actor_cfg["activation"],
+                "init_noise_std": distribution_cfg.get("init_std", 1.0),
+                "noise_std_type": distribution_cfg.get("std_type", "scalar"),
+            },
+            "critic_kwargs": {
+                "hidden_dims": list(critic_cfg["hidden_dims"]),
+                "activation": critic_cfg["activation"],
+            },
+        },
+        "num_steps_per_env": cfg["num_steps_per_env"],
+        "save_interval": cfg["save_interval"],
+        "empirical_normalization": False,
+        "logger": logger,
+        "wandb_project": wandb_project,
+        "wandb_entity": wandb_entity,
+        "run_name": getattr(agent_cfg, "run_name", ""),
+    }
+
+
+def apply_overrides(train_cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    algorithm_cfg = train_cfg["algorithm"]
+
+    if args.learning_rate is not None:
+        algorithm_cfg["learning_rate"] = args.learning_rate
+    if args.num_learning_epochs is not None:
+        algorithm_cfg["num_learning_epochs"] = args.num_learning_epochs
+    if args.num_mini_batches is not None:
+        algorithm_cfg["num_mini_batches"] = args.num_mini_batches
+    if args.clip_param is not None:
+        algorithm_cfg["clip_param"] = args.clip_param
+    if args.gamma is not None:
+        algorithm_cfg["gamma"] = args.gamma
+    if args.lam is not None:
+        algorithm_cfg["lam"] = args.lam
+    if args.entropy_coef is not None:
+        algorithm_cfg["entropy_coef"] = args.entropy_coef
+    if args.max_grad_norm is not None:
+        algorithm_cfg["max_grad_norm"] = args.max_grad_norm
+    if args.num_steps_per_env is not None:
+        train_cfg["num_steps_per_env"] = args.num_steps_per_env
+    if args.run_name is not None:
+        train_cfg["run_name"] = args.run_name
+
+    return train_cfg
+
+
+def load_safe_rl_yaml(config_path: str) -> tuple[dict[str, Any], int, str, str]:
+    with open(config_path, encoding="utf-8") as file:
+        cfg = yaml.safe_load(file)
+
+    algorithm_cfg = cfg["algorithm"]
+    policy_cfg = cfg["policy"]
+    runner_cfg = dict(cfg.get("runner", {}))
+    experiment_name = runner_cfg.pop("experiment_name", "")
+    max_iterations = runner_cfg.pop("max_iterations", 1000)
+
+    algorithm_name = algorithm_cfg.get("class_name", "PPO")
+    default_runner = "OffPolicyRunner" if algorithm_name in OFF_POLICY_ALGORITHMS else "OnPolicyRunner"
+    runner_class_name = cfg.get("runner_class_name", default_runner)
+
+    if runner_class_name == "OffPolicyRunner":
+        runner = asdict(OffPolicyRunnerCfg(**runner_cfg))
+        train_cfg: dict[str, Any] = {"algorithm": algorithm_cfg, "policy": policy_cfg, "runner": runner}
+    else:
+        runner = asdict(OnPolicyRunnerCfg(**runner_cfg))
+        train_cfg = {"algorithm": algorithm_cfg, "policy": policy_cfg, **runner}
+
+    return train_cfg, max_iterations, runner_class_name, experiment_name
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Train Unitree mjlab tasks with safe_rl.")
+    parser.add_argument("--env_id", type=str, required=True, help="Registered mjlab task id, e.g. Unitree-Go2-Flat.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional safe_rl YAML config. If omitted, use mjlab's registered PPO config.",
+    )
+    parser.add_argument("--num_envs", type=int, default=None, help="Override number of vectorized environments.")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Torch device for training.")
+    parser.add_argument("--gpu_ids", nargs="*", default=["0"], help="GPU ids to use, or 'all'.")
+    parser.add_argument("--max_iterations", type=int, default=None, help="Override max iterations.")
+    parser.add_argument("--motion_file", type=str, default=None, help="Required for tracking tasks.")
+    parser.add_argument("--video", action="store_true", help="Record videos during training.")
+    parser.add_argument("--video_length", type=int, default=200)
+    parser.add_argument("--video_interval", type=int, default=2000)
+    parser.add_argument("--enable_nan_guard", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--log_dir", type=str, default="logs/safe_rl", help="Root directory for logs.")
+    parser.add_argument("--logger", type=str, default="tensorboard", choices=["tensorboard", "wandb"])
+    parser.add_argument("--wandb_project", type=str, default="safe_rl")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--experiment_name", type=str, default=None)
+    parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from a previous checkpoint.")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Explicit checkpoint path to load.")
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--num_learning_epochs", type=int, default=None)
+    parser.add_argument("--num_mini_batches", type=int, default=None)
+    parser.add_argument("--clip_param", type=float, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--lam", type=float, default=None)
+    parser.add_argument("--entropy_coef", type=float, default=None)
+    parser.add_argument("--max_grad_norm", type=float, default=None)
+    parser.add_argument("--num_steps_per_env", type=int, default=None)
+    parser.add_argument(
+        "--bounded_actions",
+        action="store_true",
+        help="SAC only: bound the stochastic actor per-joint to soft joint limits "
+        "(a = b + c*tanh(x) with the -sum log c_j correction), sourcing bounds from the "
+        "mjlab action manager. Improves initial exploration calibration.",
+    )
+    return parser
+
+
+def compute_joint_action_bounds(vec_env: Any) -> tuple[list[float], list[float]]:
+    """Per-joint policy-output bounds from the mjlab action manager's soft joint limits.
+
+    For each joint controlled by a position action term: r±_j = |q^{min/max}_j - q0_j|
+    (soft limits vs default pose), and the policy-output bounds are a_min = -r-_j/s_j,
+    a_max = +r+_j/s_j where s_j is the per-joint action scale. So that after the env's
+    a^pt = s*a + b_e (b_e = default pose) the joint stays within its soft limits. Terms
+    that are not joint-position (no default pose / limits) fall back to [-1, 1].
+    """
+    mj_env = getattr(vec_env, "unwrapped", vec_env)
+    action_manager = mj_env.action_manager
+    lows: list[float] = []
+    highs: list[float] = []
+    for name in action_manager.active_terms:
+        term = action_manager.get_term(name)
+        entity = getattr(term, "_entity", None)
+        ids = getattr(term, "_target_ids", None)
+        default_pos = getattr(getattr(entity, "data", None), "default_joint_pos", None)
+        soft_limits = getattr(getattr(entity, "data", None), "soft_joint_pos_limits", None)
+        if entity is None or ids is None or default_pos is None or soft_limits is None:
+            dim = term.action_dim
+            print(f"[INFO] bounded_actions: term '{name}' not joint-position; using [-1, 1] x{dim}")
+            lows.extend([-1.0] * dim)
+            highs.extend([1.0] * dim)
+            continue
+        q0 = default_pos[0, ids]
+        lims = soft_limits[0, ids]
+        r_minus = (lims[:, 0] - q0).abs()
+        r_plus = (lims[:, 1] - q0).abs()
+        scale = term.scale
+        scale_t = scale if torch.is_tensor(scale) else torch.full_like(q0, float(scale))
+        if scale_t.dim() > 1:  # [num_envs, dim] -> per-joint
+            scale_t = scale_t[0]
+        a_min = -r_minus / scale_t
+        a_max = r_plus / scale_t
+        lows.extend(a_min.cpu().tolist())
+        highs.extend(a_max.cpu().tolist())
+        print(f"[INFO] bounded_actions: term '{name}' ({len(q0)} joints) "
+              f"a_min∈[{a_min.min():.3f},{a_min.max():.3f}] a_max∈[{a_max.min():.3f},{a_max.max():.3f}]")
+    return lows, highs
+
+
+def resolve_gpu_ids(gpu_ids: list[str], device: str) -> list[int] | str | None:
+    if device == "cpu":
+        return None
+    if len(gpu_ids) == 1 and gpu_ids[0] == "all":
+        return "all"
+    return [int(gpu_id) for gpu_id in gpu_ids]
+
+
+def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
+    env_cfg: ManagerBasedRlEnvCfg = load_env_cfg(task_id)
+    agent_cfg = load_rl_cfg(task_id)
+
+    if args.num_envs is not None:
+        env_cfg.scene.num_envs = args.num_envs
+    if args.seed is not None:
+        env_cfg.seed = args.seed
+        agent_cfg.seed = args.seed
+    if args.experiment_name is not None:
+        agent_cfg.experiment_name = args.experiment_name
+    if args.max_iterations is not None:
+        agent_cfg.max_iterations = args.max_iterations
+    if args.run_name is not None:
+        agent_cfg.run_name = args.run_name
+
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda_visible == "":
+        device = "cpu"
+        rank = 0
+        seed = agent_cfg.seed
+    else:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        rank = int(os.environ.get("RANK", "0"))
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
+        device = f"cuda:{local_rank}"
+        seed = agent_cfg.seed + local_rank
+
+    configure_torch_backends()
+
+    agent_cfg.seed = seed
+    env_cfg.seed = seed
+
+    is_tracking_task = "motion" in env_cfg.commands and isinstance(env_cfg.commands["motion"], MotionCommandCfg)
+    if is_tracking_task:
+        if not args.motion_file:
+            raise ValueError("Tracking tasks require --motion_file.")
+        motion_path = Path(args.motion_file).expanduser().resolve()
+        if not motion_path.exists():
+            raise FileNotFoundError(f"Motion file not found: {motion_path}")
+        env_cfg.commands["motion"].motion_file = str(motion_path)
+
+    if args.enable_nan_guard:
+        env_cfg.sim.nan_guard.enabled = True
+
+    if rank == 0:
+        print(f"[INFO] Training with safe_rl on task={task_id}, device={device}, seed={seed}")
+        print(f"[INFO] Logging experiment in directory: {log_dir}")
+
+    # Build the env matching the cfg type: a ManagerBasedSafeRlEnvCfg (a config
+    # that carries a cost cfg) yields a ManagerBasedSafeRlEnv with the cost
+    # manager active. cost_limits live on the cost manager (env.cost_limits) and
+    # the VecEnv wrapper reads them from there.
+    from src.envs import build_env
+
+    env = build_env(env_cfg, device, render_mode="rgb_array" if args.video else None)
+    if getattr(env, "cost_limits", None) is not None:
+        print(f"[INFO] cost_limits from cost manager: {env.cost_limits}")
+    if args.video and rank == 0:
+        env = VideoRecorder(
+            env,
+            video_folder=log_dir / "videos" / "train",
+            step_trigger=lambda step: step % args.video_interval == 0,
+            video_length=args.video_length,
+            disable_logger=True,
+        )
+
+    vec_env = make_env(env_id=task_id, env=env, clip_actions=getattr(agent_cfg, "clip_actions", None))
+
+    if args.config is not None:
+        train_cfg, max_iterations, runner_class_name, _ = load_safe_rl_yaml(args.config)
+        if args.max_iterations is not None:
+            max_iterations = args.max_iterations
+        if args.run_name is not None:
+            if runner_class_name == "OffPolicyRunner":
+                train_cfg["runner"]["run_name"] = args.run_name
+            else:
+                train_cfg["run_name"] = args.run_name
+    else:
+        train_cfg = convert_mjlab_ppo_cfg(agent_cfg, args.logger, args.wandb_project, args.wandb_entity)
+        train_cfg = apply_overrides(train_cfg, args)
+        runner_class_name = "OnPolicyRunner"
+        max_iterations = agent_cfg.max_iterations
+
+    # Optional CLF-RL reward shaping: wrap the env when the YAML config carries a
+    # top-level `clf:` block. This shapes rewards at the env boundary and needs no
+    # algorithm changes (works with plain PPO).
+    clf_cfg = None
+    if args.config is not None:
+        with open(args.config, encoding="utf-8") as clf_file:
+            clf_cfg = (yaml.safe_load(clf_file) or {}).get("clf")
+    if clf_cfg is not None:
+        from safe_rl.envs import CLFRewardWrapper
+
+        if rank == 0:
+            print(f"[INFO] Wrapping env with CLFRewardWrapper (outputs={clf_cfg.get('outputs', 'default')})")
+        vec_env = CLFRewardWrapper(vec_env, clf_cfg)
+
+    alg_name = train_cfg["algorithm"].get("class_name", "PPO")
+
+    # Optional per-joint bounded action scaling for the SAC stochastic actor.
+    if args.bounded_actions:
+        policy_cfg = train_cfg.get("policy", {})
+        if policy_cfg.get("class_name") == "SACActorCritic" and policy_cfg.get("actor_type", "stochastic") == "stochastic":
+            lows, highs = compute_joint_action_bounds(vec_env)
+            actor_kwargs = dict(policy_cfg.get("actor_kwargs") or {})
+            actor_kwargs["action_low"] = lows
+            actor_kwargs["action_high"] = highs
+            policy_cfg["actor_kwargs"] = actor_kwargs
+            if rank == 0:
+                print(f"[INFO] bounded_actions: injected per-joint bounds for {len(lows)} actions into the SAC actor")
+        elif rank == 0:
+            print(f"[INFO] --bounded_actions ignored: policy is {policy_cfg.get('class_name')} (SAC stochastic actor only)")
+
+    if runner_class_name == "OffPolicyRunner" or alg_name in OFF_POLICY_ALGORITHMS:
+        if rank == 0:
+            print(f"[INFO] Using OffPolicyRunner for algorithm: {alg_name}")
+        runner = OffPolicyRunner(vec_env, train_cfg, log_dir=str(log_dir), device=device)
+    else:
+        if rank == 0:
+            print(f"[INFO] Using OnPolicyRunner for algorithm: {alg_name}")
+        runner = OnPolicyRunner(vec_env, train_cfg, log_dir=str(log_dir), device=device)
+    runner.add_git_repo_to_log(__file__)
+    runner.add_git_repo_to_log(src.tasks.__file__)
+
+    if args.checkpoint:
+        checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        print(f"[INFO] Loading checkpoint from: {checkpoint_path}")
+        runner.load(str(checkpoint_path))
+
+    if rank == 0:
+        _dump_yaml(log_dir / "params" / "env.yaml", asdict(env_cfg))
+        _dump_yaml(log_dir / "params" / "agent.yaml", train_cfg)
+
+    runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
+    env.close()
+
+
+def launch_training(task_id: str, args: argparse.Namespace) -> None:
+    env_cfg = load_env_cfg(task_id)
+    agent_cfg = load_rl_cfg(task_id)
+    if args.experiment_name is not None:
+        agent_cfg.experiment_name = args.experiment_name
+    if args.run_name is not None:
+        agent_cfg.run_name = args.run_name
+
+    log_root_path = Path(args.log_dir) / agent_cfg.experiment_name
+    log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if agent_cfg.run_name:
+        log_dir_name += f"_{agent_cfg.run_name}"
+    log_dir = log_root_path / log_dir_name
+
+    selected_gpus, num_gpus = select_gpus(resolve_gpu_ids(args.gpu_ids, args.device))
+    if selected_gpus is None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, selected_gpus))
+    os.environ["MUJOCO_GL"] = "egl"
+
+    if num_gpus <= 1:
+        run_train(task_id, args, log_dir)
+    else:
+        import torchrunx
+
+        logging.basicConfig(level=logging.INFO)
+        if "TORCHRUNX_LOG_DIR" not in os.environ:
+            os.environ["TORCHRUNX_LOG_DIR"] = str(log_dir / "torchrunx")
+        torchrunx.Launcher(
+            hostnames=["localhost"],
+            workers_per_host=num_gpus,
+            backend=None,
+            copy_env_vars=torchrunx.DEFAULT_ENV_VARS_FOR_COPY + ("MUJOCO*",),
+        ).run(run_train, task_id, args, log_dir)
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.env_id not in list_tasks():
+        raise ValueError(f"Unknown env_id '{args.env_id}'. Run with one of: {', '.join(list_tasks())}")
+
+    launch_training(args.env_id, args)
+
+
+if __name__ == "__main__":
+    main()

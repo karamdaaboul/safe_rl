@@ -1,0 +1,93 @@
+algorithm:
+  class_name: P3O
+  # PPO Core
+  normalize_advantage_per_mini_batch: true
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.01
+  gamma: 0.99
+  gamma_cost: 0.97
+  lam: 0.95
+  max_grad_norm: 10.0
+  learning_rate: 0.0003
+  cost_critic_lr: 0.001
+  num_learning_epochs: 10
+  num_mini_batches: 32
+  schedule: adaptive
+
+  # CVaR curriculum: alpha=1.0 reduces CVaR to expected_value, so warmup is
+  # mathematically equivalent to vanilla P3O HL-Gauss. Anneal toward the worst-5%
+  # tail once the policy has learned the task.
+  cvar_alpha: 0.05
+  cvar_alpha_start: 1.0
+  cvar_alpha_end: 0.05
+  cvar_alpha_schedule: cosine
+  cvar_alpha_warmup_iters: 50
+  cvar_alpha_anneal_iters: 300
+
+  # CVaR-anchored gate: only fires inside an empirical violation (Jc > 0).
+  # cvar_gate_coef sized so the new term lives in the same order as the existing
+  # (1-gamma_cost)*Jc anchor (~0.1-0.3); tune empirically.
+  use_cvar_in_gate: true
+  cvar_gate_coef: 0.05
+  cvar_gate_clip: 5.0
+
+  # P3O-specific parameters
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+  rho: 1.1
+  kappa_max: 100.0
+  adaptive_penalty: true
+  constraint_margin: 0.85
+  kappa: [1.0]
+
+  rnd_cfg:
+      weight: 0.0
+      weight_schedule: null
+      reward_normalization: false
+      state_normalization: true
+      learning_rate: 0.001
+      num_outputs: 1
+      predictor_hidden_dims: [-1]
+      target_hidden_dims: [-1]
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    loss_type: hlgauss
+    num_bins: 101
+    v_min: 0.0
+    v_max: 60.0
+    sigma: null
+    hidden_dims: [512, 512, 512]
+    activation: elu
+    layer_norm: true
+
+runner:
+    num_steps_per_env: 2048
+    max_iterations: 600
+    empirical_normalization: false
+    save_interval: 100
+    experiment_name: safety_gymnasium_p3o_hlgauss_cvar
+    run_name: ""
+    logger: wandb
+    wandb_project: SafeRL
+    wandb_entity: uqerh-kit
+    load_run: -1
+    resume_path: null
+    checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1
