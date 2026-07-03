@@ -23,6 +23,11 @@ try:
 except ImportError:
     CLFRewardWrapper = None
 
+try:
+    from .vision_feature_wrapper import VisionFeatureWrapper
+except ImportError:
+    VisionFeatureWrapper = None
+
 __all__ = [
     "VecEnv",
     "make_env",
@@ -30,4 +35,5 @@ __all__ = [
     "MjlabVecEnv",
     "SimplexRTAWrapper",
     "CLFRewardWrapper",
+    "VisionFeatureWrapper",
 ]

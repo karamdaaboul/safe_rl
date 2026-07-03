@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
+import numpy as np
 import torch
 
 import gymnasium as gym
@@ -28,6 +29,8 @@ class SafetyGymnasiumVecEnv(VecEnv):
         hidden_goal_continue: bool = False,
         task_seeds: list[int] | None = None,
         cbf_state: bool = False,
+        vision: bool = False,
+        vision_size: int = 64,
     ) -> None:
         make_kwargs: Dict[str, Any] = {"render_mode": render_mode}
         if width is not None:
@@ -36,6 +39,11 @@ class SafetyGymnasiumVecEnv(VecEnv):
             make_kwargs["height"] = height
         if camera_name is not None:
             make_kwargs["camera_name"] = camera_name
+        if vision:
+            # Render the vision observation directly at the target size (the
+            # registered default is 256x256); merged into the task config by
+            # safety_gymnasium's `make` and parsed as a dotted key.
+            make_kwargs["config"] = {"vision_env_conf.vision_size": (vision_size, vision_size)}
 
         # Build a chain of per-sub-env wrappers. Each wrapper callable takes the
         # raw gym env and returns a wrapped env; we compose them left-to-right.
@@ -63,6 +71,23 @@ class SafetyGymnasiumVecEnv(VecEnv):
         self.device = torch.device(device)
         self.num_envs = num_envs
         self.num_actions = int(self.env.single_action_space.shape[0])
+
+        # Dict observation spaces (the `*Vision-v0` envs register with
+        # observation_flatten=False) are split here: all non-image keys are
+        # concatenated into the flat state tensor that stays the primary obs,
+        # while the uint8 image batch rides along in extras["observations"].
+        obs_space = self.env.single_observation_space
+        self._dict_obs = isinstance(obs_space, gym.spaces.Dict)
+        self._vision_key = "vision"
+        if self._dict_obs:
+            self._state_keys = [k for k in obs_space.spaces if k != self._vision_key]
+            self.obs_key_slices: Dict[str, slice] = {}
+            offset = 0
+            for key in self._state_keys:
+                n = int(np.prod(obs_space.spaces[key].shape))
+                self.obs_key_slices[key] = slice(offset, offset + n)
+                offset += n
+            self.num_state_obs = offset
         self.max_episode_length = self._resolve_max_episode_length()
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.cost_limits = cost_limits if cost_limits is not None else [1.0]
@@ -130,10 +155,10 @@ class SafetyGymnasiumVecEnv(VecEnv):
         else:
             seeds = None
         obs, info = self.env.reset(seed=seeds)
-        obs_tensor = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+        obs_tensor, vision_tensor = self._convert_obs(obs)
         self.episode_length_buf.zero_()
         self._goals_in_episode.zero_()
-        extras = self._build_extras(info=info)
+        extras = self._build_extras(info=info, obs=obs_tensor, vision=vision_tensor)
         self._last_obs, self._last_extras = obs_tensor, extras
         return obs_tensor, extras
 
@@ -142,7 +167,7 @@ class SafetyGymnasiumVecEnv(VecEnv):
         obs, rewards, costs, terminated, truncated, info = self.env.step(actions_np)
         dones = terminated | truncated
 
-        obs_tensor = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+        obs_tensor, vision_tensor = self._convert_obs(obs)
         rewards_tensor = torch.as_tensor(rewards, device=self.device, dtype=torch.float32)
         costs_tensor = torch.as_tensor(costs, device=self.device, dtype=torch.float32)
         dones_tensor = torch.as_tensor(dones, device=self.device, dtype=torch.float32)
@@ -152,13 +177,14 @@ class SafetyGymnasiumVecEnv(VecEnv):
         # present only on steps where at least one env reached its goal.
         goal_met = info.get("goal_met")
         if goal_met is not None:
-            import numpy as np
             self._goals_in_episode += torch.as_tensor(
                 np.asarray(goal_met, dtype=np.float32), device=self.device
             )
 
         self.episode_length_buf += 1
-        extras = self._build_extras(info=info, costs=costs_tensor, time_outs=time_outs)
+        extras = self._build_extras(
+            info=info, costs=costs_tensor, time_outs=time_outs, obs=obs_tensor, vision=vision_tensor
+        )
         if dones_tensor.any():
             done_ids = (dones_tensor > 0).nonzero(as_tuple=False).squeeze(-1)
             # Per-episode goal totals for the finished envs -> logged by the runner
@@ -186,13 +212,41 @@ class SafetyGymnasiumVecEnv(VecEnv):
             return np.stack(frames, axis=0)
         return self.env.render()
 
+    def _convert_obs(self, obs: Any) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        """Convert batched numpy obs to tensors.
+
+        Flat spaces pass through as a single float32 tensor. Dict spaces are
+        split: state keys are concatenated (one vectorized concat, no per-env
+        loop) and the image batch is moved to the device as uint8 — it stays
+        uint8 until inside a vision encoder.
+        """
+        if not self._dict_obs:
+            return torch.as_tensor(obs, device=self.device, dtype=torch.float32), None
+        state = np.concatenate(
+            [np.asarray(obs[k]).reshape(self.num_envs, -1) for k in self._state_keys], axis=1
+        )
+        state_tensor = torch.as_tensor(state, device=self.device, dtype=torch.float32)
+        vision_tensor = None
+        if self._vision_key in obs:
+            vision_tensor = torch.from_numpy(np.ascontiguousarray(obs[self._vision_key])).to(self.device)
+        return state_tensor, vision_tensor
+
     def _build_extras(
         self,
         info: Dict[str, Any],
         costs: torch.Tensor | None = None,
         time_outs: torch.Tensor | None = None,
+        obs: torch.Tensor | None = None,
+        vision: torch.Tensor | None = None,
     ) -> Dict[str, Any]:
         extras: Dict[str, Any] = {"observations": {}}
+        if vision is not None:
+            # uint8 (num_envs, H, W, 3) image batch for a vision wrapper/encoder.
+            extras["observations"]["vision"] = vision
+            # Full ground-truth state (sensors + lidar) as privileged critic obs,
+            # so reward/cost critics can train asymmetrically while the actor
+            # sees pixels.
+            extras["observations"]["critic"] = obs
         if costs is not None:
             extras["costs"] = costs
         if time_outs is not None:
@@ -208,10 +262,21 @@ class SafetyGymnasiumVecEnv(VecEnv):
         # the real terminal obs for terminated/truncated envs and None elsewhere.
         final_obs = info.get("final_observation")
         if final_obs is not None:
-            import numpy as np
-            stacked = np.zeros((self.num_envs, *self._last_obs.shape[1:]), dtype=np.float32) \
-                if self._last_obs is not None else None
-            if stacked is not None:
+            if self._dict_obs:
+                # State keys only, same concat order as _convert_obs. The image is
+                # deliberately skipped: no on-policy algorithm here bootstraps from
+                # final_observation (only REPPO does, which is unsupported with
+                # vision), and encoding per-truncated-env frames would serialize
+                # the encoder.
+                stacked = np.zeros((self.num_envs, self.num_state_obs), dtype=np.float32)
+                for i, fo in enumerate(final_obs):
+                    if isinstance(fo, dict):
+                        stacked[i] = np.concatenate(
+                            [np.asarray(fo[k], dtype=np.float32).reshape(-1) for k in self._state_keys]
+                        )
+                extras["final_observation"] = torch.as_tensor(stacked, device=self.device)
+            elif self._last_obs is not None:
+                stacked = np.zeros((self.num_envs, *self._last_obs.shape[1:]), dtype=np.float32)
                 for i, fo in enumerate(final_obs):
                     if fo is not None:
                         stacked[i] = np.asarray(fo, dtype=np.float32)
