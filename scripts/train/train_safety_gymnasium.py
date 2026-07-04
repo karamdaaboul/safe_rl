@@ -148,6 +148,14 @@ def main() -> None:
     parser.add_argument("--hidden_goal", action="store_true", help="Hidden-goal meta-RL task: mask goal_lidar, one fixed goal per task, terminate on reach.")
     parser.add_argument("--hidden_goal_continue", action="store_true", help="With --hidden_goal: respawn a new hidden goal on reach (continue_goal=True) instead of terminating; measures goals reached per episode.")
 
+    # Vision observations (Safety-Gymnasium *Vision-v0 envs)
+    parser.add_argument("--vision", action="store_true", help="Enable image observations (auto-enabled when the env id contains 'Vision').")
+    parser.add_argument("--vision_size", type=int, default=64, help="Rendered vision observation size (square, pixels).")
+    parser.add_argument("--vision_encoder", type=str, default="resnet18", choices=["resnet18", "dinov2_vits14", "none"], help="Frozen pretrained encoder for image obs; 'none' passes raw images through (end-to-end CNN path).")
+    parser.add_argument("--vision_encoder_weights", type=str, default=None, help="Local checkpoint path for the vision encoder (offline clusters).")
+    parser.add_argument("--vision_no_amp", action="store_true", help="Disable fp16 autocast for the vision encoder.")
+    parser.add_argument("--vision_proprio_keys", type=str, default=None, help="Comma-separated state keys appended to encoder features (default: all non-lidar keys).")
+
     # PPOL-PID specific parameters
     parser.add_argument("--pid_kp", type=float, default=None, help="PID proportional gain.")
     parser.add_argument("--pid_ki", type=float, default=None, help="PID integral gain.")
@@ -270,6 +278,12 @@ def main() -> None:
     cbf_cfg = train_cfg.get("cbf", None)
     cbf_state = bool(cbf_cfg and cbf_cfg.get("enabled", False))
 
+    vision = args.vision or "Vision" in args.env_id
+    if vision:
+        # Must be set before the vector-env subprocess workers spawn so each
+        # worker gets a headless EGL rendering context.
+        os.environ.setdefault("MUJOCO_GL", "egl")
+
     env = make_env(
         env_id=args.env_id,
         num_envs=args.num_envs,
@@ -281,7 +295,25 @@ def main() -> None:
         hidden_goal_continue=args.hidden_goal_continue,
         task_seeds=parse_task_seeds(args.task_seeds),
         cbf_state=cbf_state,
+        vision=vision,
+        vision_size=args.vision_size,
     )
+
+    if vision and args.vision_encoder != "none":
+        from safe_rl.envs import VisionFeatureWrapper
+
+        env = VisionFeatureWrapper(
+            env,
+            encoder=args.vision_encoder,
+            encoder_weights=args.vision_encoder_weights,
+            device=args.device,
+            proprio_keys=args.vision_proprio_keys.split(",") if args.vision_proprio_keys else None,
+            use_amp=not args.vision_no_amp,
+        )
+        print(
+            f"[INFO] Vision: frozen {args.vision_encoder} at {args.vision_size}x{args.vision_size} -> "
+            f"{env.num_features}-d features + {env.num_proprio}-d proprio (asymmetric critics on full state)."
+        )
 
     alg_name = algorithm_cfg.get("class_name", "unknown")
     log_dir = os.path.join(args.log_dir, args.env_id, alg_name, time.strftime("%Y%m%d_%H%M%S"))
