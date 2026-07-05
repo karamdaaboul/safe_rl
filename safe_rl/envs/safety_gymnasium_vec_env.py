@@ -11,6 +11,33 @@ import safety_gymnasium
 from .vec_env import VecEnv
 
 
+class _SafetyEnvFactory:
+    """Top-level, picklable env-builder for spawn/forkserver workers.
+
+    ``safety_gymnasium.vector.make`` builds its per-env callables as nested
+    closures, which cannot be pickled — so it only works with the default
+    ``fork`` start method. For the vision envs, fork + MuJoCo EGL rendering
+    deadlocks (a worker's render exception holds an EGL ctypes context that
+    cannot be pickled back through the error queue, hanging the whole run).
+    A ``spawn`` context gives each worker a clean interpreter and sidesteps
+    that, but needs a picklable factory — this class.
+    """
+
+    def __init__(self, env_id, make_kwargs, disable_env_checker, wrappers=None):
+        self.env_id = env_id
+        self.make_kwargs = make_kwargs
+        self.disable_env_checker = disable_env_checker
+        self.wrappers = wrappers or []
+
+    def __call__(self):
+        env = safety_gymnasium.make(
+            self.env_id, disable_env_checker=self.disable_env_checker, **self.make_kwargs
+        )
+        for wrapper in self.wrappers:
+            env = wrapper(env)
+        return env
+
+
 class SafetyGymnasiumVecEnv(VecEnv):
     """VecEnv wrapper for Safety-Gymnasium vector environments."""
 
@@ -31,6 +58,8 @@ class SafetyGymnasiumVecEnv(VecEnv):
         cbf_state: bool = False,
         vision: bool = False,
         vision_size: int = 64,
+        asynchronous: bool = True,
+        mp_context: str | None = None,
     ) -> None:
         make_kwargs: Dict[str, Any] = {"render_mode": render_mode}
         if width is not None:
@@ -56,18 +85,47 @@ class SafetyGymnasiumVecEnv(VecEnv):
             from safe_rl.cbf.sg_state_wrapper import SGCBFStateWrapper
             wrapper_chain.append(SGCBFStateWrapper)
 
-        if wrapper_chain:
-            if len(wrapper_chain) == 1:
-                make_kwargs["wrappers"] = wrapper_chain[0]
-            else:
-                # compose: outermost wrapper applied last
-                def _compose(env, _chain=wrapper_chain):
-                    for w in _chain:
-                        env = w(env)
-                    return env
-                make_kwargs["wrappers"] = _compose
+        # Use explicit, picklable factories when a non-default start method is
+        # requested (e.g. spawn for the vision envs) or when running the
+        # single-process synchronous vector env; otherwise fall back to
+        # safety_gymnasium.vector.make (default fork async), unchanged.
+        if not asynchronous:
+            # safety_gymnasium's SafetySyncVectorEnv inherits gymnasium's base
+            # step(), which unpacks the standard 5-tuple and cannot handle the
+            # safety envs' 6-tuple (obs, reward, cost, terminated, truncated,
+            # info) — so a single-process sync vector env is not usable here.
+            # Use an async context instead (spawn for the vision envs).
+            raise NotImplementedError(
+                "SafetyGymnasiumVecEnv does not support asynchronous=False: "
+                "safety_gymnasium's synchronous vector env drops the cost channel. "
+                "Use mp_context='spawn' for the vision envs instead."
+            )
+        if mp_context is not None:
+            from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
 
-        self.env = safety_gymnasium.vector.make(env_id, num_envs=num_envs, **make_kwargs)
+            env_fns = [
+                _SafetyEnvFactory(
+                    env_id,
+                    make_kwargs,
+                    disable_env_checker=(i > 0),
+                    wrappers=wrapper_chain,
+                )
+                for i in range(num_envs)
+            ]
+            self.env = SafetyAsyncVectorEnv(env_fns, context=mp_context)
+        else:
+            if wrapper_chain:
+                if len(wrapper_chain) == 1:
+                    make_kwargs["wrappers"] = wrapper_chain[0]
+                else:
+                    # compose: outermost wrapper applied last
+                    def _compose(env, _chain=wrapper_chain):
+                        for w in _chain:
+                            env = w(env)
+                        return env
+                    make_kwargs["wrappers"] = _compose
+
+            self.env = safety_gymnasium.vector.make(env_id, num_envs=num_envs, **make_kwargs)
         self.device = torch.device(device)
         self.num_envs = num_envs
         self.num_actions = int(self.env.single_action_space.shape[0])

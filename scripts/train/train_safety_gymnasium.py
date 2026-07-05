@@ -155,6 +155,7 @@ def main() -> None:
     parser.add_argument("--vision_encoder_weights", type=str, default=None, help="Local checkpoint path for the vision encoder (offline clusters).")
     parser.add_argument("--vision_no_amp", action="store_true", help="Disable fp16 autocast for the vision encoder.")
     parser.add_argument("--vision_proprio_keys", type=str, default=None, help="Comma-separated state keys appended to encoder features (default: all non-lidar keys).")
+    parser.add_argument("--vision_mp_context", type=str, default="spawn", choices=["spawn", "fork", "forkserver"], help="multiprocessing start method for vision vector-env workers (default spawn: fork deadlocks with MuJoCo EGL rendering).")
 
     # PPOL-PID specific parameters
     parser.add_argument("--pid_kp", type=float, default=None, help="PID proportional gain.")
@@ -279,10 +280,14 @@ def main() -> None:
     cbf_state = bool(cbf_cfg and cbf_cfg.get("enabled", False))
 
     vision = args.vision or "Vision" in args.env_id
+    vec_kwargs = {}
     if vision:
         # Must be set before the vector-env subprocess workers spawn so each
         # worker gets a headless EGL rendering context.
         os.environ.setdefault("MUJOCO_GL", "egl")
+        # fork + MuJoCo EGL rendering deadlocks in the async workers; spawn (a
+        # clean interpreter per worker) is the default.
+        vec_kwargs["mp_context"] = args.vision_mp_context
 
     env = make_env(
         env_id=args.env_id,
@@ -297,6 +302,7 @@ def main() -> None:
         cbf_state=cbf_state,
         vision=vision,
         vision_size=args.vision_size,
+        **vec_kwargs,
     )
 
     if vision and args.vision_encoder != "none":
