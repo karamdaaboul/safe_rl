@@ -1,0 +1,71 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO tuned for the mjlab Ant-Flat locomotion task (vs the G1-tuned
+# config/unitree_g1_flat_reppo.yaml). The G1 config converged to a
+# "stand-still & survive" local optimum on Ant because exploration was
+# throttled (init_noise_std 0.1, target_entropy -0.5/dim -> std ~0.14) and
+# the run was far too short. Changes here open up exploration and lengthen
+# the run so the Ant can actually discover a gait:
+#   - init_noise_std 0.1 -> 1.0          (strong initial exploration)
+#   - target_entropy -0.5 -> 0.5 /dim    (dual sustains std ~0.4, not ~0.14)
+#   - init_alpha_temp 1e-4 -> 1e-2       (active entropy bonus early)
+#   - num_steps_per_env 32 -> 64         (longer on-policy horizon)
+#   - max_iterations 50/100k -> 1500     (enough to learn locomotion)
+#   - critic v_max 20 -> 100             (headroom as returns grow with motion)
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL constraint
+  desired_kl: 0.1
+  # -- learned dual variables
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: 0.5     # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- target networks (Polyak)
+  tau: 0.005
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: gaussian
+  critic_type: distributional
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 512, 512]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: log
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -20.0
+    v_max: 100.0
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [1024, 1024, 1024]
+      activation: elu
+      layer_norm: true
+
+runner:
+  num_steps_per_env: 64
+  max_iterations: 1500
+  empirical_normalization: false
+  save_interval: 250
+  experiment_name: mjlab_ant_reppo
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

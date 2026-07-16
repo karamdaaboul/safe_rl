@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import math
 
 import torch
@@ -74,10 +73,10 @@ class REPPO:
         self.policy = policy
         self.policy.to(self.device)
 
-        # Old-policy snapshot for closed-form Gaussian KL on raw (μ, σ).
-        self.old_policy = copy.deepcopy(policy)
-        self.old_policy.to(self.device)
-        self.old_policy.eval()
+        # KL is computed closed-form on raw (μ, σ) against the rollout-time
+        # distribution stored per step (old_mu/old_sigma), which equals the
+        # policy at the start of the update for on-policy collection — so no
+        # separate frozen old-policy snapshot is needed.
 
         # Algorithm-level learnable scalars.
         self.log_alpha_temp = nn.Parameter(
@@ -234,9 +233,15 @@ class REPPO:
         Per stored step t:
           a'_t ~ π_target(s'_t)
           soft_V(s'_t) = min(Q1, Q2)_target(s'_t, a'_t) − α · log_prob_target(a'_t)
-          r'_t = r_t − α · log_prob_t
-          target_q[t] = r'_t + γ · m_t · ((1−λ) · soft_V(s'_t) + λ · target_q[t+1])
+          target_q[t] = r_t + γ · m_t · ((1−λ) · soft_V(s'_t) + λ · target_q[t+1])
         where m_t = (1 − dones_t) | truncated_t (truncations keep bootstrap).
+
+        The entropy bonus is counted **once**, on the next state, inside
+        soft_V(s'_t) — matching the standard soft-Q target and all three REPPO
+        reference implementations (jaxrl/torchrl/rsl_rl). Do NOT also subtract
+        α·log_prob_t from the reward here: that double-counts entropy, biases the
+        critic toward soft_V − α·logπ(a|s), and (via the actor's α·logπ − q loss)
+        applies the entropy penalty to the policy gradient twice.
         On truncation the λ-trace is cut (blend → soft_V only) so the next
         episode's return does not leak backwards (matches reference compute_gve).
         """
@@ -262,7 +267,8 @@ class REPPO:
 
             recurr = soft_v[-1]  # init from last step's bootstrap target
             for step in reversed(range(T)):
-                soft_r = self.storage.rewards[step] - alpha * self.storage.actions_log_prob[step]
+                # Entropy is folded into soft_v (next state) only — see docstring.
+                soft_r = self.storage.rewards[step]
                 next_v = soft_v[step]
                 m = bootstrap_mask[step]
                 # Reference compute_gve cuts the λ-trace on truncation: a timeout
@@ -289,18 +295,13 @@ class REPPO:
     # ------------------------------------------------------------------
 
     def update(self) -> dict[str, float]:
-        with torch.no_grad():
-            self.old_policy.load_state_dict(self.policy.state_dict())
-
-        gen_fn = self.storage.mini_batch_generator
-
         critic_loss_sum = 0.0
         actor_loss_sum = entropy_sum = kl_sum = q_value_sum = alpha_temp_loss_sum = alpha_kl_loss_sum = 0.0
         n = 0
-        for batch in gen_fn(self.num_mini_batches, self.num_learning_epochs):
-            obs_b, critic_obs_b, actions_b, _, _, returns_b, _, old_mu_b, old_sigma_b, _, _, _ = batch
+        for batch in self._minibatch_generator(self.num_mini_batches, self.num_learning_epochs):
+            obs_b, critic_obs_b, actions_b, returns_b, old_mu_b, old_sigma_b, truncated_b = batch
 
-            critic_loss = self._update_critic(critic_obs_b, actions_b, returns_b)
+            critic_loss = self._update_critic(critic_obs_b, actions_b, returns_b, truncated_b)
             critic_loss_sum += critic_loss
 
             metrics = self._update_actor(obs_b, critic_obs_b, old_mu_b, old_sigma_b)
@@ -329,25 +330,76 @@ class REPPO:
             "alpha_kl_loss": alpha_kl_loss_sum / max(n, 1),
         }
 
+    def _minibatch_generator(self, num_mini_batches: int, num_epochs: int):
+        """REPPO-local shuffled minibatch generator.
+
+        Mirrors ``RolloutStorage.mini_batch_generator`` but additionally yields
+        the per-sample ``truncated`` flag (aligned to the shuffled indices) so the
+        critic loss can mask timeout steps — the shared generator does not expose
+        it. Yields (obs, critic_obs, actions, returns, old_mu, old_sigma, truncated).
+        """
+        st = self.storage
+        batch_size = st.num_envs * st.num_transitions_per_env
+        mini_batch_size = batch_size // num_mini_batches
+        indices = torch.randperm(num_mini_batches * mini_batch_size, device=self.device)
+
+        obs = st.observations.flatten(0, 1)
+        critic_obs = (
+            st.privileged_observations.flatten(0, 1)
+            if st.privileged_observations is not None
+            else obs
+        )
+        actions = st.actions.flatten(0, 1)
+        returns = st.returns.flatten(0, 1)
+        old_mu = st.mu.flatten(0, 1)
+        old_sigma = st.sigma.flatten(0, 1)
+        truncated = st.truncated.flatten(0, 1)
+
+        for _ in range(num_epochs):
+            for i in range(num_mini_batches):
+                idx = indices[i * mini_batch_size : (i + 1) * mini_batch_size]
+                yield (
+                    obs[idx],
+                    critic_obs[idx],
+                    actions[idx],
+                    returns[idx],
+                    old_mu[idx],
+                    old_sigma[idx],
+                    truncated[idx],
+                )
+
     # ------------------------------------------------------------------
     # Critic update — HL-Gauss CE (distributional) or MSE (standard)
     # ------------------------------------------------------------------
 
     def _update_critic(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor, returns: torch.Tensor
+        self,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        returns: torch.Tensor,
+        truncated: torch.Tensor,
     ) -> float:
+        # Mask timeout (truncated) steps out of the critic loss: their bootstrap
+        # target is only valid when the env surfaced final_observation, and the
+        # references (torchrl truncation_mask, rsl_rl (1 - truncations)) drop them
+        # unconditionally. Truncations are rare, so the lost signal is negligible.
+        mask = (1.0 - truncated.view(-1)).clamp_(0.0, 1.0)
+        denom = mask.sum().clamp_min(1.0)
+
         if self.policy.is_distributional_critic:
             logits_1, logits_2 = self.policy.evaluate_q_dist(critic_obs, actions)
             c = self.policy.critic_1
             soft_targets = self._hlgauss_embed(
                 returns.view(-1), c.v_min, c.v_max, c.num_atoms
             ).detach()
-            loss_1 = -(soft_targets * F.log_softmax(logits_1, dim=-1)).sum(-1).mean()
-            loss_2 = -(soft_targets * F.log_softmax(logits_2, dim=-1)).sum(-1).mean()
-            critic_loss = loss_1 + loss_2
+            ce_1 = -(soft_targets * F.log_softmax(logits_1, dim=-1)).sum(-1)
+            ce_2 = -(soft_targets * F.log_softmax(logits_2, dim=-1)).sum(-1)
+            critic_loss = (mask * ce_1).sum() / denom + (mask * ce_2).sum() / denom
         else:
             q1, q2 = self.policy.evaluate_q(critic_obs, actions)
-            critic_loss = (returns - q1).pow(2).mean() + (returns - q2).pow(2).mean()
+            se_1 = (returns - q1).pow(2).view(-1)
+            se_2 = (returns - q2).pow(2).view(-1)
+            critic_loss = (mask * se_1).sum() / denom + (mask * se_2).sum() / denom
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -392,11 +444,12 @@ class REPPO:
     ) -> dict[str, float]:
         action_pi, log_prob_pi, mu_new, sigma_new = self.policy.sample_with_log_prob(obs)
 
-        # Pathwise Q: gradient flows through ∂Q/∂a · ∂a/∂θ.
+        # Pathwise Q: gradient flows through ∂Q/∂a · ∂a/∂θ. Keep critic params'
+        # requires_grad off through the backward so the actor pass does not
+        # populate critic .grad buffers (re-enabled after optimizer.step()).
         self._set_critic_grad(requires_grad=False)
         q1, q2 = self.policy.evaluate_q(critic_obs, action_pi)
         q_pi = torch.minimum(q1, q2).squeeze(-1)
-        self._set_critic_grad(requires_grad=True)
 
         primary = (self.alpha_temp.detach() * log_prob_pi - q_pi)
 
@@ -436,6 +489,7 @@ class REPPO:
         nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
         self.optimizer.step()
         self.alpha_optimizer.step()
+        self._set_critic_grad(requires_grad=True)
 
         return {
             "actor_loss": actor_loss.item(),
