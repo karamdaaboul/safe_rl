@@ -2,6 +2,7 @@
 
 from .cpo import CPO
 from .cup import CUP
+from .cvpo import CVPO
 from .distillation import Distillation
 from .focops import FOCOPS
 from .fppo import FPPO
@@ -19,6 +20,7 @@ from .safe_sac import SafeSAC
 __all__ = [
     "CPO",
     "CUP",
+    "CVPO",
     "Distillation",
     "FOCOPS",
     "FPPO",
