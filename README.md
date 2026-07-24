@@ -1,143 +1,82 @@
 # Safe RL
 
-A fast and simple implementation of safe reinforcement learning algorithms, designed to run fully on GPU.
-This code is built on top of the [rsl_rl](https://github.com/leggedrobotics/rsl_rl) library and extends it with safe RL capabilities for constrained optimization problems.
+A fast, GPU-first implementation of safe reinforcement learning algorithms, built on top of
+[rsl_rl](https://github.com/leggedrobotics/rsl_rl) and extended for constrained (cost-limited)
+optimization.
 
 ## Implemented Algorithms
 
-This library implements several **on-policy reinforcement learning algorithms** with a focus on safe RL:
+Safe RL algorithms maximize reward subject to a cost constraint; they differ mainly in *how* the
+constraint is enforced.
 
-### Standard RL Algorithms
-* **PPO** (Proximal Policy Optimization) - The foundation algorithm for policy optimization
-* **Student-Teacher Distillation** - Knowledge transfer from teacher to student policies
+| Algorithm | Type | Constraint handling / key feature | Paper |
+|-----------|------|-----------------------------------|-------|
+| **PPO** | RL (on-policy) | Clipped surrogate + GAE — the foundation | [arXiv:1707.06347](https://arxiv.org/abs/1707.06347) |
+| **SAC** | RL (off-policy) | Maximum-entropy actor–critic | [arXiv:1801.01290](https://arxiv.org/abs/1801.01290) |
+| **REPPO** | RL (on-policy) | Relative-entropy pathwise policy optimization | [arXiv:2507.11019](https://arxiv.org/abs/2507.11019) |
+| **FastSAC** | RL (off-policy) | SAC + `torch.compile`/AMP/UTD, optional distributional critic | [arXiv:1801.01290](https://arxiv.org/abs/1801.01290) |
+| **FastTD3** | RL (off-policy) | TD3 + large-batch parallel updates, distributional critic | [arXiv:2505.22642](https://arxiv.org/abs/2505.22642) |
+| **P3O** | Safe (on-policy) | Adaptive penalty κ on constraint violations | [arXiv:2205.11814](https://arxiv.org/abs/2205.11814) |
+| **PPOL_PID** | Safe (on-policy) | PID-controlled Lagrangian multiplier | [arXiv:2007.03964](https://arxiv.org/abs/2007.03964) |
+| **CPO** | Safe (on-policy) | TRPO-style trust-region constraint projection | [arXiv:1705.10528](https://arxiv.org/abs/1705.10528) |
+| **PCPO** | Safe (on-policy) | Projection-based CPO: reward step → cost projection | [arXiv:2010.03152](https://arxiv.org/abs/2010.03152) |
+| **FPPO** | Safe (on-policy) | Predictor–corrector gradient projection | — |
+| **SafeSAC** | Safe (off-policy) | SAC with a Lagrangian cost constraint | [arXiv:1801.01290](https://arxiv.org/abs/1801.01290) |
+| **Distillation** | Utility | Student–teacher policy distillation | — |
 
-### Safe RL Algorithms
-* **P3O** (Penalized Proximal Policy Optimization) - Safe RL using adaptive penalty methods for constraint handling
-* **PPOL_PID** (PPO Lagrangian with PID Controller) - Safe RL using Lagrangian multipliers updated via PID control
+**Additional features:** [Random Network Distillation (RND)](https://proceedings.mlr.press/v229/schwarke23a.html)
+for curiosity-driven exploration, and [symmetry-based augmentation](https://arxiv.org/abs/2403.04359).
 
-### Algorithm Comparison
+> ⚠️ **Experimental — not validated:** the **CBF** (control-barrier-function) safety filter is a work
+> in progress; please don't rely on it for experiments yet.
 
-| Algorithm | Constraint Method | Key Feature |
-|-----------|------------------|-------------|
-| **P3O** | Adaptive penalty | Simple, single-phase update with adaptive κ |
-| **PPOL_PID** | PID-controlled Lagrangian | Smooth constraint tracking with PID controller |
-
-### Additional Features
-* [Random Network Distillation (RND)](https://proceedings.mlr.press/v229/schwarke23a.html) - Encourages exploration by adding
-  a curiosity driven intrinsic reward.
-* [Symmetry-based Augmentation](https://arxiv.org/abs/2403.04359) - Makes the learned behaviors more symmetrical.
-
-> ⚠️ **Experimental — not ready to try yet:** the **CBF** (control-barrier-function) safety filter
-> is a work in progress. It is present in the codebase but has not been validated — please do not
-> rely on it for experiments yet.
-
-All algorithms are designed for **on-policy learning** and support cost-constrained environments for safe reinforcement learning.
-
-We welcome contributions from the community. Please check our contribution guidelines for more
-information.
-
-**Built on**: [rsl_rl](https://github.com/leggedrobotics/rsl_rl) by Robotic Systems Lab, ETH Zurich & NVIDIA <br/>
-**Extended for**: Safe Reinforcement Learning with multiple constraints handling capabilities
-
-
+**Built on** [rsl_rl](https://github.com/leggedrobotics/rsl_rl) (Robotic Systems Lab, ETH Zurich &
+NVIDIA), extended for safe RL with multi-constraint support.
 
 ## Setup
 
-Clone this repository and installing it with:
-
 ```bash
-git clone git@git.algoryx.se:algoryx/external/xscave/safe-rl.git
+git clone https://github.com/karamdaaboul/safe_rl.git
 cd safe_rl
 pip install -e .
 ```
 
-The package supports the following logging frameworks which can be configured through `logger`:
-
-* Tensorboard: https://www.tensorflow.org/tensorboard/
-* Weights & Biases: https://wandb.ai/site
-
-For a demo configuration of PPO, please check the [dummy_config.yaml](config/dummy_config.yaml) file.
+Logging backends (set via the `logger` key): [TensorBoard](https://www.tensorflow.org/tensorboard/)
+or [Weights & Biases](https://wandb.ai/site).
 
 ## Safety-Gymnasium usage
 
-This repo includes a minimal wrapper and scripts to train/evaluate on
-[Safety-Gymnasium](https://safety-gymnasium.readthedocs.io/en/latest/).
-
-Install Safety-Gymnasium:
+Train and evaluate on [Safety-Gymnasium](https://safety-gymnasium.readthedocs.io/en/latest/)
+(`pip install safety-gymnasium`).
 
 ```bash
-pip install safety-gymnasium
-```
-
-Train PPO (standard RL):
-
-```bash
+# Standard RL (PPO)
 python scripts/train/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 8 \
-  --config config/dummy_config.yaml
-```
+  --env_id SafetyCarGoal1-v0 --num_envs 8 --config config/dummy_config.yaml
 
-Train P3O (safe RL with adaptive penalty):
-
-```bash
+# Safe RL (P3O) — requires --cost_limits
 python scripts/train/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 36 \
-  --config config/safety_gymnasium_p3o.yaml \
-  --cost_limits 25.0
-```
+  --env_id SafetyCarGoal1-v0 --num_envs 36 \
+  --config config/safety_gymnasium_p3o.yaml --cost_limits 25.0
 
-Train PPOL-PID (safe RL with PID-controlled Lagrangian):
-
-```bash
-python scripts/train/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 36 \
-  --config config/safety_gymnasium_ppol_pid.yaml \
-  --cost_limits 25.0
-```
-
-Evaluate a trained policy (single env, rendered):
-
-```bash
+# Evaluate a checkpoint (single env, rendered)
 python scripts/eval/eval_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 1 \
-  --render_mode human \
+  --env_id SafetyCarGoal1-v0 --num_envs 1 --render_mode human \
   --config config/dummy_config.yaml \
-  --checkpoint logs/safety_gymnasium/SafetyCarGoal1-v0/<run>/model_<iter>.pt \
-  --episodes 5
+  --checkpoint logs/safety_gymnasium/SafetyCarGoal1-v0/<run>/model_<iter>.pt --episodes 5
 ```
 
+Safe RL algorithms require `--cost_limits` (or `algorithm.cost_limits` in the config); omitting it
+silently disables constraint enforcement.
 
-## Hyperparameter sweeps with Weights & Biases
-
-Quick start (minimal PPO sweep):
+## Hyperparameter sweeps (Weights & Biases)
 
 ```bash
-# 1) Create the sweep and copy the returned SWEEP_ID
-wandb sweep sweeps/quick_ppo_sweep.yaml
-
-# 2) Launch one or more agents
-wandb agent USERNAME/PROJECT/SWEEP_ID
+wandb login
+wandb sweep sweeps/safe_ppo_sweep.yaml   # prints a SWEEP_ID
+wandb agent USERNAME/PROJECT/SWEEP_ID    # launch one or more agents, optionally on several machines
 ```
 
-Full PPO sweep:
+Replace `USERNAME/PROJECT` with your W&B entity and project. Other sweep configs live in `sweeps/`.
 
-```bash
-wandb sweep sweeps/ppo_sweep.yaml
-wandb agent USERNAME/PROJECT/SWEEP_ID
-```
-
-Safe RL sweep:
-
-```bash
-wandb sweep sweeps/safe_ppo_sweep.yaml
-wandb agent USERNAME/PROJECT/SWEEP_ID
-```
-
-Notes:
-- Ensure you are logged in: `wandb login`
-- Replace `USERNAME/PROJECT` with your W&B entity and project.
-- Run multiple `wandb agent` processes (or on multiple machines) for parallel sweeps.
+We welcome contributions — please see the contribution guidelines before opening a PR.
