@@ -13,7 +13,6 @@ This library implements several **on-policy reinforcement learning algorithms** 
 
 ### Safe RL Algorithms
 * **P3O** (Penalized Proximal Policy Optimization) - Safe RL using adaptive penalty methods for constraint handling
-* **CUP** (Constrained Update Projection) - Two-phase safe RL with Lagrangian constraint projection ([Paper](https://arxiv.org/abs/2209.07089))
 * **PPOL_PID** (PPO Lagrangian with PID Controller) - Safe RL using Lagrangian multipliers updated via PID control
 
 ### Algorithm Comparison
@@ -21,7 +20,6 @@ This library implements several **on-policy reinforcement learning algorithms** 
 | Algorithm | Constraint Method | Key Feature |
 |-----------|------------------|-------------|
 | **P3O** | Adaptive penalty | Simple, single-phase update with adaptive κ |
-| **CUP** | Lagrangian projection | Two-phase: PPO update → constraint projection |
 | **PPOL_PID** | PID-controlled Lagrangian | Smooth constraint tracking with PID controller |
 
 ### Additional Features
@@ -29,9 +27,9 @@ This library implements several **on-policy reinforcement learning algorithms** 
   a curiosity driven intrinsic reward.
 * [Symmetry-based Augmentation](https://arxiv.org/abs/2403.04359) - Makes the learned behaviors more symmetrical.
 
-> ⚠️ **Experimental — not ready to try yet:** **GRPO** (group-relative policy optimization) and the
-> **CBF** (control-barrier-function) safety filter are work in progress. They are present in the
-> codebase but have not been validated — please do not rely on them for experiments yet.
+> ⚠️ **Experimental — not ready to try yet:** the **CBF** (control-barrier-function) safety filter
+> is a work in progress. It is present in the codebase but has not been validated — please do not
+> rely on it for experiments yet.
 
 All algorithms are designed for **on-policy learning** and support cost-constrained environments for safe reinforcement learning.
 
@@ -87,16 +85,6 @@ python scripts/train/train_safety_gymnasium.py \
   --env_id SafetyCarGoal1-v0 \
   --num_envs 36 \
   --config config/safety_gymnasium_p3o.yaml \
-  --cost_limits 25.0
-```
-
-Train CUP (safe RL with Lagrangian constraint projection):
-
-```bash
-python scripts/train/train_safety_gymnasium.py \
-  --env_id SafetyCarGoal1-v0 \
-  --num_envs 36 \
-  --config config/safety_gymnasium_cup.yaml \
   --cost_limits 25.0
 ```
 

@@ -157,7 +157,7 @@ class FPPO:
         self.gpu_global_rank = 0
 
     # ------------------------------------------------------------------
-    # Interface methods — same signatures as CUP / P3O
+    # Interface methods — same signatures as P3O
     # ------------------------------------------------------------------
 
     def init_storage(

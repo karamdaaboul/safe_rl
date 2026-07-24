@@ -12,12 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = PROJECT_ROOT / "config"
 SAFE_ALGORITHMS = {
     "CPO",
-    "CUP",
-    "FOCOPS",
     "FPPO",
     "P3O",
     "PCPO",
-    "PCRPO",
     "PPOL_PID",
     "SafeSAC",
 }

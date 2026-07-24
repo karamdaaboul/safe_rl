@@ -14,7 +14,7 @@ from safe_rl.runners import OffPolicyRunner, OnPolicyRunner
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
 
 # Algorithms that use on-policy training
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "Distillation"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "Distillation"}
 
 
 def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
@@ -195,7 +195,7 @@ def main() -> None:
         cost_limits = algorithm_cfg["cost_limits"]
 
     # Pass cost_limits to algorithm config for Safe RL algorithms
-    if algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID", "P3O", "CUP") and cost_limits is not None:
+    if algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID", "P3O") and cost_limits is not None:
         algorithm_cfg["cost_limits"] = cost_limits
 
     env = make_env(
