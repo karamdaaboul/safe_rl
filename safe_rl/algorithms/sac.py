@@ -36,6 +36,9 @@ class SAC:
     # N-step returns are aggregated inside ReplayStorage at sample time, so the
     # runner should not also wrap transitions in the NStepReturnAggregator.
     supports_storage_n_step = True
+    # Loss keys reported by the ``_update_extra_critics`` hook (e.g. ("cost_critic",)
+    # for SafeSAC). Empty for plain SAC.
+    _extra_critic_keys: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -233,11 +236,14 @@ class SAC:
             Dictionary containing loss values for logging.
         """
         if self.storage is None or len(self.storage) < self.batch_size:
-            return {"critic": 0.0, "actor": 0.0, "alpha": float(self.alpha.detach().item()), "alpha_loss": 0.0}
+            result = {"critic": 0.0, "actor": 0.0, "alpha": float(self.alpha.detach().item()), "alpha_loss": 0.0}
+            result.update(dict.fromkeys(self._extra_critic_keys, 0.0))
+            return result
 
         total_critic_loss = 0.0
         total_actor_loss = 0.0
         total_alpha_loss = 0.0
+        extra_totals = dict.fromkeys(self._extra_critic_keys, 0.0)
 
         actor_updates = 0
 
@@ -282,6 +288,13 @@ class SAC:
             )
             total_critic_loss += critic_loss
 
+            # Update any additional critics (e.g. SafeSAC's cost critics)
+            for key, value in self._update_extra_critics(
+                batch, obs, critic_obs, actions, dones, next_obs, next_critic_obs,
+                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+            ).items():
+                extra_totals[key] += value
+
             # Update actor and alpha
             if self.update_step % self.policy_frequency == 0:
                 actor_loss, alpha_loss = self._update_actor_and_alpha(obs, critic_obs)
@@ -296,13 +309,36 @@ class SAC:
         # Average losses
         num_updates = self.num_updates_per_step
         actor_denominator = actor_updates if actor_updates > 0 else 1
-        return {
+        result = {
             "critic": total_critic_loss / num_updates,
             "actor": total_actor_loss / actor_denominator,
             # Log the entropy coefficient (-> SafeRL/alpha) and the alpha loss (-> Loss/alpha)
             "alpha": float(self.alpha.detach().item()),
             "alpha_loss": total_alpha_loss / actor_denominator,
         }
+        result.update({key: value / num_updates for key, value in extra_totals.items()})
+        return result
+
+    def _update_extra_critics(
+        self,
+        batch: dict[str, torch.Tensor],
+        obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
+        effective_n_steps: torch.Tensor | None = None,
+    ) -> dict[str, float]:
+        """Hook for subclasses with additional critics (e.g. SafeSAC's cost critics).
+
+        Called once per gradient update, after the reward-critic update, with the
+        already-normalized batch tensors. ``batch`` carries any extra stored fields
+        (e.g. ``costs``). Returns a dict of loss values keyed by
+        ``_extra_critic_keys``; base SAC has none.
+        """
+        return {}
 
     def _update_critic(
         self,

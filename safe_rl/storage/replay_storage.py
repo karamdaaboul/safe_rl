@@ -285,11 +285,22 @@ class ReplayStorage:
         effective_n_steps = (first_done + 1).unsqueeze(-1).to(torch.long)
         final_t = window_t.gather(1, first_done.unsqueeze(-1)).squeeze(-1)  # [B]
 
+        # Aggregate costs over the same window as rewards (safe RL): the cost
+        # Bellman backup must see the n-step discounted cost sum, not the 1-step
+        # cost, or reward and cost critics would learn on mismatched horizons.
+        n_step_costs = None
+        if "costs" in self._data:
+            costs2d = view2d(self._data["costs"])  # [T, E, C]
+            all_costs = costs2d[window_t, e_exp]  # [B, n, C]
+            n_step_costs = (all_costs * done_masks.unsqueeze(-1) * discounts.view(1, -1, 1)).sum(dim=1)
+
         batch: dict[str, torch.Tensor] = {}
         for name, data in self._data.items():
             d2d = view2d(data)
             if name == "rewards":
                 value = n_step_rewards
+            elif name == "costs" and n_step_costs is not None:
+                value = n_step_costs
             elif name in ("next_observations", "next_critic_observations", "dones", "bootstrap"):
                 # Taken at the (possibly truncated) horizon step.
                 value = d2d[final_t, e_idx]
