@@ -24,11 +24,13 @@ export XDG_CACHE_HOME=/p/scratch/hai_1075/cache
 
 rm -rf "$VENV"
 python -m venv "$VENV"
-"$VENV/bin/pip" install -q --no-index --find-links "$W" --upgrade pip
+"$VENV/bin/pip" install -q --no-index --find-links "$W" --upgrade pip setuptools wheel
 "$VENV/bin/pip" install -q --no-index --find-links "$W" \
     torch torchvision "mjlab==1.2.0" "mujoco==3.5.0" "warp-lang==1.12.1" \
     scipy wandb tensorboard pyyaml numpy GitPython onnx tqdm
-"$VENV/bin/pip" install -q --no-index --no-deps -e /p/project1/hai_1075/workspaces/safe_rl
+# --no-build-isolation: offline, so the isolated build env cannot fetch
+# setuptools from an index; use the venv's own (installed above).
+"$VENV/bin/pip" install -q --no-index --no-deps --no-build-isolation -e /p/project1/hai_1075/workspaces/safe_rl
 
 "$VENV/bin/python" - <<'EOF'
 import sys
