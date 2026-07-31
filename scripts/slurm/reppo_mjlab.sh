@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #SBATCH --job-name=reppo_mjlab
-#SBATCH --account=hai_1075
+#SBATCH --account=hai_1074
 #SBATCH --partition=booster
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
