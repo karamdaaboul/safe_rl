@@ -18,7 +18,6 @@ class MjlabVecEnv(VecEnv):
         self.max_episode_length = int(
             getattr(env, "max_episode_length", round(getattr(env, "max_episode_length_s") / env.step_dt))
         )
-        self.episode_length_buf = env.episode_length_buf
         self.step_dt = float(env.step_dt)
         self.cfg = env.cfg
         self.clip_actions = clip_actions
@@ -34,6 +33,21 @@ class MjlabVecEnv(VecEnv):
     @property
     def unwrapped(self) -> Any:
         return getattr(self.env, "unwrapped", self.env)
+
+    @property
+    def episode_length_buf(self) -> torch.Tensor:
+        return self.env.episode_length_buf
+
+    @episode_length_buf.setter
+    def episode_length_buf(self, value: torch.Tensor) -> None:
+        # Must reach the UNDERLYING env: the runner's init_at_random_ep_len
+        # staggering assigns a fresh tensor to this attribute, and a plain
+        # attribute copy on the wrapper would swallow it silently — all envs
+        # then run phase-locked and truncate simultaneously, which correlates
+        # minibatches and mass-cuts the lambda-trace (observed: REPPO tracking
+        # plateau on Go2 that the reference pipeline, which staggers for real,
+        # does not have).
+        self.env.episode_length_buf = value
 
     def get_observations(self) -> tuple[torch.Tensor, dict]:
         if self._last_obs is None or self._last_extras is None:
