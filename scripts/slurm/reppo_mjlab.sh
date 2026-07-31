@@ -27,7 +27,11 @@ RUN_NAME=${4:-$(basename "$CONFIG" .yaml)_s${SEED}}
 module --force purge
 module load Stages/2024 GCCcore/.12.3.0 Python/3.11.3
 
-source /p/project1/hai_1075/venvs/mjlab311/bin/activate
+# Booster-native venv — the Cluster-built mjlab311 venv's python symlinks into
+# /p/software/juwels, which is not mounted on Booster nodes (jobs died with
+# ModuleNotFoundError). Built offline from /p/project1/hai_1075/wheelhouse by
+# scripts/slurm/reppo_mjlab_setup.sh.
+source /p/project1/hai_1075/venvs/mjlab311_booster/bin/activate
 
 export MUJOCO_GL=egl
 export OMP_NUM_THREADS=16
