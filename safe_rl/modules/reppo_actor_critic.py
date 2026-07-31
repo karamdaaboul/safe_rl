@@ -89,7 +89,11 @@ class REPPOActorCritic(nn.Module):
 
         self.actor_obs_normalization = actor_obs_normalization
         if actor_obs_normalization:
-            self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs)
+            # eps_mode="add_var" matches the reference REPPO normalizer:
+            # sqrt(var + eps) in the denominator, which caps the gain on
+            # near-constant channels at 1/sqrt(eps)=10 instead of the legacy
+            # add_std form's up-to-100x amplification. See EmpiricalNormalization.
+            self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs, eps_mode="add_var")
         else:
             self.actor_obs_normalizer = nn.Identity()
 
@@ -137,7 +141,7 @@ class REPPOActorCritic(nn.Module):
 
         self.critic_obs_normalization = critic_obs_normalization
         if critic_obs_normalization:
-            self.critic_obs_normalizer = EmpiricalNormalization(num_critic_obs)
+            self.critic_obs_normalizer = EmpiricalNormalization(num_critic_obs, eps_mode="add_var")
         else:
             self.critic_obs_normalizer = nn.Identity()
 

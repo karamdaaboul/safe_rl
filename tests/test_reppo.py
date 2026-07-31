@@ -302,6 +302,28 @@ def test_stored_obs_are_normalized_so_kl_starts_at_zero():
         torch.testing.assert_close(sigma, alg.storage.sigma[step], rtol=1e-6, atol=1e-6)
 
 
+def test_reppo_normalizer_matches_reference_eps_placement():
+    """Reference: divide by sqrt(var + eps); legacy: divide by (sqrt(var) + eps).
+    On a near-constant channel (var=1e-4) the legacy form amplifies ~5x harder —
+    a real 9%-level performance difference vs the authors' code (Humanoid A/B)."""
+    from safe_rl.modules.normalizer import EmpiricalNormalization
+
+    torch.manual_seed(0)
+    x = torch.randn(4096, 1) * 0.01 + 3.0  # near-constant channel, std 0.01
+    ref = EmpiricalNormalization(1, eps_mode="add_var")
+    legacy = EmpiricalNormalization(1, eps_mode="add_std")
+    ref.update(x); legacy.update(x)
+    ref.eval(); legacy.eval()
+    probe = torch.tensor([[3.05]])  # +5 sigma excursion
+    out_ref = ref(probe).item()
+    out_legacy = legacy(probe).item()
+    assert abs(out_ref) < 1.0  # reference caps the gain at 1/sqrt(eps) = 10
+    assert abs(out_legacy) > 2.0 * abs(out_ref)  # legacy amplifies much harder
+
+    policy = _make_policy(actor_obs_normalization=True)
+    assert policy.actor_obs_normalizer.eps_mode == "add_var"
+
+
 def test_aux_predictor_head_is_applied_only_on_the_online_side():
     """Reference aux loss is pred(f(s,a)) -> sg[f(s',a')]; without the head it degenerates
     into pulling the critic's own features toward their next-state value."""

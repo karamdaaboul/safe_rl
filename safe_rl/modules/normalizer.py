@@ -9,7 +9,7 @@ from torch import nn
 class EmpiricalNormalization(nn.Module):
     """Normalize mean and variance of values based on empirical values."""
 
-    def __init__(self, shape, eps=1e-2, until=None):
+    def __init__(self, shape, eps=1e-2, until=None, eps_mode="add_std"):
         """Initialize EmpiricalNormalization module.
 
         Args:
@@ -17,9 +17,19 @@ class EmpiricalNormalization(nn.Module):
             eps (float): Small value for stability.
             until (int or None): If this arg is specified, the link learns input values until the sum of batch sizes
             exceeds it.
+            eps_mode: Where the stabilizer enters. "add_std" (legacy): divide by
+                (sqrt(var) + eps). "add_var" (reference REPPO): divide by
+                sqrt(var + eps). The difference is decisive for near-constant
+                channels: at var=1e-4, add_std divides by 0.02 while add_var
+                divides by ~0.10 — add_std amplifies such channels ~5x harder,
+                turning numerically-tiny variations (contact flags, gravity
+                components, command dims) into high-magnitude network inputs.
         """
         super().__init__()
+        if eps_mode not in ("add_std", "add_var"):
+            raise ValueError(f"eps_mode must be 'add_std' or 'add_var'; got {eps_mode!r}")
         self.eps = eps
+        self.eps_mode = eps_mode
         self.until = until
         self.register_buffer("_mean", torch.zeros(shape).unsqueeze(0))
         self.register_buffer("_var", torch.ones(shape).unsqueeze(0))
@@ -46,6 +56,8 @@ class EmpiricalNormalization(nn.Module):
 
         if self.training:
             self.update(x)
+        if self.eps_mode == "add_var":
+            return (x - self._mean) / self._std
         return (x - self._mean) / (self._std + self.eps)
 
     @torch.jit.unused
@@ -64,7 +76,10 @@ class EmpiricalNormalization(nn.Module):
         delta_mean = mean_x - self._mean
         self._mean += rate * delta_mean
         self._var += rate * (var_x - self._var + delta_mean * (mean_x - self._mean))
-        self._std = torch.sqrt(self._var)
+        if self.eps_mode == "add_var":
+            self._std = torch.sqrt(self._var + self.eps)
+        else:
+            self._std = torch.sqrt(self._var)
 
     @torch.jit.unused
     def inverse(self, y):
