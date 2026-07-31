@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from safe_rl.networks import MLP, SimbaV2
+from safe_rl.networks import MLP, SimbaV2, build_obs_encoder
+from safe_rl.utils import resolve_nn_activation
 
 
 class StandardCritic(nn.Module):
@@ -26,6 +27,8 @@ class StandardCritic(nn.Module):
         hidden_dims: list[int] = [256, 256, 256],
         activation: str = "elu",
         layer_norm: bool = False,
+        encoder_type: str = "none",
+        encoder_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -39,8 +42,12 @@ class StandardCritic(nn.Module):
         self.num_actions = num_actions
         self.output_dim = output_dim
 
+        # Optional observation encoder applied before concatenating the action.
+        self.obs_encoder = build_obs_encoder(encoder_type, num_obs, encoder_kwargs)
+        encoded_obs = self.obs_encoder.output_dim if self.obs_encoder is not None else num_obs
+
         self.network = MLP(
-            input_dim=num_obs + num_actions,
+            input_dim=encoded_obs + num_actions,
             output_dim=output_dim,
             hidden_dims=hidden_dims,
             activation=activation,
@@ -48,6 +55,8 @@ class StandardCritic(nn.Module):
         )
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor | None = None) -> torch.Tensor:
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
         if self.num_actions == 0:
             return self.network(obs)
         return self.network(torch.cat([obs, actions], dim=-1))
@@ -278,6 +287,107 @@ class CategoricalCostCritic(HLGaussCostCritic):
         return probs
 
 
+class ReferenceREPPOCritic(nn.Module):
+    """Critic mirroring the reference REPPO ``Critic`` (TruDi ``networks/torch_models.py``).
+
+    Structural differences from :class:`DistributionalCritic` that this class exists
+    to reproduce exactly:
+
+    * **Encoder / head split.** A shared ``feature_module`` (``encoder_layers`` deep)
+      feeds *two* independent heads: ``critic_module`` -> ``num_atoms`` logits and
+      ``pred_module`` -> features (the self-predictive aux head). The aux loss
+      therefore shapes the shared encoder, which sits ``head_layers`` below the
+      logits — not the layer that directly produces the value, which is what a
+      single-trunk critic gives you.
+    * **Additive learnable zero prior.** ``logits = head(f) + prior_scale * zero_dist``
+      with ``zero_dist`` a trainable parameter initialised to ``hl_gauss(0)``, so
+      E[Q] starts at ~0. (Our ``zero_init_prior`` bias-init exists because this
+      additive form cannot be overcome by SimbaV2's deliberately O(1) HyperPredictor
+      logits; with an ordinary MLP head the reference form is the faithful one.)
+    * **Pre-head activation** on both heads (reference ``input_activation=True``)
+      and RMSNorm rather than LayerNorm.
+
+    Exposes the same surface the REPPO algorithm consumes: ``forward`` -> logits,
+    ``get_dist``, ``get_value``, ``features``, ``predict_features``, and the
+    ``v_min`` / ``v_max`` / ``num_atoms`` attributes used for the HL-Gauss targets.
+    """
+
+    q_support: torch.Tensor
+
+    def __init__(
+        self,
+        num_obs: int,
+        num_actions: int,
+        num_atoms: int = 151,
+        v_min: float = -10.0,
+        v_max: float = 50.0,
+        hidden_dim: int = 512,
+        encoder_layers: int = 2,
+        head_layers: int = 2,
+        pred_layers: int = 2,
+        activation: str = "swish",
+        norm: str = "rmsnorm",
+        prior_scale: float = 40.9,
+        **kwargs: Any,
+    ) -> None:
+        if kwargs:
+            print(
+                "ReferenceREPPOCritic.__init__ got unexpected arguments, which will be ignored: "
+                + str([key for key in kwargs])
+            )
+        super().__init__()
+
+        self.num_obs = num_obs
+        self.num_actions = num_actions
+        self.num_atoms = num_atoms
+        self.v_min = v_min
+        self.v_max = v_max
+        self.hidden_dim = hidden_dim
+        self.prior_scale = float(prior_scale)
+        self.register_buffer("q_support", torch.linspace(v_min, v_max, num_atoms))
+
+        act = resolve_nn_activation(activation)
+
+        # Reference FCNN(layers=N) == N Linear layers: the first N-1 are normed +
+        # activated, the last is bare. MLP(hidden_dims=[h]*(N-1)) is that shape.
+        def fcnn(in_dim: int, out_dim: int, layers: int) -> MLP:
+            return MLP(
+                input_dim=in_dim,
+                output_dim=out_dim,
+                hidden_dims=[hidden_dim] * max(layers - 1, 1),
+                activation=activation,
+                norm=norm,
+            )
+
+        self.feature_module = fcnn(num_obs + num_actions, hidden_dim, encoder_layers)
+        # input_activation=True on both heads (reference)
+        self.critic_module = nn.Sequential(act, fcnn(hidden_dim, num_atoms, head_layers))
+        self.pred_module = nn.Sequential(act, fcnn(hidden_dim, hidden_dim, pred_layers))
+
+        # Learnable zero prior: softmax(logits) starts at hl_gauss(0) => E[Q] ~ 0.
+        delta_z = (v_max - v_min) / (num_atoms - 1)
+        sigma_sqrt2 = 0.75 * delta_z * math.sqrt(2.0)
+        edges = torch.linspace(v_min - delta_z / 2.0, v_max + delta_z / 2.0, num_atoms + 1)
+        cdf = torch.erf(edges / sigma_sqrt2)
+        probs = (cdf[1:] - cdf[:-1]) / (cdf[-1] - cdf[0]).clamp_min(1e-8)
+        self.zero_dist = nn.Parameter(probs)
+
+    def features(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        return self.feature_module(torch.cat([obs, actions], dim=-1))
+
+    def predict_features(self, features: torch.Tensor) -> torch.Tensor:
+        return self.pred_module(features)
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        return self.critic_module(self.features(obs, actions)) + self.prior_scale * self.zero_dist
+
+    def get_dist(self, logits: torch.Tensor) -> torch.Tensor:
+        return F.softmax(logits, dim=-1)
+
+    def get_value(self, dist: torch.Tensor) -> torch.Tensor:
+        return torch.sum(dist * self.q_support, dim=-1)
+
+
 class DistributionalCritic(nn.Module):
     def __init__(
         self,
@@ -288,6 +398,13 @@ class DistributionalCritic(nn.Module):
         v_max: float,
         network_type: str = "mlp",
         network_kwargs: dict[str, Any] | None = None,
+        encoder_type: str = "none",
+        encoder_kwargs: dict[str, Any] | None = None,
+        zero_init_prior: bool = False,
+        prior_scale: float = 40.9,
+        aux_predictor: bool = False,
+        aux_predictor_hidden_dims: list[int] | None = None,
+        aux_predictor_activation: str = "elu",
         device: str = "cpu",
     ):
         super().__init__()
@@ -301,26 +418,106 @@ class DistributionalCritic(nn.Module):
         self.register_buffer("q_support", torch.linspace(v_min, v_max, num_atoms))
         self._device = device
 
+        self._zero_init_prior = zero_init_prior
+        self._fallback_prior_scale = prior_scale
+        self.zero_dist = None
+        self.prior_scale = 0.0
+
+        # Optional observation encoder applied before concatenating the action.
+        self.obs_encoder = build_obs_encoder(encoder_type, num_obs, encoder_kwargs)
+        encoded_obs = self.obs_encoder.output_dim if self.obs_encoder is not None else num_obs
+
         if network_kwargs is None:
             raise ValueError("`network_kwargs` is not allowed to be None")
         if network_type == "mlp":
             self.network = MLP(
-                input_dim=num_obs + num_actions,
+                input_dim=encoded_obs + num_actions,
                 output_dim=num_atoms,
                 **network_kwargs,
             )
         elif network_type == "simba":
             self.network = SimbaV2(
-                input_dim=num_obs + num_actions,
+                input_dim=encoded_obs + num_actions,
                 output_dim=num_atoms,
                 **network_kwargs,
             )
         else:
             raise ValueError(f"Unkown network type: {network_type}, must be 'mlp' or 'simba'")
 
+        # Zero-prior at initialization: make softmax(logits) start as the
+        # hl_gauss embedding of 0 so the initial E[Q] ~ 0 instead of the support
+        # mean (uniform init is optimistic whenever the support is asymmetric
+        # around 0). Implemented by INITIALIZING the output-layer bias to
+        # log hl_gauss(0) — the same starting point as the reference REPPO's
+        # additive `prior_scale * hl_gauss(0)` term, but fully trainable
+        # per-bin. The additive form is kept only as a fallback for networks
+        # without an output bias; it must NOT be paired with an O(1)-scaled
+        # head (SimbaV2 HyperPredictor), whose logits can never overcome a
+        # fixed +40.9 prior — that combination froze E[Q] near 0 while true
+        # returns were ~50 (observed: Ant-Flat, 2026-07-16).
+        if self._zero_init_prior:
+            delta_z = (v_max - v_min) / (num_atoms - 1)
+            sigma_sqrt2 = 0.75 * delta_z * math.sqrt(2.0)
+            edges = torch.linspace(v_min - delta_z / 2.0, v_max + delta_z / 2.0, num_atoms + 1)
+            cdf = torch.erf(edges / sigma_sqrt2)
+            probs = cdf[1:] - cdf[:-1]
+            probs = probs / (cdf[-1] - cdf[0]).clamp_min(1e-8)
+            out_bias = None
+            for name, param in self.network.named_parameters():
+                if name.endswith("bias") and param.shape == (num_atoms,):
+                    out_bias = param  # last match = output layer
+            if out_bias is not None:
+                with torch.no_grad():
+                    out_bias.copy_(torch.log(probs.clamp_min(1e-8)))
+            else:
+                self.zero_dist = nn.Parameter(probs)
+                self.prior_scale = self._fallback_prior_scale
+
+        # Self-predictive auxiliary head (reference REPPO critic `pred_module`):
+        # predicts sg[features(s', a')] FROM features(s, a). The predictor is what
+        # makes this a prediction objective — regressing the trunk features directly
+        # onto the next-state features (what we did before) instead pulls the critic's
+        # own representation toward its next-state value, smoothing dQ/da.
+        self.aux_predictor: nn.Module | None = None
+        if aux_predictor:
+            if not hasattr(self.network, "get_features"):
+                raise ValueError(
+                    "aux_predictor requires a network exposing get_features (network_type: simba)"
+                )
+            feature_dim = self.network.hidden_dim
+            hidden_dims = aux_predictor_hidden_dims if aux_predictor_hidden_dims is not None else [feature_dim]
+            self.aux_predictor = MLP(
+                input_dim=feature_dim,
+                output_dim=feature_dim,
+                hidden_dims=hidden_dims,
+                activation=aux_predictor_activation,
+            )
+
+    def _encode(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
+        return torch.cat([obs, actions], dim=-1)
+
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([obs, actions], dim=-1)
-        return self.network(x)
+        logits = self.network(self._encode(obs, actions))
+        if self.zero_dist is not None:
+            logits = logits + self.prior_scale * self.zero_dist
+        return logits
+
+    def features(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Trunk features of (obs, actions) — the aux loss's prediction target."""
+        net = self.network
+        if not hasattr(net, "get_features"):
+            raise RuntimeError(
+                "features() requires a network with get_features (network_type: simba)"
+            )
+        return net.get_features(self._encode(obs, actions))
+
+    def predict_features(self, features: torch.Tensor) -> torch.Tensor:
+        """Map trunk features through the self-predictive head (identity if absent)."""
+        if self.aux_predictor is None:
+            return features
+        return self.aux_predictor(features)
 
     def get_dist(self, logits: torch.Tensor) -> torch.Tensor:
         return F.softmax(logits, dim=-1)

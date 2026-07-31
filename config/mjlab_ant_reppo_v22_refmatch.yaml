@@ -1,0 +1,112 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO v22 — REFERENCE-MATCHED. Every remaining deviation from the authors'
+# own code (safe_rl/trudi (1).zip, config/reppo.yaml + networks/torch_models.py)
+# is set to their value. See codex/reppo-vs-trudi-reference.md.
+#
+# Why: seeds 1-2 of the A/B put the authors' trainer at ~32.8 deterministic
+# return on this exact task/budget/support while v21 (our port + the three
+# fidelity fixes) peaked ~20 and decayed to ~3. The three fixes were necessary
+# but not sufficient, so the cause is in the deliberate-deviation list. Rather
+# than guess which one, converge on the reference first and re-introduce our
+# extras one at a time.
+#
+# v21 diagnostics that survive and shaped this config: critic healthy
+# (q_bias -0.3, clip 0.2%, q ~= returns), entropy exactly at target, KL well
+# inside the bound with alpha_kl parked on its floor -- but action std creeps
+# 0.60 -> 0.76 and never anneals. That is the tanh-saturation mode: the entropy
+# target met by widening, which zeroes d(tanh)/dx and starves the pathwise
+# gradient. The suspects below are ordered by how directly they act on it.
+#
+# Changes vs v21 (each = reference value):
+#   1. num_critics 2 -> 1, actor_q_reduction min -> q1  (reference: ONE critic;
+#      twin-min also doubled the effective critic gradient via summed CE)
+#   2. log_std_squash sigmoid -> clamp with a wide range, min_std 0.1 -> 0.0
+#      (reference: std = exp(log_std), unbounded, no floor)
+#   3. network_type simba -> mlp with layer_norm (reference: plain normed MLP,
+#      swish, actor 3 layers @512, critic 2+2 @512) -- NOT SimbaV2
+#   4. optimizer adamw(wd 1e-3, betas .9/.95) -> plain adam, no wd, default betas
+#   5. learning_rate 1e-3 -> 3e-4; alpha_lr -> 3e-4 (reference shares ONE lr and
+#      ONE optimizer for actor + both duals)
+#   6. desired_kl 0.2 -> 0.1; kl_clip_mode full -> clipped (reference default)
+#   7. alpha_kl_min 0.1 -> 0.0 (reference has no floor); init_alpha_kl -> 0.01
+#      (= their kl_start); init_alpha_temp 0.001 -> 1.0 (= their ent_start)
+#   8. num_atoms 251 -> 151 (their num_bins) over the same [-10, 50] support
+# Kept from v21: the three fidelity fixes (they are bug fixes, not deviations),
+# reward_scale 10 + support [-10,50] (mjlab scale calibration -- the reference's
+# own [0,150]/0.1 numbers are brax-specific and produce stand-still here).
+# Budget identical to the reference run: 1024 x 128 x 381 = 50M steps.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL constraint
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  # -- learned dual variables
+  init_alpha_temp: 1.0            # reference ent_start
+  init_alpha_kl: 0.01             # reference kl_start
+  alpha_kl_min: 0.0               # reference has no floor
+  target_entropy: -0.5            # = reference ent_target_mult 0.5
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  use_target_networks: false
+  actor_q_reduction: q1           # single critic
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # mjlab dt-scaled rewards (see header)
+  tau: 0.005                      # unused while use_target_networks is false
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: distributional
+  num_critics: 1                  # reference: ONE critic
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.0                    # reference actor_min_std
+  squash: tanh
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims: [512, 512]       # reference: 3 layers @ 512 incl. output
+    activation: swish
+    layer_norm: true              # reference uses RMSNorm; LayerNorm is our nearest
+    log_std_squash: clamp         # reference: plain exp(log_std), unbounded
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 151                # reference num_bins
+    v_min: -10.0
+    v_max: 50.0
+    zero_init_prior: true         # reference: logits + 40.9 * hl_gauss(0)
+    aux_predictor: true           # reference pred_module
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [512, 512]
+      activation: swish
+      layer_norm: true
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 381             # 1024 envs x 128 steps x 381 = 50M steps
+  empirical_normalization: false
+  save_interval: 250
+  experiment_name: mjlab_ant_reppo_v22_refmatch
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

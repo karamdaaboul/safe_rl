@@ -34,6 +34,7 @@ class MLP(nn.Sequential):
         activation: str = "elu",
         last_activation: str | None = None,
         layer_norm: bool = False,
+        norm: str | None = None,
     ) -> None:
         """Initialize the MLP.
 
@@ -54,17 +55,32 @@ class MLP(nn.Sequential):
         # Resolve number of hidden dims if they are -1
         hidden_dims_processed = [input_dim if dim == -1 else dim for dim in hidden_dims]
 
+        # Normalization on hidden layers. `norm` selects the flavour; `layer_norm=True`
+        # keeps meaning LayerNorm for back-compat. The reference REPPO networks use
+        # RMSNorm, so "rmsnorm" is what a reference-matched config asks for.
+        if norm is None:
+            norm = "layernorm" if layer_norm else "none"
+        if norm not in ("none", "layernorm", "rmsnorm"):
+            raise ValueError(f"norm must be 'none', 'layernorm' or 'rmsnorm'; got {norm!r}")
+
+        def norm_layer(dim: int) -> nn.Module | None:
+            if norm == "layernorm":
+                return nn.LayerNorm(dim)
+            if norm == "rmsnorm":
+                return nn.RMSNorm(dim)
+            return None
+
         # Create layers sequentially
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dims_processed[0]))
-        if layer_norm:
-            layers.append(nn.LayerNorm(hidden_dims_processed[0]))
+        if (n := norm_layer(hidden_dims_processed[0])) is not None:
+            layers.append(n)
         layers.append(activation_mod)
 
         for layer_index in range(len(hidden_dims_processed) - 1):
             layers.append(nn.Linear(hidden_dims_processed[layer_index], hidden_dims_processed[layer_index + 1]))
-            if layer_norm:
-                layers.append(nn.LayerNorm(hidden_dims_processed[layer_index + 1]))
+            if (n := norm_layer(hidden_dims_processed[layer_index + 1])) is not None:
+                layers.append(n)
             layers.append(activation_mod)
 
         # Add last layer
@@ -101,5 +117,23 @@ class MLP(nn.Sequential):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass of the MLP."""
         for layer in self:
+            x = layer(x)
+        return x
+
+    @property
+    def hidden_dim(self) -> int:
+        """Width of the last hidden layer — the size ``get_features`` returns."""
+        return [m for m in self if isinstance(m, nn.Linear)][-1].in_features
+
+    def get_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Activations feeding the output layer.
+
+        Mirrors ``SimbaV2.get_features`` so an MLP trunk can also serve REPPO's
+        self-predictive auxiliary loss (the reference REPPO critic is a plain
+        normed MLP, not a SimBa network).
+        """
+        modules = list(self)
+        last_linear = max(i for i, m in enumerate(modules) if isinstance(m, nn.Linear))
+        for layer in modules[:last_linear]:
             x = layer(x)
         return x

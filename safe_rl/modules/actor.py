@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
-from safe_rl.networks import MLP, SimbaV2
+from safe_rl.networks import MLP, SimbaV2, build_obs_encoder
 from safe_rl.utils import resolve_nn_activation
 
 
@@ -66,6 +66,8 @@ class DeterministicActor(nn.Module):
         layer_norm: bool = False,
         network_type: str = "mlp",
         network_kwargs: dict[str, Any] | None = None,
+        encoder_type: str = "none",
+        encoder_kwargs: dict[str, Any] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -82,8 +84,13 @@ class DeterministicActor(nn.Module):
         self.noise_std_max = float(noise_std_max)
         self.has_exploration_noise = self.noise_std_max > 0.0
 
+        # Optional observation encoder (e.g. attention over a terrain height-scan)
+        # applied before the trunk; None (default) leaves the obs untouched.
+        self.obs_encoder = build_obs_encoder(encoder_type, num_obs, encoder_kwargs)
+        trunk_num_obs = self.obs_encoder.output_dim if self.obs_encoder is not None else num_obs
+
         self.network = _build_actor_network(
-            num_obs=num_obs,
+            num_obs=trunk_num_obs,
             num_actions=num_actions,
             network_type=network_type,
             hidden_dims=hidden_dims,
@@ -97,6 +104,8 @@ class DeterministicActor(nn.Module):
         self.register_buffer("noise_scales", init_scales)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
         return torch.tanh(self.network(obs))
 
     def act(self, obs: torch.Tensor) -> torch.Tensor:
@@ -207,8 +216,13 @@ class StochasticActor(nn.Module):
         head_init: str = "default",
         init_noise_std: float = 1.0,
         log_std_squash: str = "clamp",
+        norm_type: str = "layernorm",
         action_low: list[float] | None = None,
         action_high: list[float] | None = None,
+        network_type: str = "mlp",
+        network_kwargs: dict[str, Any] | None = None,
+        encoder_type: str = "none",
+        encoder_kwargs: dict[str, Any] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -219,32 +233,69 @@ class StochasticActor(nn.Module):
         super().__init__()
 
         self.num_obs = num_obs
+        self.num_actions = num_actions
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
         self.log_std_squash = log_std_squash
+        self.network_type = network_type
 
-        activation_fn = resolve_nn_activation(activation)
+        # Optional observation encoder applied before the trunk (None = untouched).
+        self.obs_encoder = build_obs_encoder(encoder_type, num_obs, encoder_kwargs)
+        trunk_num_obs = self.obs_encoder.output_dim if self.obs_encoder is not None else num_obs
 
-        # Backbone — inline rather than MLP: every hidden Linear needs a
-        # [LayerNorm]+activation, including the final one feeding the heads.
-        # MLP's last Linear skips LayerNorm, so it doesn't fit this shape.
-        layers: list[nn.Module] = []
-        input_dim = num_obs
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(input_dim, hidden_dim))
-            if use_layer_norm:
-                layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(activation_fn)
-            input_dim = hidden_dim
-        self.backbone = nn.Sequential(*layers)
+        if network_type == "simba":
+            # Reference-REPPO-style single trunk emitting [mean, log_std] jointly
+            # (torch reference Actor: one FCNN -> split), with the faithful SimbaV2
+            # hyperspherical network as the trunk. Head-init options don't apply:
+            # the HyperPredictor bias starts at 0, giving log_std ~ 0 (std ~ 1;
+            # sigmoid mode: sigma ~ 0.5). For sigmoid mode with a non-default
+            # init_noise_std, seed the std half of the predictor bias with
+            # logit(init_noise_std) (author's ActorQ init).
+            self.network = _build_actor_network(
+                trunk_num_obs, 2 * num_actions, "simba", hidden_dims, activation, use_layer_norm, network_kwargs
+            )
+            if log_std_squash == "sigmoid" and init_noise_std != 1.0:
+                p = max(min(float(init_noise_std), 1.0 - 1e-4), 1e-4)
+                bias = getattr(getattr(self.network, "predictor", None), "bias", None)
+                if bias is not None and bias.shape == (2 * num_actions,):
+                    with torch.no_grad():
+                        bias[num_actions:] = math.log(p / (1.0 - p))
+            self.backbone = None
+            self.mean_head = None
+            self.log_std_head = None
+        else:
+            self.network = None
+            activation_fn = resolve_nn_activation(activation)
 
-        # Output heads
-        self.mean_head = nn.Linear(input_dim, num_actions)
-        self.log_std_head = nn.Linear(input_dim, num_actions)
+            # Backbone — inline rather than MLP: every hidden Linear needs a
+            # [LayerNorm]+activation, including the final one feeding the heads.
+            # MLP's last Linear skips LayerNorm, so it doesn't fit this shape.
+            # norm_type selects the flavour when use_layer_norm is on; the reference
+            # REPPO actor uses RMSNorm.
+            if norm_type not in ("layernorm", "rmsnorm"):
+                raise ValueError(f"norm_type must be 'layernorm' or 'rmsnorm'; got {norm_type!r}")
+            norm_cls = nn.LayerNorm if norm_type == "layernorm" else nn.RMSNorm
+
+            layers: list[nn.Module] = []
+            input_dim = trunk_num_obs
+            for hidden_dim in hidden_dims:
+                layers.append(nn.Linear(input_dim, hidden_dim))
+                if use_layer_norm:
+                    layers.append(norm_cls(hidden_dim))
+                layers.append(activation_fn)
+                input_dim = hidden_dim
+            self.backbone = nn.Sequential(*layers)
+
+            # Output heads
+            self.mean_head = nn.Linear(input_dim, num_actions)
+            self.log_std_head = nn.Linear(input_dim, num_actions)
 
         # Back-compat: zero_init_heads=True is equivalent to head_init="zero".
         if zero_init_heads and head_init == "default":
             head_init = "zero"
+        if network_type == "simba" and head_init != "default":
+            print(f"StochasticActor: head_init='{head_init}' ignored for network_type='simba'.")
+            head_init = "default"
 
         if head_init == "zero":
             nn.init.constant_(self.mean_head.weight, 0.0)
@@ -284,12 +335,24 @@ class StochasticActor(nn.Module):
         self.register_buffer("neg_log_action_scale", -action_c.clamp_min(1e-8).log().sum())
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        features = self.backbone(obs)
-        mean = self.mean_head(features)
-        log_std = self.log_std_head(features)
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
+        if self.network_type == "simba":
+            out = self.network(obs)
+            mean, log_std = torch.split(out, out.shape[-1] // 2, dim=-1)
+        else:
+            features = self.backbone(obs)
+            mean = self.mean_head(features)
+            log_std = self.log_std_head(features)
         if self.log_std_squash == "tanh":
             log_std = torch.tanh(log_std)
             log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1.0)
+        elif self.log_std_squash == "sigmoid":
+            # Author's robot-port ActorQ: std = sigmoid(x) + 1e-4, i.e. sigma
+            # smoothly bounded in (0, 1) — prevents noise-driven tanh saturation
+            # without a hard clamp's dead gradients. Returned in log-space so
+            # downstream `log_std.exp()` reconstructs sigma exactly.
+            log_std = torch.log(torch.sigmoid(log_std) + 1e-4)
         else:
             log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         return mean, log_std
@@ -334,12 +397,15 @@ class _OnnxDeterministicActor(nn.Module):
         super().__init__()
         self.pre_normalizer = deepcopy(pre_normalizer) if pre_normalizer is not None else nn.Identity()
         self.actor_normalizer = deepcopy(actor_normalizer) if actor_normalizer is not None else nn.Identity()
+        self.obs_encoder = deepcopy(actor.obs_encoder) if actor.obs_encoder is not None else None
         self.network = deepcopy(actor.network)
         self.input_size = actor.num_obs
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         obs = self.pre_normalizer(obs)
         obs = self.actor_normalizer(obs)
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
         return torch.tanh(self.network(obs))
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:
@@ -361,6 +427,7 @@ class _OnnxStochasticActor(nn.Module):
         super().__init__()
         self.pre_normalizer = deepcopy(pre_normalizer) if pre_normalizer is not None else nn.Identity()
         self.actor_normalizer = deepcopy(actor_normalizer) if actor_normalizer is not None else nn.Identity()
+        self.obs_encoder = deepcopy(actor.obs_encoder) if actor.obs_encoder is not None else None
         self.backbone = deepcopy(actor.backbone)
         self.mean_head = deepcopy(actor.mean_head)
         self.input_size = actor.num_obs
@@ -370,6 +437,8 @@ class _OnnxStochasticActor(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         obs = self.pre_normalizer(obs)
         obs = self.actor_normalizer(obs)
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
         return self.action_b + self.action_c * torch.tanh(self.mean_head(self.backbone(obs)))
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:

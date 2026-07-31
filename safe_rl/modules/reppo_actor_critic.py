@@ -5,10 +5,10 @@ from typing import Any, NoReturn
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+from torch.distributions import Normal, TanhTransform, TransformedDistribution
 
 from safe_rl.modules.actor import GaussianActor, StochasticActor
-from safe_rl.modules.critic import DistributionalCritic, StandardCritic
+from safe_rl.modules.critic import DistributionalCritic, ReferenceREPPOCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
 
 
@@ -38,6 +38,8 @@ class REPPOActorCritic(nn.Module):
         num_critics: int = 2,
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
+        min_std: float = 0.0,
+        squash: str = "none",
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
@@ -57,6 +59,18 @@ class REPPOActorCritic(nn.Module):
         self.actor_type = actor_type
         self.critic_type = critic_type
         self.num_critics = num_critics
+        # Additive std floor (reference REPPO: std = exp(log_std) + min_std) —
+        # keeps a minimum of exploration and bounds the entropy from below.
+        self.min_std = float(min_std)
+        # Action-distribution squashing (reference REPPO actor): "tanh" wraps the
+        # base Normal in a TanhTransform so actions live in (-1, 1). Crucially,
+        # squashing makes sigma-inflation self-limiting — beyond sigma ~ 1 the
+        # squashed action distribution barely changes — which is what lets the
+        # reference use an UNBOUNDED exp(log_std) and the hard KL gate without
+        # sigma ratcheting to a ceiling (observed failure of raw Gaussians here).
+        if squash not in ("none", "tanh"):
+            raise ValueError(f"squash must be 'none' or 'tanh'; got {squash!r}")
+        self.squash = squash
 
         # Actor
         if actor_type == "gaussian":
@@ -94,8 +108,19 @@ class REPPOActorCritic(nn.Module):
                 DistributionalCritic(num_obs=num_critic_obs, num_actions=num_actions, **critic_kwargs)
                 for _ in range(num_critics)
             )
+        elif critic_type == "reference":
+            # Encoder/head-split critic matching the reference REPPO exactly — the
+            # aux prediction head hangs off the shared encoder, not off the layer
+            # that feeds the logits. See ReferenceREPPOCritic's docstring.
+            self.is_distributional_critic = True
+            self.critics = nn.ModuleList(
+                ReferenceREPPOCritic(num_obs=num_critic_obs, num_actions=num_actions, **critic_kwargs)
+                for _ in range(num_critics)
+            )
         else:
-            raise ValueError(f"Unknown critic_type: {critic_type}. Must be 'standard' or 'distributional'.")
+            raise ValueError(
+                f"Unknown critic_type: {critic_type}. Must be 'standard', 'distributional' or 'reference'."
+            )
 
         print(f"REPPO Critic: {self.critics[0]}")
 
@@ -160,58 +185,103 @@ class REPPOActorCritic(nn.Module):
         else:
             mean, log_std = actor.forward(obs)
             std = log_std.exp()
+        if self.min_std > 0.0:
+            std = std + self.min_std
         return Normal(mean, std)
 
-    def act(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
-        obs = self.actor_obs_normalizer(obs)
+    @staticmethod
+    def squashed(base: Normal) -> TransformedDistribution:
+        """Wrap a base Normal in a tanh transform (reference REPPO actor)."""
+        return TransformedDistribution(base, [TanhTransform(cache_size=1)])
+
+    @staticmethod
+    def _clamp_squashed(actions: torch.Tensor) -> torch.Tensor:
+        # Reference clips before log_prob so atanh stays finite:
+        # pi.log_prob(actions.clip(-1 + 1e-6, 1 - 1e-6))
+        return actions.clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+
+    def act(self, obs: torch.Tensor, deterministic: bool = False, normalized: bool = False) -> torch.Tensor:
+        # `normalized=True`: obs has already been through `actor_obs_normalizer` by the
+        # caller. REPPO uses this to normalize ONCE at collection and store the result,
+        # so that KL(pi_old || pi_new) at update time is measured on identical inputs
+        # (the reference stores normalized obs in its rollout buffer). Re-normalizing at
+        # update time with statistics that moved during the rollout manufactures KL out
+        # of input drift.
+        if not normalized:
+            obs = self.actor_obs_normalizer(obs)
         dist = self._build_distribution(obs, target=False)
-        self._distribution = dist
+        self._distribution = dist  # base Normal — (mu, sigma) storage reads this
         if deterministic:
-            self._last_action = dist.mean
+            action = dist.mean
         else:
-            self._last_action = dist.sample()
+            action = dist.sample()
+        if self.squash == "tanh":
+            action = torch.tanh(action)
+        self._last_action = action
         return self._last_action
 
     def act_inference(self, obs: torch.Tensor) -> torch.Tensor:
         obs = self.actor_obs_normalizer(obs)
         dist = self._build_distribution(obs, target=False)
+        if self.squash == "tanh":
+            return torch.tanh(dist.mean)
         return dist.mean
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         if self._distribution is None:
             raise RuntimeError("get_actions_log_prob called before act()")
+        if self.squash == "tanh":
+            td = self.squashed(self._distribution)
+            return td.log_prob(self._clamp_squashed(actions)).sum(dim=-1)
         return self._distribution.log_prob(actions).sum(dim=-1)
 
     def sample_with_log_prob(
-        self, obs: torch.Tensor
+        self, obs: torch.Tensor, normalized: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Reparameterized sample with gradient → (action, log_prob, mean, std)."""
-        obs = self.actor_obs_normalizer(obs)
+        """Reparameterized sample with gradient → (action, log_prob, base mean, base std)."""
+        if not normalized:
+            obs = self.actor_obs_normalizer(obs)
         dist = self._build_distribution(obs, target=False)
-        action = dist.rsample()
-        log_prob = dist.log_prob(action).sum(dim=-1)
+        if self.squash == "tanh":
+            td = self.squashed(dist)
+            action = td.rsample()
+            log_prob = td.log_prob(self._clamp_squashed(action)).sum(dim=-1)
+        else:
+            action = dist.rsample()
+            log_prob = dist.log_prob(action).sum(dim=-1)
         return action, log_prob, dist.mean, dist.scale
 
-    def target_sample_with_log_prob(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def target_sample_with_log_prob(
+        self, obs: torch.Tensor, normalized: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """No-grad sample from the frozen target actor → (action, log_prob)."""
         with torch.no_grad():
-            obs = self.actor_obs_normalizer(obs)
+            if not normalized:
+                obs = self.actor_obs_normalizer(obs)
             dist = self._build_distribution(obs, target=True)
-            action = dist.sample()
-            log_prob = dist.log_prob(action).sum(dim=-1)
+            if self.squash == "tanh":
+                td = self.squashed(dist)
+                action = td.sample()
+                log_prob = td.log_prob(self._clamp_squashed(action)).sum(dim=-1)
+            else:
+                action = dist.sample()
+                log_prob = dist.log_prob(action).sum(dim=-1)
         return action, log_prob
 
-    def current_distribution_params(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        obs = self.actor_obs_normalizer(obs)
+    def current_distribution_params(
+        self, obs: torch.Tensor, normalized: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not normalized:
+            obs = self.actor_obs_normalizer(obs)
         dist = self._build_distribution(obs, target=False)
         return dist.mean, dist.scale
 
     # ---------------- Q evaluation ----------------
 
     def evaluate_q(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor
+        self, critic_obs: torch.Tensor, actions: torch.Tensor, normalized: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        obs = self.critic_obs_normalizer(critic_obs)
+        obs = critic_obs if normalized else self.critic_obs_normalizer(critic_obs)
         if self.is_distributional_critic:
             logits_1 = self.critic_1(obs, actions)
             logits_2 = self.critic_2(obs, actions)
@@ -225,9 +295,9 @@ class REPPOActorCritic(nn.Module):
         return q1, q2
 
     def evaluate_q_target(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor
+        self, critic_obs: torch.Tensor, actions: torch.Tensor, normalized: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        obs = self.critic_obs_normalizer(critic_obs)
+        obs = critic_obs if normalized else self.critic_obs_normalizer(critic_obs)
         if self.is_distributional_critic:
             logits_1 = self.critic_1_target(obs, actions)
             logits_2 = self.critic_2_target(obs, actions)
@@ -241,12 +311,38 @@ class REPPOActorCritic(nn.Module):
         return q1, q2
 
     def evaluate_q_dist(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor
+        self, critic_obs: torch.Tensor, actions: torch.Tensor, normalized: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.is_distributional_critic:
             raise RuntimeError("evaluate_q_dist only available for distributional critics")
-        obs = self.critic_obs_normalizer(critic_obs)
+        obs = critic_obs if normalized else self.critic_obs_normalizer(critic_obs)
         return self.critic_1(obs, actions), self.critic_2(obs, actions)
+
+    def evaluate_q_features(
+        self,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        normalized: bool = False,
+        predict: bool = False,
+    ) -> torch.Tensor:
+        """Trunk features of critic_1 for the self-predictive aux loss.
+
+        Requires a critic network exposing ``get_features`` (network_type: simba).
+        Mirrors the reference REPPO critic, whose encoder features feed both the
+        value head and a next-feature prediction head. ``predict=True`` routes the
+        features through that prediction head (reference ``pred_module``) — the
+        online side of the aux loss; targets are taken with ``predict=False``.
+        """
+        if not hasattr(self.critic_1, "features"):
+            raise RuntimeError(
+                "aux embedding loss requires a distributional critic with a feature trunk "
+                "(critic_type: distributional, network_type: simba)"
+            )
+        obs = critic_obs if normalized else self.critic_obs_normalizer(critic_obs)
+        features = self.critic_1.features(obs, actions)
+        if predict:
+            features = self.critic_1.predict_features(features)
+        return features
 
     # ---------------- Polyak updates ----------------
 
