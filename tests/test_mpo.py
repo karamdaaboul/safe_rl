@@ -106,3 +106,162 @@ def test_mpo_update_moves_actor_params() -> None:
     alg.update()
     after = list(alg.policy.actor.parameters())
     assert any(not torch.allclose(b, a) for b, a in zip(before, after))
+
+
+def test_mpo_dual_optimum_satisfies_kkt_on_eta() -> None:
+    # dg/deta = eps - KL(q*||pi_old) exactly, so at the SLSQP optimum the actualized
+    # non-parametric KL must equal the E-step trust region eps_dual.
+    import numpy as np
+
+    from safe_rl.algorithms.mpo import nonparametric_kl_from_weights
+
+    alg = _make_mpo(dual_constraint=0.1)
+    rng = np.random.default_rng(0)
+    q_np = rng.normal(size=(64, 128))
+    eta = alg._solve_eta(q_np)
+
+    weights = torch.softmax(torch.from_numpy(q_np) / eta, dim=0)
+    kl_q = nonparametric_kl_from_weights(weights).mean().item()
+    assert abs(kl_q - alg.eps_dual) < 0.02, f"KKT residual too large: kl_q={kl_q}, eps={alg.eps_dual}"
+
+
+def test_mpo_ess_bounds() -> None:
+    from safe_rl.algorithms.mpo import effective_sample_size
+
+    n, b = 16, 4
+    # Uniform weights (the E-step did nothing) -> ESS is the full sample count.
+    uniform = torch.full((n, b), 1.0 / n)
+    assert torch.allclose(effective_sample_size(uniform), torch.full((b,), float(n)), atol=1e-4)
+
+    # All mass on one action per state -> ESS collapses to 1.
+    collapsed = torch.zeros(n, b)
+    collapsed[0] = 1.0
+    assert torch.allclose(effective_sample_size(collapsed), torch.ones(b), atol=1e-4)
+
+
+def test_mpo_per_dim_constraining_matches_scalar_for_one_action_dim() -> None:
+    # With a single action dimension, summing the per-dim KLs is a no-op, so the two
+    # trust-region modes must produce identical updates.
+    from copy import deepcopy
+
+    from safe_rl.algorithms import MPO
+
+    torch.manual_seed(0)
+    policy = _make_policy(num_actions=1)
+    common = dict(batch_size=8, num_updates_per_step=1, sample_action_num=16, mstep_iteration_num=3, device="cpu")
+    alg_scalar = MPO(deepcopy(policy), per_dim_constraining=False, **common)
+    alg_per_dim = MPO(deepcopy(policy), per_dim_constraining=True, **common)
+
+    obs = torch.randn(8, NUM_OBS)
+    torch.manual_seed(1)
+    alg_scalar._update_actor_and_alpha(obs)
+    torch.manual_seed(1)
+    alg_per_dim._update_actor_and_alpha(obs)
+
+    assert alg_scalar.alpha_mean.shape == (1,)
+    assert alg_per_dim.alpha_mean.shape == (1,)
+    for key in ("kl_mean", "kl_var", "alpha_mean", "alpha_var"):
+        assert alg_scalar._last_actor_info[key] == pytest.approx(alg_per_dim._last_actor_info[key], rel=1e-5)
+    for p, q in zip(alg_scalar.policy.actor.parameters(), alg_per_dim.policy.actor.parameters()):
+        assert torch.allclose(p, q, atol=1e-6)
+
+
+def test_mpo_per_dim_constraining_allocates_one_multiplier_per_action() -> None:
+    alg = _make_mpo(per_dim_constraining=True)
+    assert alg.alpha_mean.shape == (NUM_ACT,)
+    assert alg.alpha_var.shape == (NUM_ACT,)
+    _fill_buffer(alg, n=128)
+    info = alg.update()
+    assert torch.isfinite(torch.tensor(info["actor"]))
+
+
+def test_mpo_decoupled_mstep_doubles_mle_at_the_identity_point() -> None:
+    # Before the actor moves, online == target, so both halves of Acme's split cross-entropy
+    # are the same distribution: the decoupled objective is exactly 2x the coupled one.
+    # This is the same effective-scale doubling Acme gets from summing its two weight sets.
+    from torch.distributions import Normal
+
+    torch.manual_seed(0)
+    mean = torch.randn(8, NUM_ACT)
+    std = torch.rand(8, NUM_ACT) + 0.5
+    x = Normal(mean, std).sample((16,))
+    weights = torch.softmax(torch.randn(16, 8), dim=0)
+
+    dist_mean = Normal(mean, std)  # Normal(mean, std_old) with std_old == std
+    dist_var = Normal(mean, std)  # Normal(mean_old, std) with mean_old == mean
+    coupled = (weights * Normal(mean, std).log_prob(x).sum(dim=-1)).sum(dim=0).mean()
+    decoupled = (weights * dist_mean.log_prob(x).sum(dim=-1)).sum(dim=0).mean() + (
+        weights * dist_var.log_prob(x).sum(dim=-1)
+    ).sum(dim=0).mean()
+    assert decoupled.item() == pytest.approx(2.0 * coupled.item(), rel=1e-5)
+
+
+def test_mpo_estep_options_run() -> None:
+    for kwargs in ({"estep_use_target_critic": True}, {"estep_q_reduction": "mean"}, {"decoupled_mstep": True}):
+        alg = _make_mpo(**kwargs)
+        _fill_buffer(alg, n=128)
+        info = alg.update()
+        assert torch.isfinite(torch.tensor(info["actor"])), kwargs
+
+
+def test_mpo_rejects_unknown_q_reduction() -> None:
+    with pytest.raises(ValueError, match="estep_q_reduction"):
+        _make_mpo(estep_q_reduction="median")
+
+
+def test_mpo_caps_default_high() -> None:
+    # The old defaults (0.1 / 10) pinned the multipliers and un-enforced the M-step trust
+    # region (measured on three envs). Guard the raised defaults against regression.
+    alg = _make_mpo()
+    assert alg.alpha_mean_max >= 10.0
+    assert alg.alpha_var_max >= 1000.0
+
+
+def test_mpo_hard_target_update_copies_on_period_only() -> None:
+    alg = _make_mpo(target_actor_update="hard", target_actor_period=3)
+    obs = torch.randn(32, NUM_OBS)
+    target_before = [p.detach().clone() for p in alg.actor_target.parameters()]
+
+    for step in range(1, 4):
+        alg._update_actor_and_alpha(obs)
+        changed = any(not torch.allclose(b, p) for b, p in zip(target_before, alg.actor_target.parameters()))
+        if step < 3:
+            assert not changed, f"target moved at update {step}, before the period"
+        else:
+            assert changed, "target was not copied at the period boundary"
+    # At the copy point the target must equal the online actor exactly.
+    for p, tp in zip(alg.policy.actor.parameters(), alg.actor_target.parameters()):
+        assert torch.equal(p, tp)
+
+
+def test_mpo_rejects_unknown_target_update() -> None:
+    with pytest.raises(ValueError, match="target_actor_update"):
+        _make_mpo(target_actor_update="soft")
+
+
+def test_mpo_reports_estep_diagnostics() -> None:
+    alg = _make_mpo()
+    _fill_buffer(alg, n=128)
+    alg.update()
+    info = alg.get_penalty_info()
+    for key in (
+        "kl_q",
+        "kl_q_rel",
+        "dual_residual_eta",
+        "ess",
+        "ess_min",
+        "kl_mean_rel",
+        "kl_var_rel",
+        "pi_std_min",
+        "pi_std_max",
+        "pi_std_cond",
+        "pretanh_mean_absmax",
+        "frac_saturated",
+        "solver_status",
+        "solver_iters",
+    ):
+        assert key in info, f"missing diagnostic {key}"
+        assert torch.isfinite(torch.tensor(info[key])), key
+    # ESS lives in [1, N] by construction.
+    assert 1.0 <= info["ess_min"] <= alg.sample_action_num + 1e-6
+    assert info["solver_status"] == 0.0, "SLSQP did not converge"

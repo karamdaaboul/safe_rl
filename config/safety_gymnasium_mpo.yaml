@@ -17,7 +17,7 @@ algorithm:
 
   # -- Training
   batch_size: 256
-  num_updates_per_step: 8   # gradient updates per training iteration (UTD ~0.5 at 16 envs)
+  num_updates_per_step: 2   # with num_steps_per_env: 4 -> UTD ~8 at 16 envs (~16 at 8 envs)
   max_grad_norm: 1.0
 
   # -- MPO E-step
@@ -29,8 +29,9 @@ algorithm:
   kl_var_constraint: 0.0001
   alpha_mean_scale: 1.0
   alpha_var_scale: 100.0
-  alpha_mean_max: 0.1
-  alpha_var_max: 10.0
+  # alpha_mean_max / alpha_var_max: left at the code defaults (10 / 1000). These are
+  # overflow guards; the old 0.1 / 10 values pinned the multipliers and disabled the
+  # M-step trust region (see codex/mpo-vs-acme-reference.md).
   mstep_iteration_num: 5
 
 policy:
@@ -45,7 +46,7 @@ policy:
     activation: relu
 
 runner:
-  num_steps_per_env: 1
+  num_steps_per_env: 4
   max_iterations: 100000
   max_size: 1000000
   start_random_steps: 5000
