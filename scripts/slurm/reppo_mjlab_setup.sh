@@ -21,6 +21,8 @@ module load Stages/2024 GCCcore/.12.3.0 Python/3.11.3
 VENV=/p/project1/hai_1075/venvs/mjlab311_booster
 W=/p/project1/hai_1075/wheelhouse
 export XDG_CACHE_HOME=/p/scratch/hai_1075/cache
+# Compute nodes have no `git` binary; GitPython hard-fails at import without this.
+export GIT_PYTHON_REFRESH=quiet
 
 rm -rf "$VENV"
 python -m venv "$VENV"
