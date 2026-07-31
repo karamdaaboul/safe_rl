@@ -60,17 +60,15 @@ def test_one_step_soft_q_target_counts_entropy_once():
     alg = _make_alg(policy)
     next_obs, rewards = _rollout_one_step(alg)
 
-    torch.manual_seed(123)  # make the internal target-actor sample reproducible
+    # Bootstrap quantities are computed at COLLECTION time now (reference
+    # collect_fn semantics) — verify the recursion against the collected
+    # buffers: target = (r + ent_bonus) + gamma * Q'(s', a'), with the entropy
+    # bonus entering ONCE at full weight through the reward.
+    soft_v = alg._collect_next_values[0]
+    ent_bonus = alg._collect_ent_bonus[0]
     alg.compute_returns(next_obs)
     got = alg.storage.returns[0]
-
-    alpha = alg.alpha_temp.detach().item()
-    torch.manual_seed(123)
-    with torch.no_grad():
-        a_next, logp_next = policy.target_sample_with_log_prob(next_obs)
-        q1, q2 = policy.evaluate_q_target(next_obs, a_next)
-        soft_v = torch.minimum(q1, q2).squeeze(-1) - alpha * logp_next
-    expected = rewards + alg.gamma * soft_v.unsqueeze(-1)
+    expected = rewards + ent_bonus + alg.gamma * soft_v
     torch.testing.assert_close(got, expected, rtol=1e-5, atol=1e-5)
 
 

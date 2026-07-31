@@ -121,6 +121,12 @@ class REPPO:
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
 
+        # Per-step bootstrap quantities computed during collection (reference
+        # collect_fn semantics); stacked in compute_returns, cleared in update().
+        self._collect_next_values: list[torch.Tensor] = []
+        self._collect_ent_bonus: list[torch.Tensor] = []
+        self._collect_aux_targets: list[torch.Tensor] = []
+
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.gamma = gamma
@@ -318,16 +324,45 @@ class REPPO:
                     "env wrapper."
                 )
                 self._final_obs_warned = True
-            # Normalize with the CURRENT statistics but do not update them: this same
-            # observation arrives again as `obs` on the next act() call, which is where it
-            # is counted. Stored normalized (see act()) so the bootstrap in
-            # compute_returns runs on collection-time inputs.
-            self.transition.next_observations = self._normalize(
-                self.policy.actor_obs_normalizer, next_actor_obs, update_stats=False
+            # Reference collect_fn, verbatim semantics: next_obs is normalized in
+            # TRAIN mode (stats update on next_obs too — the reference normalizer
+            # sees every observation twice per step), and ALL bootstrap
+            # quantities are computed HERE, per step, with the collection-time
+            # normalizer statistics:
+            #   a' ~ pi(s'), logp', V' = Q(s', a'), aux features(s', a'),
+            #   soft reward r - gamma * alpha * logp'.
+            # Previously these were computed once at update start with
+            # end-of-rollout statistics — equal in expectation, but a different
+            # early-training trajectory than the reference.
+            norm_next_actor = self._normalize(
+                self.policy.actor_obs_normalizer, next_actor_obs, update_stats=True
             )
-            self.transition.next_privileged_observations = self._normalize(
-                self.policy.critic_obs_normalizer, next_priv_obs, update_stats=False
+            norm_next_priv = self._normalize(
+                self.policy.critic_obs_normalizer, next_priv_obs, update_stats=True
             )
+            self.transition.next_observations = norm_next_actor
+            self.transition.next_privileged_observations = norm_next_priv
+
+            with torch.no_grad():
+                if self.use_target_networks:
+                    next_a, next_logp = self.policy.target_sample_with_log_prob(
+                        norm_next_actor, normalized=True
+                    )
+                    q1, q2 = self.policy.evaluate_q_target(norm_next_priv, next_a, normalized=True)
+                else:
+                    next_a, next_logp, _, _ = self.policy.sample_with_log_prob(
+                        norm_next_actor, normalized=True
+                    )
+                    q1, q2 = self.policy.evaluate_q(norm_next_priv, next_a, normalized=True)
+                next_v = self._q_reduce(q1, q2).view(-1, 1)
+                alpha = self.alpha_temp.detach()
+                ent_bonus = (-self.gamma * alpha * next_logp).view(-1, 1)
+                self._collect_next_values.append(next_v)
+                self._collect_ent_bonus.append(ent_bonus)
+                if self.aux_loss_mult > 0.0:
+                    self._collect_aux_targets.append(
+                        self.policy.evaluate_q_features(norm_next_priv, next_a, normalized=True)
+                    )
 
         self.transition.truncated = time_outs
 
@@ -362,44 +397,49 @@ class REPPO:
         # path touches the normalizers — no freeze/thaw dance is needed and the KL is
         # measured on exactly the inputs the collecting policy saw.
 
-        # Bootstrap value for the last step uses the runner-supplied last_critic_obs.
+        # Bootstrap quantities: preferred path uses the per-step values computed
+        # DURING collection (reference collect_fn semantics — collection-time
+        # normalizer statistics and per-step temperature). Fallback recomputes at
+        # update start for callers that do not pass next_obs through
+        # process_env_step (kept for tests / non-runner uses).
         with torch.no_grad():
-            next_priv = self.storage.next_privileged_observations  # [T, N, *]
-            B = next_priv.shape[1] * T
-            flat_next = next_priv.reshape(B, -1)
-            flat_next_actor = self.storage.next_observations.reshape(B, -1)
-            if self.use_target_networks:
-                target_a, target_logp = self.policy.target_sample_with_log_prob(
-                    flat_next_actor, normalized=True
-                )
-                q1, q2 = self.policy.evaluate_q_target(flat_next, target_a, normalized=True)
+            if len(self._collect_next_values) == T:
+                soft_v = torch.stack(self._collect_next_values)  # [T, N, 1]
+                ent_bonus = torch.stack(self._collect_ent_bonus)  # [T, N, 1]
+                if self.aux_loss_mult > 0.0 and len(self._collect_aux_targets) == T:
+                    self._aux_targets = torch.stack(self._collect_aux_targets).flatten(0, 1).detach()
+                else:
+                    self._aux_targets = None
             else:
-                # Reference REPPO: bootstrap from the ONLINE actor and critic
-                # (no target networks; value estimates track the newest params).
-                target_a, target_logp, _, _ = self.policy.sample_with_log_prob(
-                    flat_next_actor, normalized=True
-                )
-                q1, q2 = self.policy.evaluate_q(flat_next, target_a, normalized=True)
-            # Reference-exact soft-return decomposition (torchrl collect_fn):
-            # the entropy bonus enters the REWARD at full weight,
-            #   r'_t = r_t - gamma * alpha * logpi(a'_t | s'_t),
-            # and the lambda-blend uses the PLAIN Q'. Putting -alpha*logp' inside
-            # soft_v under the (1-lambda) blend instead undercounts the future
-            # entropy chain by a factor (1-lambda) (~5% weight at lambda=0.95).
-            q_next = self._q_reduce(q1, q2).squeeze(-1)  # plain Q'  [B]
-            soft_v = q_next.view(T, -1, 1)  # [T, N, 1]
-            ent_bonus = (-self.gamma * alpha * target_logp).view(T, -1, 1)  # [T, N, 1]
-
-            # Self-predictive aux targets: critic features of (s', a'), fixed for
-            # the whole update (reference computes them at collection time).
-            if self.aux_loss_mult > 0.0:
-                # Targets are RAW trunk features of (s', a') — the prediction head is
-                # applied only on the online side (reference: pred_module(f(s,a)) -> sg[f(s',a')]).
-                self._aux_targets = self.policy.evaluate_q_features(
-                    flat_next, target_a, normalized=True
-                ).detach()
-            else:
-                self._aux_targets = None
+                next_priv = self.storage.next_privileged_observations  # [T, N, *]
+                B = next_priv.shape[1] * T
+                flat_next = next_priv.reshape(B, -1)
+                flat_next_actor = self.storage.next_observations.reshape(B, -1)
+                if self.use_target_networks:
+                    target_a, target_logp = self.policy.target_sample_with_log_prob(
+                        flat_next_actor, normalized=True
+                    )
+                    q1, q2 = self.policy.evaluate_q_target(flat_next, target_a, normalized=True)
+                else:
+                    # Reference REPPO: bootstrap from the ONLINE actor and critic
+                    # (no target networks; value estimates track the newest params).
+                    target_a, target_logp, _, _ = self.policy.sample_with_log_prob(
+                        flat_next_actor, normalized=True
+                    )
+                    q1, q2 = self.policy.evaluate_q(flat_next, target_a, normalized=True)
+                # Reference-exact soft-return decomposition (torchrl collect_fn):
+                # the entropy bonus enters the REWARD at full weight,
+                #   r'_t = r_t - gamma * alpha * logpi(a'_t | s'_t),
+                # and the lambda-blend uses the PLAIN Q'.
+                q_next = self._q_reduce(q1, q2).squeeze(-1)  # plain Q'  [B]
+                soft_v = q_next.view(T, -1, 1)  # [T, N, 1]
+                ent_bonus = (-self.gamma * alpha * target_logp).view(T, -1, 1)  # [T, N, 1]
+                if self.aux_loss_mult > 0.0:
+                    self._aux_targets = self.policy.evaluate_q_features(
+                        flat_next, target_a, normalized=True
+                    ).detach()
+                else:
+                    self._aux_targets = None
 
             # mask: 1 if we should bootstrap from next state, 0 if pure termination.
             done = self.storage.dones.float()
@@ -478,6 +518,9 @@ class REPPO:
             n += 1
 
         self.storage.clear()
+        self._collect_next_values.clear()
+        self._collect_ent_bonus.clear()
+        self._collect_aux_targets.clear()
 
         return {
             "value_function": critic_loss_sum / max(n, 1),
