@@ -23,16 +23,26 @@ algorithm:
   # -- MPO E-step
   sample_action_num: 64     # candidate actions sampled per state (Acme/RL-X use 20)
   dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+  estep_use_target_critic: true    # score candidates with the target critics (Acme)
+  estep_q_reduction: mean          # twin mean, not min-pessimism (Acme)
 
   # -- MPO M-step (decoupled KL trust regions)
-  kl_mean_constraint: 0.01
-  kl_var_constraint: 0.0001
+  # Per-dimension trust regions (Acme's default): eps below is PER ACTION DIM —
+  # divide the joint budget (0.01 / 1e-4) by the env's action dim when porting.
+  per_dim_constraining: true
+  kl_mean_constraint: 0.005      # = 0.01 / 2 action dims (Point/Car robots)
+  kl_var_constraint: 0.00005     # = 1e-4 / 2 action dims
+  decoupled_mstep: true          # split weighted MLE like the KL (mean at old std)
   alpha_mean_scale: 1.0
   alpha_var_scale: 100.0
   # alpha_mean_max / alpha_var_max: left at the code defaults (10 / 1000). These are
   # overflow guards; the old 0.1 / 10 values pinned the multipliers and disabled the
   # M-step trust region (see codex/mpo-vs-acme-reference.md).
   mstep_iteration_num: 5
+  # Hard periodic target copy: same final reward as Polyak, ~2x faster takeoff
+  # (single-variable ablation on Humanoid-Flat, codex/mpo-vs-acme-reference.md).
+  target_actor_update: hard
+  target_actor_period: 100
 
 policy:
   class_name: SACActorCritic  # unconstrained — no cost critic
