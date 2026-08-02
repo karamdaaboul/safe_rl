@@ -39,10 +39,9 @@ algorithm:
   # overflow guards; the old 0.1 / 10 values pinned the multipliers and disabled the
   # M-step trust region (see codex/mpo-vs-acme-reference.md).
   mstep_iteration_num: 5
-  # Hard periodic target copy: same final reward as Polyak, ~2x faster takeoff
-  # (single-variable ablation on Humanoid-Flat, codex/mpo-vs-acme-reference.md).
-  target_actor_update: hard
-  target_actor_period: 100
+  # Target actor: plain Polyak (default). The hard periodic copy doubles early learning
+  # speed but cost final policy quality in the 3-seed paired Humanoid-Flat ablation
+  # (deterministic eval 55.1+-7.3 vs 67.0+-8.5 for Polyak, Polyak ahead on all 3 seeds).
 
 policy:
   class_name: SACActorCritic  # unconstrained — no cost critic

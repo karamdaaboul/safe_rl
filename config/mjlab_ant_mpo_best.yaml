@@ -56,8 +56,9 @@ algorithm:
   alpha_mean_max: 10.0             # (2) 100x the baseline cap
   alpha_var_max: 1000.0            # (2) 100x the baseline cap
   mstep_iteration_num: 5
-  target_actor_update: hard
-  target_actor_period: 100
+  # Target actor: plain Polyak (default). The hard periodic copy doubles early learning
+  # speed but cost final policy quality in the 3-seed paired Humanoid-Flat ablation
+  # (deterministic eval 55.1+-7.3 vs 67.0+-8.5 for Polyak, Polyak ahead on all 3 seeds).
   per_dim_constraining: true       # (1)
   decoupled_mstep: true            # (3)
 
