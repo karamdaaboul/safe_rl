@@ -43,7 +43,14 @@ REGISTRY = REPO / "experiments" / "registry.csv"
 # Frozen protocols — see reports/EVAL_PROTOCOL.md. Changing these invalidates
 # cross-version comparison.
 PROTOCOLS: dict[str, dict[str, Any]] = {
-    "E1": {"num_envs": 50, "episodes": 50, "seeds": [42, 43, 44], "one_per_env": True},
+    # E1 uses 128 envs, not the 50 first frozen in V0. Measured episode-level sd on this
+    # task is ~0.244 against a mean tracking error of ~0.52 (a 47% coefficient of
+    # variation), so 150 pooled episodes give a SEM of ~4% and two runs of the SAME
+    # checkpoint differed by 5.4% -- i.e. the protocol failed its own <5% reproducibility
+    # gate. 128 envs x 3 seeds = 384 episodes brings the SEM to ~2.4%. It costs almost no
+    # wall-clock: with one-episode-per-env the run length is set by the 1000-step episode
+    # cap, and the extra envs are parallel work on the GPU.
+    "E1": {"num_envs": 128, "episodes": 128, "seeds": [42, 43, 44], "one_per_env": True},
     "E2": {"num_envs": 1, "episodes": 1, "seeds": [3, 7, 11, 21, 33], "one_per_env": True},
 }
 

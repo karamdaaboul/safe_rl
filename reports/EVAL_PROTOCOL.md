@@ -46,11 +46,25 @@ caveat. Conversion for historical numbers: `per_step = reported × 400 / episode
 
 | setting | value |
 |---|---|
-| `--num_envs` | 50 |
-| `--episodes` | 50 |
+| `--num_envs` | 128 |
+| `--episodes` | 128 |
 | harvest rule | **exactly one episode per env** |
 | eval seeds | `{42, 43, 44}` |
-| episodes per arm per action mode | 150 |
+| episodes per arm per action mode | 384 |
+
+**Why 128 and not 50.** V0 first froze this at 50 envs (150 pooled episodes) and the
+protocol then failed its own reproducibility gate (§9): re-running one checkpoint gave
+0.5152 vs 0.4873, a 5.4% discrepancy. The cause is the metric's episode-level spread,
+measured at sd ≈ 0.244 against a mean of ≈ 0.52 — a 47% coefficient of variation,
+driven mostly by which velocity commands a given episode happens to draw. 150 episodes
+give a SEM of ~4%; 384 give ~2.4%. Reaching <2.5% would need ~350 episodes, which is
+what this setting delivers. It is nearly free: with one-episode-per-env the wall-clock
+is set by the 1000-step episode cap, and the extra envs are parallel GPU work.
+
+Note that `--seed` does **not** pin the episode set. GPU physics is not bitwise
+deterministic, so trajectories diverge within the first few steps and the drawn command
+sequences differ between runs of the same seed. The seed controls initialization, not
+the realized episodes; reproducibility therefore comes from sample size, not seeding.
 
 The one-episode-per-env rule matters. The pre-V0 evaluator ran
 `while len(ep_rewards) < episodes`, harvesting *every* env that finished on a given
