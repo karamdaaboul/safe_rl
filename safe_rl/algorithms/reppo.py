@@ -59,6 +59,9 @@ class REPPO:
         actor_q_reduction: str = "min",
         kl_clip_mode: str = "full",
         alpha_kl_min: float = 0.0,
+        dual_optim_mode: str = "separate",
+        force_last_step_truncated: bool = False,
+        critic_loss_denominator: str = "mask",
         aux_loss_mult: float = 0.0,
         reward_scale: float = 1.0,
         reward_normalization: bool = False,
@@ -111,12 +114,29 @@ class REPPO:
         opt_kwargs = {"betas": tuple(betas)}
         if opt_cls is optim.AdamW:
             opt_kwargs["weight_decay"] = weight_decay
-        self.optimizer = opt_cls(policy.actor.parameters(), lr=learning_rate, **opt_kwargs)
+        # Where the duals live. In the reference, `log_temp` / `log_lagrange` are
+        # nn.Parameters INSIDE the Actor, so they (a) ride the single actor optimizer
+        # at `lr` and (b) are covered by clip_grad_norm_(actor.parameters(), ...) —
+        # when the actor grad norm exceeds max_grad_norm the dual gradients are
+        # scaled down by the same factor. Our historical "separate" mode gives them
+        # their own optimizer at `alpha_lr` and never clips them, so the duals move
+        # on a different trajectory. Both reachable from config.
+        if dual_optim_mode not in ("separate", "actor"):
+            raise ValueError(f"dual_optim_mode must be 'separate' or 'actor'; got {dual_optim_mode!r}")
+        self.dual_optim_mode = dual_optim_mode
+
+        actor_params = list(policy.actor.parameters())
+        if self.dual_optim_mode == "actor":
+            actor_params = actor_params + [self.log_alpha_temp, self.log_alpha_kl]
+        self.optimizer = opt_cls(actor_params, lr=learning_rate, **opt_kwargs)
         critic_lr = critic_learning_rate if critic_learning_rate is not None else learning_rate
         self.critic_optimizer = opt_cls(policy.critics.parameters(), lr=critic_lr, **opt_kwargs)
-        self.alpha_optimizer = opt_cls(
-            [self.log_alpha_temp, self.log_alpha_kl], lr=alpha_lr, **opt_kwargs
-        )
+        if self.dual_optim_mode == "separate":
+            self.alpha_optimizer: optim.Optimizer | None = opt_cls(
+                [self.log_alpha_temp, self.log_alpha_kl], lr=alpha_lr, **opt_kwargs
+            )
+        else:
+            self.alpha_optimizer = None
 
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
@@ -151,6 +171,20 @@ class REPPO:
         # the time the policy reaches the bound — observed: init 0.5 -> 0.002
         # within minutes, KL then pinned at the bound for the whole run (v10/v11).
         self.alpha_kl_min = float(alpha_kl_min)
+        # Reference compute_gve does `truncated[-1] = 1.0` IN PLACE, and the same
+        # tensor is what the critic update reads. So the last rollout step both
+        # bootstraps 1-step (no lambda blend, no termination mask) and is dropped
+        # from the critic loss, for every env. We keep the real flag by default.
+        self.force_last_step_truncated = bool(force_last_step_truncated)
+        # Reference normalizes the truncation-masked critic/aux losses by the FULL
+        # batch ((mask * ce).mean()); we divide by mask.sum(). Identical when
+        # nothing is masked, ~1% apart at typical truncation rates — and the gap
+        # widens with force_last_step_truncated, which masks a further 1/T.
+        if critic_loss_denominator not in ("mask", "batch"):
+            raise ValueError(
+                f"critic_loss_denominator must be 'mask' or 'batch'; got {critic_loss_denominator!r}"
+            )
+        self.critic_loss_denominator = critic_loss_denominator
         # Self-predictive aux loss weight (reference: aux_loss_mult * MSE between
         # critic features of (s,a) and sg[features of (s',a')]).
         self.aux_loss_mult = float(aux_loss_mult)
@@ -393,6 +427,13 @@ class REPPO:
         alpha = self.alpha_temp.detach().item()
         T = self.storage.num_transitions_per_env
 
+        # Reference compute_gve mutates `truncated[-1] = 1.0` before the recursion,
+        # and the critic update reads that same buffer. Done here (in place, on the
+        # storage buffer) so both the λ recursion below and the critic's truncation
+        # mask see it, exactly as in the reference.
+        if self.force_last_step_truncated:
+            self.storage.truncated[-1] = 1.0
+
         # Observations in storage are already normalized (see act()), so nothing on this
         # path touches the normalizers — no freeze/thaw dance is needed and the KL is
         # measured on exactly the inputs the collecting policy saw.
@@ -496,6 +537,7 @@ class REPPO:
     def update(self) -> dict[str, float]:
         critic_loss_sum = 0.0
         actor_loss_sum = entropy_sum = kl_sum = q_value_sum = alpha_temp_loss_sum = alpha_kl_loss_sum = 0.0
+        actor_gn_sum = critic_gn_sum = 0.0
         n = 0
         for batch in self._minibatch_generator(self.num_mini_batches, self.num_learning_epochs):
             obs_b, critic_obs_b, actions_b, returns_b, old_mu_b, old_sigma_b, truncated_b, idx_b = batch
@@ -511,6 +553,8 @@ class REPPO:
             q_value_sum += metrics["q_value"]
             alpha_temp_loss_sum += metrics["alpha_temp_loss"]
             alpha_kl_loss_sum += metrics["alpha_kl_loss"]
+            actor_gn_sum += metrics["actor_grad_norm"]
+            critic_gn_sum += metrics["critic_grad_norm"]
 
             if self.use_target_networks:
                 self.policy.soft_update_targets(self.tau)
@@ -532,6 +576,10 @@ class REPPO:
             "alpha_kl": self.alpha_kl.item(),
             "alpha_temp_loss": alpha_temp_loss_sum / max(n, 1),
             "alpha_kl_loss": alpha_kl_loss_sum / max(n, 1),
+            # Pre-clip gradient norms (reference logs both). Reference Go2 finals:
+            # actor 0.043, critic 0.67 — its actor clip never binds.
+            "actor_grad_norm": actor_gn_sum / max(n, 1),
+            "critic_grad_norm": critic_gn_sum / max(n, 1),
             **getattr(self, "_diagnostics", {}),
         }
 
@@ -593,7 +641,10 @@ class REPPO:
         # references (torchrl truncation_mask, rsl_rl (1 - truncations)) drop them
         # unconditionally. Truncations are rare, so the lost signal is negligible.
         mask = (1.0 - truncated.view(-1)).clamp_(0.0, 1.0)
-        denom = mask.sum().clamp_min(1.0)
+        # "mask": mean over the surviving samples. "batch": reference convention —
+        # masked samples still count in the denominator, so dropping a step also
+        # shrinks the gradient rather than just removing the sample.
+        denom = mask.sum().clamp_min(1.0) if self.critic_loss_denominator == "mask" else float(mask.numel())
 
         # With num_critics=1, critic_2 aliases critic_1 — summing both terms
         # would silently double the gradient (effective 2x critic lr).
@@ -631,7 +682,13 @@ class REPPO:
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        nn.utils.clip_grad_norm_(self.policy.critics.parameters(), self.max_grad_norm)
+        # clip_grad_norm_ returns the PRE-clip total norm — log it: the reference
+        # reports critic_grad_norm ~0.67 and actor_grad_norm ~0.043 on Go2, i.e. its
+        # actor clip never binds. If ours sits above max_grad_norm the two runs are
+        # not in the same optimization regime, whatever the losses look like.
+        self._last_critic_grad_norm = float(
+            nn.utils.clip_grad_norm_(self.policy.critics.parameters(), self.max_grad_norm)
+        )
         self.critic_optimizer.step()
         return critic_loss.item()
 
@@ -738,11 +795,17 @@ class REPPO:
         alpha_kl_loss = self.alpha_kl * (self.desired_kl - kl.mean().detach())
 
         self.optimizer.zero_grad()
-        self.alpha_optimizer.zero_grad()
+        if self.alpha_optimizer is not None:
+            self.alpha_optimizer.zero_grad()
         (actor_loss + alpha_temp_loss + alpha_kl_loss).backward()
-        nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
+        clip_params: list[nn.Parameter] = list(self.policy.actor.parameters())
+        if self.dual_optim_mode == "actor":
+            # Reference: the duals are actor parameters, so they are inside the norm.
+            clip_params += [self.log_alpha_temp, self.log_alpha_kl]
+        actor_grad_norm = nn.utils.clip_grad_norm_(clip_params, self.max_grad_norm)
         self.optimizer.step()
-        self.alpha_optimizer.step()
+        if self.alpha_optimizer is not None:
+            self.alpha_optimizer.step()
         if self.alpha_kl_min > 0.0:
             with torch.no_grad():
                 self.log_alpha_kl.clamp_(min=math.log(self.alpha_kl_min))
@@ -755,6 +818,8 @@ class REPPO:
             "q_value": q_pi.mean().item(),
             "alpha_temp_loss": alpha_temp_loss.item(),
             "alpha_kl_loss": alpha_kl_loss.item(),
+            "actor_grad_norm": actor_grad_norm.item(),
+            "critic_grad_norm": getattr(self, "_last_critic_grad_norm", 0.0),
         }
 
     # ------------------------------------------------------------------

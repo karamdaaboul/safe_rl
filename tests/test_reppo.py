@@ -365,3 +365,109 @@ def test_simba_actor_and_aux_loss_update():
     metrics = alg.update()
     for key, value in metrics.items():
         assert value == value, f"NaN in metric {key}"
+
+
+# ---------------------------------------------------------------------------
+# Reference-parity switches (v28). Each defaults to our historical behaviour;
+# the "reference" setting reproduces the TruDi torch trainer exactly.
+# ---------------------------------------------------------------------------
+
+
+def test_dual_optim_mode_placement_and_clipping():
+    """`dual_optim_mode` decides which optimizer owns the duals AND whether they are clipped.
+
+    Reference: `log_temp`/`log_lagrange` are nn.Parameters inside the Actor, so they ride
+    the single actor optimizer and sit inside `clip_grad_norm_(actor.parameters(), ...)`.
+    Ours historically gave them a separate optimizer and never clipped them, so under a
+    binding clip our duals take a strictly larger step.
+    """
+    import copy
+
+    torch.manual_seed(0)
+    policy_sep = _make_policy()
+    policy_act = copy.deepcopy(policy_sep)
+
+    alg_sep = _make_alg(policy_sep, dual_optim_mode="separate", max_grad_norm=1e-6)
+    alg_act = _make_alg(policy_act, dual_optim_mode="actor", max_grad_norm=1e-6)
+
+    # Placement
+    sep_params = {id(p) for group in alg_sep.optimizer.param_groups for p in group["params"]}
+    act_params = {id(p) for group in alg_act.optimizer.param_groups for p in group["params"]}
+    assert id(alg_sep.log_alpha_temp) not in sep_params
+    assert alg_sep.alpha_optimizer is not None
+    assert id(alg_act.log_alpha_temp) in act_params
+    assert id(alg_act.log_alpha_kl) in act_params
+    assert alg_act.alpha_optimizer is None
+
+    # Clipping: identical policies + identical RNG stream => identical pre-clip dual
+    # gradients, so any difference afterwards is the clip.
+    for alg in (alg_sep, alg_act):
+        torch.manual_seed(1234)
+        next_obs, _ = _rollout_one_step(alg)
+        alg.compute_returns(next_obs)
+        alg.update()
+
+    assert alg_sep.log_alpha_temp.grad is not None and alg_act.log_alpha_temp.grad is not None
+    assert alg_act.log_alpha_temp.grad.abs().item() < alg_sep.log_alpha_temp.grad.abs().item()
+
+
+def test_force_last_step_truncated_bootstraps_and_masks_last_step():
+    """Reference `compute_gve` sets `truncated[-1] = 1.0` in place before the recursion."""
+    for force in (False, True):
+        torch.manual_seed(0)
+        policy = _make_policy()
+        alg = REPPO(
+            policy,
+            num_learning_epochs=1,
+            num_mini_batches=1,
+            device="cpu",
+            use_target_networks=False,
+            actor_q_reduction="q1",
+            force_last_step_truncated=force,
+        )
+        alg.init_storage("rl", N_ENVS, 2, [OBS_DIM], [OBS_DIM], [ACT_DIM])
+        # Step 0 ordinary; step 1 (the last) terminates with no timeout flag.
+        _rollout_one_step(alg)
+        next_obs, _ = _rollout_one_step(alg, dones=torch.ones(N_ENVS, 1))
+        alg.compute_returns(next_obs)
+
+        soft_r = alg.storage.rewards[-1] + torch.stack(alg._collect_ent_bonus)[-1]
+        next_v = torch.stack(alg._collect_next_values)[-1]
+        if force:
+            assert torch.allclose(alg.storage.truncated[-1], torch.ones_like(alg.storage.truncated[-1]))
+            # truncated branch: pure one-step bootstrap, termination mask overridden
+            expected = soft_r + alg.gamma * next_v
+        else:
+            assert torch.allclose(alg.storage.truncated[-1], torch.zeros_like(alg.storage.truncated[-1]))
+            # terminal: no bootstrap at all
+            expected = soft_r
+        assert torch.allclose(alg.storage.returns[-1], expected, atol=1e-6)
+
+
+def test_critic_loss_denominator_conventions():
+    """`batch` (reference) keeps masked samples in the denominator; `mask` drops them."""
+    import copy
+
+    torch.manual_seed(0)
+    policy_mask = _make_policy()
+    policy_batch = copy.deepcopy(policy_mask)
+    alg_mask = _make_alg(policy_mask, critic_loss_denominator="mask")
+    alg_batch = _make_alg(policy_batch, critic_loss_denominator="batch")
+
+    critic_obs = torch.randn(8, OBS_DIM)
+    actions = torch.randn(8, ACT_DIM)
+    returns = torch.randn(8, 1)
+    truncated = torch.tensor([1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]).view(-1, 1)
+    surviving, total = 6.0, 8.0
+
+    loss_mask = alg_mask._update_critic(critic_obs, actions, returns, truncated)
+    loss_batch = alg_batch._update_critic(critic_obs, actions, returns, truncated)
+    assert loss_batch == pytest.approx(loss_mask * surviving / total, rel=1e-5)
+
+
+def test_reference_parity_switch_validation():
+    policy = _make_policy()
+    with pytest.raises(ValueError, match="dual_optim_mode"):
+        REPPO(policy, device="cpu", dual_optim_mode="bogus")
+    with pytest.raises(ValueError, match="critic_loss_denominator"):
+        REPPO(policy, device="cpu", critic_loss_denominator="bogus")

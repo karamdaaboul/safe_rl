@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import asdict
@@ -35,16 +36,29 @@ from mjlab.utils.torch import configure_torch_backends  # noqa: E402
 from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer  # noqa: E402
 
-import src.tasks  # noqa: E402,F401
+# Optional task source — see the matching note in scripts/train/unitree_mjlab.py.
+try:
+    import src.tasks  # noqa: E402,F401
+except Exception as exc:  # noqa: BLE001
+    print(
+        f"[WARN] unitree_rl_mjlab task registration failed ({type(exc).__name__}: {exc}).\n"
+        "[WARN] Continuing with mjlab's built-in tasks only; Ant-*/Unitree-* ids will be unavailable.",
+        file=sys.stderr,
+    )
 
 import torch  # noqa: E402
 import yaml  # noqa: E402
 
 from safe_rl.envs import make_env  # noqa: E402
+from safe_rl.envs.mjlab_tasks import register_all as _register_safe_rl_mjlab_tasks  # noqa: E402
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
+from safe_rl.utils.eval_utils import filter_recordable, make_q_argmax_policy  # noqa: E402
+
+# safe_rl-owned mjlab task variants (e.g. Mjlab-Lift-Cube-Yam-Grasp).
+_register_safe_rl_mjlab_tasks()
 
 
-OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3", "MPO", "CVPO"}
 
 
 
@@ -146,8 +160,69 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video", action="store_true", help="Record the first evaluation rollout to mp4.")
     parser.add_argument("--video_length", type=int, default=1000, help="Recorded video length in steps.")
     parser.add_argument("--video_dir", type=str, default=None, help="Directory to store recorded evaluation videos.")
+    parser.add_argument(
+        "--video_decim",
+        type=int,
+        default=None,
+        help=(
+            "Smooth-video render decimation. Stock --video grabs one frame per control "
+            "step (e.g. 0.2s -> 5 fps, choppy). Set this to a small divisor of the env's "
+            "decimation (e.g. 4 for the nav env's 40) to render every few physics ticks "
+            "and hold each policy action across them -- identical control, ~50 fps output."
+        ),
+    )
+    parser.add_argument(
+        "--episode_s",
+        type=float,
+        default=None,
+        help=(
+            "Override episode_length_s (and the pose command's resampling period). Use it "
+            "to restore a finite episode in play mode, which sets episode_length_s huge so "
+            "interactive viewing runs forever -- e.g. --episode_s 12 for bounded episodes."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
+    parser.add_argument(
+        "--dump_traj",
+        type=str,
+        default=None,
+        help=(
+            "Write a per-step CSV of commanded vs achieved base velocity to this path "
+            "(velocity-tracking tasks only). Averages like error_vel_xy hide *how* a policy "
+            "misses — gain, bias, lag; this exposes it. Use with --num_envs 1."
+        ),
+    )
     parser.add_argument("--export_onnx", action="store_true", help="Export actor to ONNX alongside the checkpoint then exit.")
+    parser.add_argument(
+        "--action_mode",
+        type=str,
+        default="deterministic",
+        choices=["deterministic", "stochastic"],
+        help=(
+            "Action selection at eval. 'deterministic' is tanh(mu) (act_inference), what "
+            "deployment normally uses. 'stochastic' draws one squashed sample from pi(.|s) "
+            "— the distribution the actor is actually trained on. Comparing the two is the "
+            "exploration/deployment gap; see reports/EVAL_PROTOCOL.md. Ignored when "
+            "--q_argmax > 0, which defines its own selection rule."
+        ),
+    )
+    parser.add_argument(
+        "--one_episode_per_env",
+        action="store_true",
+        help=(
+            "Take exactly one episode from each env instead of the first --episodes "
+            "episodes to finish. Without this, envs that start together and finish "
+            "together are truncated to --episodes, keeping only the EARLIEST finishers "
+            "— which over-represents falls and discards long clean episodes. Required by "
+            "protocol E1 (use --num_envs N --episodes N --one_episode_per_env)."
+        ),
+    )
+    parser.add_argument(
+        "--json_out",
+        type=str,
+        default=None,
+        help="Write the evaluation summary as JSON to this path (for experiments/registry.csv).",
+    )
     parser.add_argument(
         "--q_argmax",
         type=int,
@@ -160,37 +235,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
-
-
-def make_q_argmax_policy(policy_module: Any, num_samples: int):
-    """Return fn(actor_obs, critic_obs)->action that does eval-time Q-argmax.
-
-    REPPO learns an explicit Q, so at eval we can do one step of policy
-    improvement: draw `num_samples` actions from π(·|s) (plus the distribution
-    mode as a guaranteed candidate), evaluate the clipped twin-Q min(Q1,Q2) on
-    each, and pick the best. PPO cannot do this — it has no action-value fn — and
-    it sidesteps the max-ent train→eval gap where the entropy-inflated policy's
-    *mode* is not the Q-greedy action.
-    """
-
-    def select(actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
-        norm_actor_obs = policy_module.actor_obs_normalizer(actor_obs)
-        dist = policy_module._build_distribution(norm_actor_obs, target=False)
-        batch = actor_obs.shape[0]
-        num_actions = policy_module.num_actions
-        # Candidates: the mode (so Q-argmax never does worse than the mode) + N samples.
-        samples = dist.sample((num_samples,))                       # [N, B, A]
-        candidates = torch.cat([dist.mean.unsqueeze(0), samples], dim=0)  # [N+1, B, A]
-        num_cand = candidates.shape[0]
-        # evaluate_q normalizes critic_obs internally; broadcast obs over candidates.
-        flat_obs = critic_obs.unsqueeze(0).expand(num_cand, batch, -1).reshape(num_cand * batch, -1)
-        flat_act = candidates.reshape(num_cand * batch, num_actions)
-        q1, q2 = policy_module.evaluate_q(flat_obs, flat_act)
-        q = torch.minimum(q1, q2).reshape(num_cand, batch)         # [N+1, B]
-        best = q.argmax(dim=0)                                      # [B]
-        return candidates[best, torch.arange(batch, device=candidates.device)]
-
-    return select
 
 
 def main() -> None:
@@ -209,6 +253,25 @@ def main() -> None:
         env_cfg.scene.num_envs = args.num_envs
     if args.seed is not None:
         env_cfg.seed = args.seed
+    if args.episode_s is not None:
+        env_cfg.episode_length_s = args.episode_s
+        if "pose" in env_cfg.commands:
+            env_cfg.commands["pose"].resampling_time_range = (args.episode_s, args.episode_s)
+
+    # Smooth-video: render at a finer decimation and hold each control action across
+    # the extra ticks (see --video_decim). Physics/control are unchanged; we just
+    # render more often. hold == original_decimation / video_decimation.
+    video_hold = 1
+    if args.video and args.video_decim is not None:
+        orig_decim = env_cfg.decimation
+        if orig_decim % args.video_decim != 0:
+            raise ValueError(
+                f"--video_decim {args.video_decim} must divide the env decimation {orig_decim}."
+            )
+        video_hold = orig_decim // args.video_decim
+        env_cfg.decimation = args.video_decim
+        print(f"[INFO] smooth video: decimation {orig_decim}->{args.video_decim}, "
+              f"hold each action {video_hold} steps ({1.0 / (env_cfg.sim.mujoco.timestep * args.video_decim):.0f} fps)")
 
     is_tracking_task = "motion" in env_cfg.commands and isinstance(env_cfg.commands["motion"], MotionCommandCfg)
     if is_tracking_task:
@@ -260,6 +323,17 @@ def main() -> None:
         runner = OnPolicyRunner(vec_env, train_cfg, log_dir=None, device=args.device)
     runner.load(str(checkpoint_path), load_optimizer=False)
     policy = runner.get_inference_policy(device=args.device)
+    if args.action_mode == "stochastic":
+        # get_inference_policy() hands back act_inference, i.e. tanh(mu) — the
+        # deployment action. The stochastic arm instead draws one squashed sample from
+        # pi(.|s), which is the distribution the actor is actually trained against.
+        # Both REPPOActorCritic.act and ActorCritic.act normalize obs internally and
+        # default to sampling, so the same call covers PPO and REPPO.
+        _policy_module = runner.alg.policy
+        policy = lambda obs: _policy_module.act(obs)  # noqa: E731
+        print("[INFO] Action mode: stochastic (one sample from pi(.|s)).")
+    else:
+        print("[INFO] Action mode: deterministic (tanh(mu)).")
 
     print(f"[INFO] Loaded checkpoint: {checkpoint_path}")
 
@@ -309,14 +383,67 @@ def main() -> None:
     ep_rewards: list[float] = []
     ep_costs: list[float] = []
     ep_lengths: list[int] = []
+    # mjlab publishes command-term metrics as "Metrics/<term>/<name>" into
+    # extras["log"] at reset (managers/command_manager.py). For manipulation
+    # tasks the metric of record is a success rate, not reward, so collect
+    # whatever the task reports rather than hard-coding a key.
+    ep_metrics: list[dict[str, float]] = []
     reward_buf = torch.zeros(vec_env.num_envs, device=runner.device)
     cost_buf = torch.zeros(vec_env.num_envs, device=runner.device)
     length_buf = torch.zeros(vec_env.num_envs, dtype=torch.long, device=runner.device)
 
-    while len(ep_rewards) < args.episodes:
-        with torch.inference_mode():
-            actions = q_argmax(obs, critic_obs) if q_argmax is not None else policy(obs)
+    # Velocity-tracking diagnostics.
+    #
+    # WARNING about mjlab's own `Metrics/twist/error_vel_xy`: it is a CUMULATIVE sum
+    # divided by a fixed constant (`resampling_time_range[1] / step_dt`, = 400 steps
+    # for Go2), NOT a per-step average — see mjlab/tasks/velocity/mdp/velocity_command.py
+    # `_update_metrics`. So it scales with episode length: a policy that falls at step
+    # 290 scores ~3.4x "better" than an identical policy that survives 1000 steps, and
+    # for a full episode it reads 2.5x the true mean. It is therefore NOT comparable
+    # across policies with different survival times, nor against any implementation
+    # that reports a mean. We compute the length-normalized mean here alongside it.
+    traj_rows: list[tuple[float, ...]] = []
+    traj_cmd_term = None
+    base_env = getattr(vec_env, "env", vec_env)
+    base_env = getattr(base_env, "unwrapped", base_env)
+    cmd_mgr = getattr(base_env, "command_manager", None)
+    if cmd_mgr is not None:
+        for cand in ("twist", "base_velocity"):
+            if cand in list(getattr(cmd_mgr, "active_terms", [])):
+                traj_cmd_term = cand
+                break
+    if traj_cmd_term is not None:
+        traj_robot = base_env.scene["robot"]
+        traj_mgr = cmd_mgr
+    elif args.dump_traj:
+        print("[WARN] --dump_traj: no twist/base_velocity command term; trace disabled.")
+    track_err_sum = torch.zeros(vec_env.num_envs, device=runner.device)
+    track_yaw_sum = torch.zeros(vec_env.num_envs, device=runner.device)
+    ep_track_err: list[float] = []
+    ep_track_yaw: list[float] = []
+
+    # R7: without --one_episode_per_env the loop below keeps whichever episodes finish
+    # first and truncates the rest, which biases the sample toward early failures
+    # because every env starts at the same step. Tracking one slot per env removes the
+    # bias: each env contributes exactly its FIRST completed episode, so slow/clean
+    # episodes are counted rather than discarded.
+    recorded = torch.zeros(vec_env.num_envs, dtype=torch.bool, device=runner.device)
+
+    def _done_collecting() -> bool:
+        if args.one_episode_per_env:
+            return bool(recorded.all())
+        return len(ep_rewards) >= args.episodes
+
+    step_idx = 0
+    actions = None
+    while not _done_collecting():
+        # Recompute the action only every video_hold steps (== 1 unless smooth video):
+        # the control period is unchanged, we just render the in-between physics ticks.
+        if step_idx % video_hold == 0:
+            with torch.inference_mode():
+                actions = q_argmax(obs, critic_obs) if q_argmax is not None else policy(obs)
         obs, rewards, dones, infos = vec_env.step(actions)
+        step_idx += 1
         obs = obs.to(runner.device)
         critic_obs = get_critic_obs(obs, infos)
         rewards = rewards.to(runner.device)
@@ -331,26 +458,153 @@ def main() -> None:
         cost_buf += costs
         length_buf += 1
 
+        if traj_cmd_term is not None:
+            with torch.inference_mode():
+                cmd_all = traj_mgr.get_command(traj_cmd_term)
+                lin_all = traj_robot.data.root_link_lin_vel_b
+                ang_all = traj_robot.data.root_link_ang_vel_b
+                track_err_sum += torch.norm(cmd_all[:, :2] - lin_all[:, :2], dim=-1).to(runner.device)
+                track_yaw_sum += torch.abs(cmd_all[:, 2] - ang_all[:, 2]).to(runner.device)
+                if args.dump_traj:
+                    traj_rows.append(
+                        (
+                            float(step_idx),
+                            float(cmd_all[0][0]), float(cmd_all[0][1]), float(cmd_all[0][2]),
+                            float(lin_all[0][0]), float(lin_all[0][1]), float(ang_all[0][2]),
+                        )
+                    )
+
         runner.alg.policy.reset(dones=dones)
 
-        done_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
+        # Reset the per-env accumulators for EVERY finished env, but only *record*
+        # the ones this protocol still wants — otherwise a second episode from a
+        # fast-failing env would leak into the sample (see filter_recordable).
+        done_ids, reset_ids = filter_recordable(
+            (dones > 0).nonzero(as_tuple=False).squeeze(-1), recorded, args.one_episode_per_env
+        )
         if done_ids.numel() == 0:
+            if reset_ids.numel() > 0:
+                reward_buf[reset_ids] = 0.0
+                cost_buf[reset_ids] = 0.0
+                length_buf[reset_ids] = 0
+                if traj_cmd_term is not None:
+                    track_err_sum[reset_ids] = 0.0
+                    track_yaw_sum[reset_ids] = 0.0
             continue
 
         ep_rewards.extend(reward_buf[done_ids].detach().cpu().tolist())
         ep_costs.extend(cost_buf[done_ids].detach().cpu().tolist())
         ep_lengths.extend(length_buf[done_ids].detach().cpu().tolist())
-        reward_buf[done_ids] = 0.0
-        cost_buf[done_ids] = 0.0
-        length_buf[done_ids] = 0
+        if traj_cmd_term is not None:
+            steps = length_buf[done_ids].clamp_min(1).float()
+            ep_track_err.extend((track_err_sum[done_ids] / steps).detach().cpu().tolist())
+            ep_track_yaw.extend((track_yaw_sum[done_ids] / steps).detach().cpu().tolist())
+            track_err_sum[reset_ids] = 0.0
+            track_yaw_sum[reset_ids] = 0.0
 
-    ep_rewards = ep_rewards[: args.episodes]
-    ep_costs = ep_costs[: args.episodes]
-    ep_lengths = ep_lengths[: args.episodes]
-    print(f"Evaluation over {args.episodes} episodes")
+        log = infos.get("log") or infos.get("episode") or {}
+        if isinstance(log, dict):
+            batch = {}
+            for key, value in log.items():
+                if not key.startswith("Metrics/"):
+                    continue
+                if isinstance(value, torch.Tensor):
+                    if value.numel() != 1:
+                        continue
+                    value = value.item()
+                if isinstance(value, (int, float)):
+                    batch[key] = float(value)
+            if batch:
+                ep_metrics.append(batch)
+
+        reward_buf[reset_ids] = 0.0
+        cost_buf[reset_ids] = 0.0
+        length_buf[reset_ids] = 0
+
+    if not args.one_episode_per_env:
+        # Legacy path only. Under E1 (--one_episode_per_env) every collected episode is
+        # kept: the sample is already exactly one per env, and truncating it here would
+        # reintroduce the earliest-finisher bias this flag exists to remove.
+        ep_rewards = ep_rewards[: args.episodes]
+        ep_costs = ep_costs[: args.episodes]
+        ep_lengths = ep_lengths[: args.episodes]
+        ep_track_err = ep_track_err[: args.episodes]
+        ep_track_yaw = ep_track_yaw[: args.episodes]
+    print(f"Evaluation over {len(ep_rewards)} episodes")
     print(f"Mean reward: {sum(ep_rewards) / len(ep_rewards):.3f}")
     print(f"Mean cost: {sum(ep_costs) / len(ep_costs):.3f}")
     print(f"Mean length: {sum(ep_lengths) / len(ep_lengths):.1f}")
+    if ep_track_err:
+        n = len(ep_track_err)
+        print(
+            f"Mean per-step |v_cmd - v_xy|: {sum(ep_track_err) / n:.4f}   "
+            f"(length-normalized; USE THIS to compare policies)"
+        )
+        print(f"Mean per-step |w_cmd - w_z| : {sum(ep_track_yaw) / n:.4f}")
+    # Survival = reached the episode cap. mjlab truncates at max_episode_length, so a
+    # shorter episode means a termination condition fired (for Go2: a fall). Reported
+    # alongside tracking because a policy that falls sees a DIFFERENT command sequence
+    # than one that survives (see reports/EVAL_PROTOCOL.md §8.1) — tracking error is
+    # only comparable between arms with comparable survival.
+    max_len = int(getattr(vec_env, "max_episode_length", 0) or 0)
+    survived = [ln for ln in ep_lengths if max_len and ln >= max_len]
+    survival_rate = len(survived) / len(ep_lengths) if ep_lengths and max_len else float("nan")
+    print(f"Survival rate (reached {max_len} steps): {survival_rate:.3f}")
+    print(f"Fall rate: {1.0 - survival_rate:.3f}")
+
+    metric_means: dict[str, float] = {}
+    if ep_metrics:
+        keys = sorted({k for batch in ep_metrics for k in batch})
+        for key in keys:
+            values = [batch[key] for batch in ep_metrics if key in batch]
+            metric_means[key] = sum(values) / len(values)
+            print(f"Mean {key}: {metric_means[key]:.4f}")
+
+    if args.json_out:
+        n_tr = len(ep_track_err)
+        summary = {
+            "checkpoint": str(checkpoint_path),
+            "env_id": args.env_id,
+            "algorithm": alg_name,
+            "config": args.config,
+            "seed": args.seed,
+            "num_envs": vec_env.num_envs,
+            "episodes_requested": args.episodes,
+            "episodes_collected": len(ep_rewards),
+            "one_episode_per_env": bool(args.one_episode_per_env),
+            "action_mode": "q_argmax" if args.q_argmax > 0 else args.action_mode,
+            "q_argmax_samples": args.q_argmax,
+            "max_episode_length": max_len,
+            "mean_reward": sum(ep_rewards) / len(ep_rewards),
+            "mean_cost": sum(ep_costs) / len(ep_costs),
+            "mean_length": sum(ep_lengths) / len(ep_lengths),
+            "survival_rate": survival_rate,
+            "tracking_error_xy": (sum(ep_track_err) / n_tr) if n_tr else None,
+            "yaw_error": (sum(ep_track_yaw) / n_tr) if n_tr else None,
+            "mjlab_metrics": metric_means,
+            # Per-episode raw values: the program requires per-seed/per-episode raw data
+            # to be stored, not just aggregates (bootstrap CIs, worst-case, IQM).
+            "per_episode": {
+                "reward": ep_rewards,
+                "cost": ep_costs,
+                "length": ep_lengths,
+                "tracking_error_xy": ep_track_err,
+                "yaw_error": ep_track_yaw,
+            },
+        }
+        json_path = Path(args.json_out).expanduser().resolve()
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(summary, indent=2))
+        print(f"[INFO] wrote evaluation summary to {json_path}")
+
+    if args.dump_traj and traj_rows:
+        out_path = Path(args.dump_traj).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w") as handle:
+            handle.write("step,cmd_vx,cmd_vy,cmd_wz,vx,vy,wz\n")
+            for row in traj_rows:
+                handle.write(",".join(f"{v:.6f}" for v in row) + "\n")
+        print(f"[INFO] wrote {len(traj_rows)} trajectory rows to {out_path}")
 
     vec_env.close()
 

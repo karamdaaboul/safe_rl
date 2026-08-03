@@ -1,0 +1,120 @@
+# v24 config applied to Unitree-Go2-Flat (velocity tracking), local 1h probe.
+# Support [-20,150]x301 and reward_scale 10 carried over from Ant; Go2's dt-scaled
+# rewards are the same order of magnitude, and the wide support is forgiving by
+# design. Watch frac_targets_clipped / returns_mean to recalibrate if needed.
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO v24 = v23 + value-support headroom (ONE lever).
+# v23 measured: returns_mean 46.3 / returns_max 51.6 against v_max 50, with 14%
+# of targets clamped at the edge and q_bias drifting +0.13 -> +0.64. A clamped
+# target makes CE push mass into the top bin, so Q saturates at the ceiling and
+# dQ/da -- the pathwise actor's entire signal -- goes flat. Support widened to
+# [-20, 150] with 301 atoms (bin width 0.57, was 0.40).
+# Diagnostic to read: if q_value settles well inside the support and
+# frac_targets_clipped -> 0, the ceiling was the binding constraint. If Q keeps
+# climbing toward 150, the inflation is not the support and pessimism is needed
+# (that is v25's job).
+#
+# --- inherited v23 header below ---
+# REPPO v23 — REFERENCE-MATCHED IN CODE, not just in config.
+#
+# v21 (our port + the three fidelity fixes) plateaued/decayed at ~3-4 training
+# reward on mjlab Ant-Flat across seeds 1-2 while the authors' own trainer, on
+# the identical task/budget/value-support, reached 32.8 / 32.7 deterministic.
+# v21's internals were all healthy (q_bias -0.3, 0.2% clipping, q ~= returns,
+# entropy exactly on target, KL inside the bound) EXCEPT the action std, which
+# crept 0.60 -> 0.76 and never annealed: the entropy target being met by
+# widening the Gaussian, which saturates tanh, drives d(tanh)/dx -> 0 and
+# starves the pathwise gradient that carries the whole reward signal.
+#
+# So v23 adopts the reference's architecture and optimizer wholesale:
+#   * critic_type: reference  -> ReferenceREPPOCritic, the encoder/head-split
+#     critic from their torch_models.Critic. The aux prediction head hangs off
+#     the SHARED ENCODER (two layers below the logits), not off the layer that
+#     feeds the value — with a single-trunk critic, aux_loss_mult 1.0 smooths
+#     dQ/da directly, which is the signal the pathwise actor consumes.
+#     Also brings their additive learnable zero prior (+40.9 * hl_gauss(0)).
+#   * RMSNorm throughout (theirs) instead of LayerNorm, swish activations.
+#   * single critic, unbounded exp(log_std) with no floor, plain Adam with no
+#     weight decay and one shared lr 3e-4, desired_kl 0.1 with the "clipped"
+#     gate, no alpha_kl_min floor, init_alpha_temp 1.0 (= their ent_start),
+#     init_alpha_kl 0.01 (= their kl_start), 151 atoms.
+# Kept: the three fidelity fixes (bug fixes, not deviations) and the mjlab
+# scale calibration (reward_scale 10, support [-10, 50]) — their own brax
+# numbers (0.1 / [0,150]) produce a stand-still policy on this task.
+# Budget identical to the reference run: 1024 x 128 x 381 = 50M env steps.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL constraint
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  # -- learned dual variables
+  init_alpha_temp: 1.0            # reference ent_start
+  init_alpha_kl: 0.01             # reference kl_start
+  alpha_kl_min: 0.0               # reference has no floor
+  target_entropy: -1.5            # v31 LEVER: was -0.5; lets sigma anneal (PPO reaches ~0.1)
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  use_target_networks: false
+  actor_q_reduction: q1           # single critic
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # mjlab dt-scaled rewards (see header)
+  tau: 0.005                      # unused while use_target_networks is false
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: reference          # encoder/head-split critic (their Critic)
+  num_critics: 1
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.0                    # reference actor_min_std
+  squash: tanh
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims: [512, 512]       # reference: 3-layer FCNN @ 512 incl. output
+    activation: swish
+    use_layer_norm: true
+    norm_type: rmsnorm            # reference uses RMSNorm
+    log_std_squash: clamp         # reference: plain exp(log_std), unbounded
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 301                # widened support needs more bins to keep resolution
+    v_min: -20.0
+    v_max: 150.0
+    hidden_dim: 512
+    encoder_layers: 2             # reference num_critic_encoder_layers
+    head_layers: 2                # reference num_critic_head_layers
+    pred_layers: 2                # reference num_critic_pred_layers
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9             # reference: logits + 40.9 * hl_gauss(0)
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 300             # ~1h local budget on Go2 (checkpointed every 50)
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: mjlab_go2_reppo_v31_ent15
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

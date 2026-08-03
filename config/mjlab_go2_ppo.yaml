@@ -1,0 +1,68 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# PPO baseline for Unitree-Go2-Flat -- the V0 comparison arm.
+#
+# Provenance: this is a faithful transcription of the RESOLVED config that
+# produced the existing 196.6M-step PPO checkpoint on JUWELS, recovered from
+#   logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml
+# That run was launched with CONFIG=none through scripts/slurm/reppo_mjlab.sh,
+# which routes through convert_mjlab_ppo_cfg() and uses mjlab's own registered
+# PPO cfg -- so no YAML for it existed in this repo.  Writing it down here is
+# what makes the PPO arm reproducible and re-runnable at a chosen budget.
+#
+# WHY THIS FILE EXISTS (risk R2 in reports/v00_baseline.md):
+# the JUWELS PPO run used 4096 envs x 24 steps x 2000 iters = 196.6M env steps,
+# while every REPPO arm uses 1024 x 128 x 300 = 39.3M -- a 5x budget gap.  Only
+# model_1999.pt was pulled back, so no equal-step PPO checkpoint existed and
+# the standing "REPPO is ~2.3x worse than PPO" claim conflated algorithm with
+# budget.  Run this config at --max_iterations 400 (4096 x 24 x 400 = 39.3M)
+# to get the budget-matched arm; the 2000-iteration run remains available as a
+# separate "PPO at convergence" reference row.
+#
+# Every value below is verbatim from the resolved agent.yaml.  Do not "improve"
+# the hyperparameters -- the point of this arm is that it is the same PPO that
+# produced the number we are comparing against.
+# ===========================================================================
+
+algorithm:
+  class_name: PPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+
+runner:
+  num_steps_per_env: 24
+  max_iterations: 400             # 4096 x 24 x 400 = 39.3M steps (= the REPPO budget)
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_go2_ppo
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

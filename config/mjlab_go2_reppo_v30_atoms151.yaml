@@ -1,0 +1,126 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO v28 = go2 v24 + the four remaining fidelity gaps to the authors' own
+# torch trainer (the TruDi zip, mirrored read-only at
+# /home/human/workspaces/trudi_ref/trudi -- NOT the github cvoelcker/reppo
+# clone, which is a different snapshot: `ent_start 0.01` and AdamW(wd 1e-2)).
+#
+# Why: budget-matched at 39.3M env steps (1024 x 128 x 300), their Go2
+# checkpoint survives 1000 steps on 5/5 single-env seeds (3/7/11/21/33) while
+# our v24/v25 checkpoint falls at 496 (seed 7) and 290 (seed 11). Their
+# 50-episode tracking error is 0.41 vs our 0.58-0.71. The update step itself
+# was previously shown bit-exact, so what is left is optimizer/clipping
+# grouping, target smoothing, and the rollout-edge conventions -- none of which
+# a single-batch parity harness can see.
+#
+# The four levers, all reference values:
+#
+#   dual_optim_mode: actor
+#       Their log_temp / log_lagrange are nn.Parameters INSIDE the Actor
+#       (networks/torch_models.py:266-271), so they ride the single actor Adam
+#       and sit inside clip_grad_norm_(actor.parameters(), 0.5). Ours gave them
+#       a separate optimizer and never clipped them, so whenever the actor grad
+#       norm exceeded 0.5 our duals took a strictly larger step. The duals are
+#       what govern sigma and the KL gate -- this is the only one of the four
+#       with a mechanism sized to the tracking/robustness gap, and it is the
+#       lever to attribute the result to if v28 wins.
+#
+#   num_atoms: 151
+#       Their Go2 run used the hydra default num_bins 151 over [-20, 150]
+#       (confirmed in its .hydra/overrides.yaml); v24 used 301. HL-Gauss sigma
+#       is 0.75 x bin width, so theirs smooths targets with sigma ~0.85 and
+#       ours with ~0.43 -- we train the critic against materially sharper
+#       targets than the reference does.
+#
+#   force_last_step_truncated: true
+#       Their compute_gve does `truncated[-1] = 1.0` in place and the critic
+#       update reads that same buffer, so the final rollout step (all envs,
+#       1/128 of samples) both bootstraps 1-step and is dropped from the
+#       critic loss. We kept the real flag.
+#
+#   critic_loss_denominator: batch
+#       They normalize the truncation-masked CE and aux losses by the full
+#       batch ((mask * ce).mean()); we divided by mask.sum(). This is the
+#       known "~1% denominator convention" -- never A/B'd, and it compounds
+#       with the lever above.
+#
+# Everything else, including the 300-iteration / 39.3M-step budget, is v24
+# verbatim so the comparison is budget-matched to their run.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  normalize_advantage_per_mini_batch: false
+  # -- KL constraint
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  # -- learned dual variables
+  init_alpha_temp: 1.0            # reference ent_start
+  init_alpha_kl: 0.01             # reference kl_start
+  alpha_kl_min: 0.0               # reference has no floor
+  target_entropy: -0.5            # = reference ent_target_mult 0.5
+  dual_optim_mode: separate       # v24 value (NOT a v30 lever)
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003                # inert under dual_optim_mode: actor (duals use learning_rate)
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  use_target_networks: false
+  actor_q_reduction: q1           # single critic
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # mjlab dt-scaled rewards
+  tau: 0.005                      # unused while use_target_networks is false
+  force_last_step_truncated: false    # v24 value (NOT a v30 lever)
+  critic_loss_denominator: mask      # v24 value (NOT a v30 lever)
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: reference          # encoder/head-split critic (their Critic)
+  num_critics: 1
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.0                    # reference actor_min_std
+  squash: tanh
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims: [512, 512]       # reference: 3-layer FCNN @ 512 incl. output
+    activation: swish
+    use_layer_norm: true
+    norm_type: rmsnorm            # reference uses RMSNorm
+    log_std_squash: clamp         # reference: plain exp(log_std), unbounded
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 151                # v30 LEVER: reference num_bins (was 301)
+    v_min: -20.0
+    v_max: 150.0
+    hidden_dim: 512
+    encoder_layers: 2             # reference num_critic_encoder_layers
+    head_layers: 2                # reference num_critic_head_layers
+    pred_layers: 2                # reference num_critic_pred_layers
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9             # reference: logits + 40.9 * hl_gauss(0)
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 300             # 1024 x 128 x 300 = 39.3M steps (= their Go2 run)
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: mjlab_go2_reppo_v30_atoms151
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

@@ -40,17 +40,34 @@ from mjlab.utils.gpu import select_gpus  # noqa: E402
 from mjlab.utils.torch import configure_torch_backends  # noqa: E402
 from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
 
-import src.tasks  # noqa: E402,F401
+# The unitree_rl_mjlab fork is an OPTIONAL task source (Ant-*, Unitree-*). Its
+# package walk imports every task module, so one broken/in-progress task package
+# there used to abort every run — including runs on tasks that come from mjlab
+# itself (e.g. Mjlab-Lift-Cube-Yam). Warn and continue instead: any task that
+# failed to register simply won't appear in list_tasks(), and the --env_id check
+# in main() then reports it clearly, naming what IS available.
+try:
+    import src.tasks  # noqa: E402,F401
+except Exception as exc:  # noqa: BLE001
+    print(
+        f"[WARN] unitree_rl_mjlab task registration failed ({type(exc).__name__}: {exc}).\n"
+        "[WARN] Continuing with mjlab's built-in tasks only; Ant-*/Unitree-* ids will be unavailable.",
+        file=sys.stderr,
+    )
 
 import torch  # noqa: E402
 import yaml  # noqa: E402
 
 from safe_rl.envs import make_env  # noqa: E402
+from safe_rl.envs.mjlab_tasks import register_all as _register_safe_rl_mjlab_tasks  # noqa: E402
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
 
+# safe_rl-owned mjlab task variants (e.g. Mjlab-Lift-Cube-Yam-Grasp).
+_register_safe_rl_mjlab_tasks()
 
-OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
+
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3", "MPO", "CVPO"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "RCPPO", "CUP", "REPPO", "Distillation"}
 
 
 @dataclass
@@ -426,7 +443,9 @@ def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
             print(f"[INFO] Using OnPolicyRunner for algorithm: {alg_name}")
         runner = OnPolicyRunner(vec_env, train_cfg, log_dir=str(log_dir), device=device)
     runner.add_git_repo_to_log(__file__)
-    runner.add_git_repo_to_log(src.tasks.__file__)
+    # Only snapshot the unitree fork's git state when it actually imported.
+    if "src.tasks" in sys.modules:
+        runner.add_git_repo_to_log(sys.modules["src.tasks"].__file__)
 
     if args.checkpoint:
         checkpoint_path = Path(args.checkpoint).expanduser().resolve()
