@@ -1,0 +1,79 @@
+[
+  {
+    "label": "reppo_v00_s1",
+    "checkpoint": "logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1/model_299.pt",
+    "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "run_dir": "logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1"
+  },
+  {
+    "label": "ppo_39M_s1",
+    "checkpoint": "logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1/model_399.pt",
+    "config": "config/mjlab_go2_ppo.yaml",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "run_dir": "logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1"
+  },
+  {
+    "label": "ppo_39M_s2",
+    "checkpoint": "logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2/model_399.pt",
+    "config": "config/mjlab_go2_ppo.yaml",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 2,
+    "run_dir": "logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2"
+  },
+  {
+    "label": "ppo_39M_s3",
+    "checkpoint": "logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3/model_399.pt",
+    "config": "config/mjlab_go2_ppo.yaml",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 3,
+    "run_dir": "logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3"
+  },
+  {
+    "label": "ppo_39M_s4",
+    "checkpoint": "logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4/model_399.pt",
+    "config": "config/mjlab_go2_ppo.yaml",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 4,
+    "run_dir": "logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4"
+  },
+  {
+    "label": "ppo_196M",
+    "checkpoint": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+    "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+    "algorithm": "PPO",
+    "env_steps": 196608000,
+    "train_seed": 1
+  },
+  {
+    "label": "reppo_v28_refparity",
+    "checkpoint": "logs/safe_rl/go2_velocity/2026-08-03_09-11-35_go2_v28_refparity_s1/model_299.pt",
+    "config": "config/mjlab_go2_reppo_v28_refparity.yaml",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1
+  },
+  {
+    "label": "reppo_v29_dualclip",
+    "checkpoint": "logs/safe_rl/go2_velocity/2026-08-03_10-10-40_go2_v29_dualclip_s1/model_299.pt",
+    "config": "config/mjlab_go2_reppo_v29_dualclip.yaml",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1
+  },
+  {
+    "label": "reppo_v30_atoms151",
+    "checkpoint": "logs/safe_rl/go2_velocity/2026-08-03_11-02-06_go2_v30_atoms151_s1/model_299.pt",
+    "config": "config/mjlab_go2_reppo_v30_atoms151.yaml",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1
+  }
+]
