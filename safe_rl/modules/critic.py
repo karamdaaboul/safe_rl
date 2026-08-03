@@ -334,11 +334,13 @@ class DistributionalCritic(nn.Module):
         next_dist: torch.Tensor,  # [batch, num_atoms]
         rewards: torch.Tensor,  # [batch, ]
         bootstrap: torch.Tensor,  # [batch, ]
-        discount: float,
+        discount: float | torch.Tensor,  # scalar, or [batch] for per-sample gamma**n
     ) -> torch.Tensor:
         delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
         batch_size = rewards.shape[0]
 
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1, 1)
         target_z = rewards.unsqueeze(1) + bootstrap.unsqueeze(1) * discount * self.q_support
         target_z = target_z.clamp(self.v_min, self.v_max)
         b = (target_z - self.v_min) / delta_z

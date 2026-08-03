@@ -38,45 +38,25 @@ class MPO(SAC):
 
     https://arxiv.org/abs/1806.06920
 
-    An off-policy, Expectation-Maximization actor-critic. It reuses the twin reward
-    critics and replay buffer from :class:`SAC` verbatim and replaces *only* the actor
-    update with the MPO E-step / M-step (the unconstrained sibling of :class:`CVPO`):
+    Off-policy EM actor-critic. Reuses SAC's twin critics and replay buffer and replaces
+    only the actor update:
 
-    * **E-step** — for each state sample ``sample_action_num`` candidate actions from
-      the (target) policy, evaluate ``Q`` for each, and solve a small 1-variable convex
-      dual (over the temperature ``eta``) to obtain a non-parametric variational
-      distribution ``q(a|s) ∝ exp(Q/eta)`` that improves on the policy while staying
-      within a KL trust region of it.
-    * **M-step** — fit the parametric Gaussian policy to the weighted samples by
-      weighted maximum likelihood, subject to *decoupled* mean / covariance KL trust
-      regions to the old policy (with dual-ascent Lagrange multipliers on each KL).
+    * **E-step** — sample ``sample_action_num`` actions per state from the target policy,
+      evaluate Q, and solve the 1-D convex dual over the temperature ``eta`` to get the
+      non-parametric ``q(a|s) proportional to exp(Q/eta)`` inside a KL trust region.
+    * **M-step** — fit the Gaussian policy to the weighted samples by weighted maximum
+      likelihood under decoupled mean / covariance KL trust regions.
 
-    Exploration comes from the E-step KL trust region rather than SAC entropy, so the
-    entropy temperature is disabled. Candidate actions are sampled in pre-tanh Gaussian
-    space and squashed into the env bounds only for critic evaluation, so no
-    out-of-bound action penalty is needed (unlike implementations that sample the raw
-    Gaussian, e.g. Acme / RL-X). The M-step log-prob and KLs deliberately omit the tanh
-    Jacobian: it is theta-independent (identical gradients) and KL is invariant under a
-    bijection applied to both arguments, so the pre-tanh KLs equal the squashed-space ones.
+    Exploration comes from the E-step trust region, so SAC's entropy temperature is off.
+    Actions are sampled pre-tanh and squashed only for critic evaluation, so out-of-bound
+    actions cannot occur and need no penalty. The M-step log-prob and KLs omit the tanh
+    Jacobian deliberately: it is theta-independent, and KL is invariant under a bijection
+    applied to both arguments, so the pre-tanh KLs equal the action-space ones.
 
-    Optional Acme-parity switches (defaults keep the original behaviour; see
-    codex/mpo-vs-acme-reference.md for the measured comparison):
-
-    * ``per_dim_constraining`` — one KL budget + multiplier per action dimension instead
-      of one scalar for the summed KL (Acme's default). ``kl_*_constraint`` is then
-      per-dimension, so divide the scalar budget by the action dim when switching.
-    * ``decoupled_mstep`` — split the weighted MLE like the KL (mean term at the old std,
-      std term at the old mean) so the mean gradient is scaled by the old ``1/sigma^2``.
-      Note this doubles the MLE scale relative to the KL penalty at the identity point.
-    * ``estep_use_target_critic`` / ``estep_q_reduction`` — score E-step candidates with
-      the target critics and/or the twin mean instead of online critics + ``min``.
-    * ``target_actor_update="hard"`` — copy the target actor every
-      ``target_actor_period`` updates (fixed trust-region anchor, Acme-style) instead of
-      Polyak-averaging it after every update.
-
-    The ``alpha_*_max`` caps are overflow guards only. The multiplier update is an
-    integral controller; a low cap saturates it and silently un-enforces the M-step
-    trust region (multipliers pin, KL runs at 2-5x budget — measured on three envs).
+    Acme-parity options (all default-off; measured comparison in
+    codex/mpo-vs-acme-reference.md): ``per_dim_constraining`` (per-action-dim KL budgets
+    and multipliers), ``decoupled_mstep`` (split weighted MLE), ``estep_use_target_critic``
+    and ``estep_q_reduction``, ``target_actor_update``.
     """
 
     policy: SACActorCritic
@@ -91,19 +71,17 @@ class MPO(SAC):
         kl_var_constraint: float = 1e-4,  # M-step covariance-KL trust region
         alpha_mean_scale: float = 1.0,  # dual ascent step for the mean-KL multiplier
         alpha_var_scale: float = 100.0,  # dual ascent step for the var-KL multiplier
-        # Caps are overflow guards, not tuning knobs: the multiplier update is an integral
-        # controller, and a low cap opens the loop (alpha pins, KL runs 2-5x over budget --
-        # measured on mjlab Ant, brax Ant and SafetyPointGoal1, codex/mpo-vs-acme-reference.md).
-        # Acme never caps its duals at all.
+        # Overflow guards only: the multiplier update is an integral controller and a low
+        # cap opens the loop, leaving the M-step trust region unenforced.
         alpha_mean_max: float = 10.0,
         alpha_var_max: float = 1000.0,
         mstep_iteration_num: int = 5,
-        per_dim_constraining: bool = False,  # Acme default is True; ours stays scalar for back-compat
-        decoupled_mstep: bool = False,  # Acme splits the weighted MLE into mean/std halves
+        per_dim_constraining: bool = False,
+        decoupled_mstep: bool = False,
         estep_use_target_critic: bool = False,
-        estep_q_reduction: str = "min",  # "min" (SAC-style pessimism) or "mean" (Acme-style)
-        target_actor_update: str = "polyak",  # "polyak" (tau EMA) or "hard" (Acme: periodic copy)
-        target_actor_period: int = 100,  # hard mode: actor updates between copies
+        estep_q_reduction: str = "min",  # "min" | "mean"
+        target_actor_update: str = "polyak",  # "polyak" | "hard"
+        target_actor_period: int = 100,
         device: str = "cpu",
         **kwargs: Any,
     ) -> None:
@@ -142,7 +120,7 @@ class MPO(SAC):
 
         # Dual variables (warm-started across batches). The M-step multipliers are arrays so the
         # scalar and per-dimension trust regions share one code path: shape [1] vs [num_actions].
-        dual_dim = self.policy.actor.num_actions if self.per_dim_constraining else 1
+        dual_dim = self.policy.num_actions if self.per_dim_constraining else 1
         self.eta = 1.0  # E-step temperature (warm-start for SLSQP)
         self.alpha_mean = np.zeros(dual_dim)  # M-step mean-KL multiplier(s)
         self.alpha_var = np.zeros(dual_dim)  # M-step var-KL multiplier(s)
@@ -194,10 +172,8 @@ class MPO(SAC):
         act_b = self.policy.actor.action_b
         act_c = self.policy.actor.action_c
 
-        # The E/M steps call the actor networks directly rather than through
-        # ``policy.act`` / ``policy.sample``, which apply this normalizer internally — so
-        # apply it once here, or the policy would be trained on a different input scale
-        # than it acts on. No-op (Identity) unless ``actor_obs_normalization`` is set.
+        # The E/M steps call the actor directly, bypassing policy.act/sample which apply
+        # this normalizer internally; apply it once here so training and acting agree.
         actor_obs = self.policy.actor_obs_normalizer(obs)
 
         # ----- E-step (no gradients) -----
@@ -244,8 +220,7 @@ class MPO(SAC):
             dist_var = Normal(mean_old, std)  # hold mean, vary std
 
             if self.decoupled_mstep:
-                # Acme splits the weighted MLE the same way it splits the KL, so the mean
-                # gradient is scaled by the old 1/sigma^2 instead of the shrinking new one.
+                # Mean term at the old std, std term at the old mean (split like the KL).
                 mle = (weights * dist_mean.log_prob(x).sum(dim=-1)).sum(dim=0).mean() + (
                     weights * dist_var.log_prob(x).sum(dim=-1)
                 ).sum(dim=0).mean()
@@ -253,9 +228,8 @@ class MPO(SAC):
                 log_prob = Normal(mean, std).log_prob(x).sum(dim=-1)  # [N, B]
                 mle = (weights * log_prob).sum(dim=0).mean()
 
-            # Per-action-dim KLs, averaged over states. Summing to a scalar constrains the
-            # whole action vector jointly; keeping the vector gives each dim its own budget
-            # and its own multiplier (Acme's per_dim_constraining).
+            # Per-action-dim KLs, averaged over states. Summed -> one joint budget;
+            # kept as a vector -> one budget and multiplier per dimension.
             kl_mean_dims = kl_divergence(dist_old_ref, dist_mean).mean(dim=0)  # [A]
             kl_var_dims = kl_divergence(dist_old_ref, dist_var).mean(dim=0)  # [A]
             if self.per_dim_constraining:
@@ -298,15 +272,12 @@ class MPO(SAC):
             std_min = float(std_d.min().item())
             std_max = float(std_d.max().item())
             std_cond = float((std_d.max(dim=-1).values / std_d.min(dim=-1).values.clamp_min(1e-12)).mean().item())
-            # tanh saturates past |x| ~ 2.5, where Q is flat in the pre-tanh mean and the
-            # M-step stops pushing back — the failure mode Acme's out-of-bound action
-            # penalization guards against in its unsquashed parameterization.
+            # tanh saturates past |x| ~ 2.5, where Q is flat in the pre-tanh mean.
             mean_absmax = float(mean.detach().abs().max().item())
             frac_saturated = float((mean.detach().abs() > 2.5).float().mean().item())
 
-        # Target actor update. Polyak drifts the trust-region anchor a little every update;
-        # Acme instead hard-copies every `target_actor_period` updates so pi_old is a fixed
-        # anchor between copies, which is what its epsilons are tuned against.
+        # Polyak drifts the trust-region anchor every update; "hard" keeps pi_old fixed
+        # between periodic copies.
         self._actor_update_count += 1
         with torch.no_grad():
             if self.target_actor_update == "hard":

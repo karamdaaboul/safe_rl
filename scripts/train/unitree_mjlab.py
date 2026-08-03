@@ -49,7 +49,7 @@ from safe_rl.envs import make_env  # noqa: E402
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
 
 
-OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3", "MPO", "CVPO"}
 ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
 
 

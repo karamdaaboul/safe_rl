@@ -54,17 +54,17 @@ class CVPO(SafeSAC):
         kl_var_constraint: float = 1e-4,  # M-step covariance-KL trust region
         alpha_mean_scale: float = 1.0,  # dual ascent step for the mean-KL multiplier
         alpha_var_scale: float = 100.0,  # dual ascent step for the var-KL multiplier
-        # Overflow guards only — a low cap pins the multiplier and un-enforces the M-step
-        # trust region (measured across three envs; see codex/mpo-vs-acme-reference.md).
+        # Overflow guards only: a low cap pins the multiplier and un-enforces the M-step
+        # trust region.
         alpha_mean_max: float = 10.0,
         alpha_var_max: float = 1000.0,
         mstep_iteration_num: int = 5,
-        per_dim_constraining: bool = False,  # Acme default is True; ours stays scalar for back-compat
-        decoupled_mstep: bool = False,  # Acme splits the weighted MLE into mean/std halves
+        per_dim_constraining: bool = False,
+        decoupled_mstep: bool = False,
         estep_use_target_critic: bool = False,
-        estep_q_reduction: str = "min",  # "min" (SAC-style pessimism) or "mean" (Acme-style)
-        target_actor_update: str = "polyak",  # "polyak" (tau EMA) or "hard" (Acme: periodic copy)
-        target_actor_period: int = 100,  # hard mode: actor updates between copies
+        estep_q_reduction: str = "min",  # "min" | "mean"
+        target_actor_update: str = "polyak",  # "polyak" | "hard"
+        target_actor_period: int = 100,
         cost_horizon: int = 1000,  # episode length used to scale the episodic cost limit -> Q-space
         qc_thres: float | None = None,  # override the auto-computed cost-Q threshold
         lambda_mode: str = "grad",  # "grad" (graded projected ascent) or "dual" (per-batch joint SLSQP)
@@ -129,7 +129,7 @@ class CVPO(SafeSAC):
         # M-step KL Lagrange multipliers (dual-ascent, warm-started across batches). They are
         # arrays so the scalar and per-dimension trust regions share one code path:
         # shape [1] vs [num_actions].
-        dual_dim = self.policy.actor.num_actions if self.per_dim_constraining else 1
+        dual_dim = self.policy.num_actions if self.per_dim_constraining else 1
         self.eta = 1.0  # E-step temperature (warm-start for SLSQP)
         self.lam = 1.0  # E-step cost multiplier (warm-start for SLSQP)
         self.alpha_mean = np.zeros(dual_dim)  # M-step mean-KL multiplier(s)
@@ -284,8 +284,7 @@ class CVPO(SafeSAC):
             dist_var = Normal(mean_old, std)  # hold mean, vary std
 
             if self.decoupled_mstep:
-                # Acme splits the weighted MLE the same way it splits the KL, so the mean
-                # gradient is scaled by the old 1/sigma^2 instead of the shrinking new one.
+                # Mean term at the old std, std term at the old mean (split like the KL).
                 mle = (weights * dist_mean.log_prob(x).sum(dim=-1)).sum(dim=0).mean() + (
                     weights * dist_var.log_prob(x).sum(dim=-1)
                 ).sum(dim=0).mean()
@@ -293,9 +292,8 @@ class CVPO(SafeSAC):
                 log_prob = Normal(mean, std).log_prob(x).sum(dim=-1)  # [N, B]
                 mle = (weights * log_prob).sum(dim=0).mean()
 
-            # Per-action-dim KLs, averaged over states. Summing to a scalar constrains the
-            # whole action vector jointly; keeping the vector gives each dim its own budget
-            # and its own multiplier (Acme's per_dim_constraining).
+            # Per-action-dim KLs, averaged over states. Summed -> one joint budget;
+            # kept as a vector -> one budget and multiplier per dimension.
             kl_mean_dims = kl_divergence(dist_old_ref, dist_mean).mean(dim=0)  # [A]
             kl_var_dims = kl_divergence(dist_old_ref, dist_var).mean(dim=0)  # [A]
             if self.per_dim_constraining:
@@ -338,9 +336,7 @@ class CVPO(SafeSAC):
             std_min = float(std_d.min().item())
             std_max = float(std_d.max().item())
             std_cond = float((std_d.max(dim=-1).values / std_d.min(dim=-1).values.clamp_min(1e-12)).mean().item())
-            # tanh saturates past |x| ~ 2.5, where Q is flat in the pre-tanh mean and the
-            # M-step stops pushing back — the failure mode Acme's out-of-bound action
-            # penalization guards against in its unsquashed parameterization.
+            # tanh saturates past |x| ~ 2.5, where Q is flat in the pre-tanh mean.
             mean_absmax = float(mean.detach().abs().max().item())
             frac_saturated = float((mean.detach().abs() > 2.5).float().mean().item())
 

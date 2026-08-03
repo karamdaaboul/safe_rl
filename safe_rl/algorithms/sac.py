@@ -480,9 +480,8 @@ class SAC:
             next_obs: Next actor observations.
             next_critic_obs: Next critic observations.
             bootstrap: Optional timeout flag for the bootstrap mask.
-            effective_n_steps: Optional per-sample n-step horizon. The categorical
-                projection uses the scalar ``gamma`` support, so the n-step discount
-                is not threaded here; only the bootstrap mask is applied.
+            effective_n_steps: Optional per-sample n-step horizon; the projection then
+                bootstraps with ``gamma ** effective_n_steps``, matching the scalar path.
 
         Returns:
             Critic loss value.
@@ -490,14 +489,17 @@ class SAC:
         # Squeeze to 1D for distributional critic: [batch, 1] -> [batch]
         rewards = rewards.squeeze(-1)
         bootstrap_mask = self._bootstrap_mask(dones, bootstrap).squeeze(-1)
+        discount = self._bootstrap_discount(effective_n_steps)
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1)
 
         with torch.no_grad():
             # Sample next actions and compute log probs (actor-space obs)
             next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
             next_log_prob = next_log_prob.squeeze(-1)  # [batch, 1] -> [batch]
 
-            # Modify rewards to include entropy bonus: r - γ * α * log π(a'|s')
-            entropy_adjusted_rewards = rewards - self.gamma * bootstrap_mask * self.alpha.detach() * next_log_prob
+            # Modify rewards to include entropy bonus: r - γ^n * α * log π(a'|s')
+            entropy_adjusted_rewards = rewards - discount * bootstrap_mask * self.alpha.detach() * next_log_prob
 
             # Normalize next critic obs once (avoid redundant normalizer updates)
             next_obs_norm = self.policy.critic_obs_normalizer(next_critic_obs)
@@ -519,7 +521,7 @@ class SAC:
                 next_dist=min_dist,
                 rewards=entropy_adjusted_rewards,
                 bootstrap=bootstrap_mask,
-                discount=self.gamma,
+                discount=discount,
             )
 
         # Get current logits (critic-space obs)

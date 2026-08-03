@@ -239,6 +239,72 @@ def test_mpo_rejects_unknown_target_update() -> None:
         _make_mpo(target_actor_update="soft")
 
 
+def _make_distributional_policy(num_obs: int = NUM_OBS, num_actions: int = NUM_ACT):
+    from safe_rl.modules import SACActorCritic
+
+    return SACActorCritic(
+        num_actor_obs=num_obs,
+        num_critic_obs=num_obs,
+        num_actions=num_actions,
+        critic_type="distributional",
+        actor_kwargs={"hidden_dims": [32, 32]},
+        critic_kwargs={"num_atoms": 51, "v_min": -10.0, "v_max": 10.0, "network_kwargs": {"hidden_dims": [32, 32]}},
+    )
+
+
+def test_mpo_distributional_critic_with_nstep_runs() -> None:
+    # DMPO-style stack: C51 critics + in-storage 3-step returns. The E-step consumes
+    # scalar Q from the distributional heads; the critic update must dispatch to the
+    # categorical projection with the per-sample gamma**n bootstrap discount.
+    from safe_rl.algorithms import MPO
+
+    alg = MPO(
+        _make_distributional_policy(),
+        batch_size=32,
+        num_updates_per_step=2,
+        sample_action_num=16,
+        mstep_iteration_num=2,
+        n_step=3,
+        device="cpu",
+    )
+    assert alg.policy.is_distributional_critic
+    assert alg.n_step == 3
+    _fill_buffer(alg, n=256)
+    info = alg.update()
+    for key in ("critic", "actor"):
+        assert torch.isfinite(torch.tensor(info[key])), key
+    assert alg.get_penalty_info()["eta"] > 0
+
+
+def test_distributional_project_uses_per_sample_nstep_discount() -> None:
+    # With a deterministic next distribution at atom value z, reward 0 and no terminal,
+    # the projected mean must be gamma**n * z per sample — not gamma * z for every sample.
+    policy = _make_distributional_policy()
+    critic = policy.critic_1_target
+    n_atoms = critic.num_atoms
+    batch = 2
+
+    # All mass on the atom closest to z = 4.0.
+    z_idx = int(torch.argmin((critic.q_support - 4.0).abs()))
+    next_dist = torch.zeros(batch, n_atoms)
+    next_dist[:, z_idx] = 1.0
+    z = float(critic.q_support[z_idx])
+
+    gamma = 0.9
+    eff_n = torch.tensor([1.0, 3.0])
+    proj = critic.project(
+        next_dist=next_dist,
+        rewards=torch.zeros(batch),
+        bootstrap=torch.ones(batch),
+        discount=gamma**eff_n,
+    )
+    means = (proj * critic.q_support).sum(dim=-1)
+    assert means[0].item() == pytest.approx(gamma * z, abs=0.2)
+    assert means[1].item() == pytest.approx(gamma**3 * z, abs=0.2)
+    # The old scalar-gamma behaviour would give means[1] == gamma * z; make sure it doesn't.
+    assert abs(means[1].item() - gamma * z) > 0.5
+
+
 def test_mpo_reports_estep_diagnostics() -> None:
     alg = _make_mpo()
     _fill_buffer(alg, n=128)
