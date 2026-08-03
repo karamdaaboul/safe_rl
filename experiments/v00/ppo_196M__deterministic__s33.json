@@ -1,0 +1,41 @@
+{
+  "checkpoint": "/home/human/workspaces/safe_rl/logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+  "env_id": "Unitree-Go2-Flat",
+  "algorithm": "PPO",
+  "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+  "seed": 33,
+  "num_envs": 1,
+  "episodes_requested": 1,
+  "episodes_collected": 1,
+  "one_episode_per_env": true,
+  "action_mode": "deterministic",
+  "q_argmax_samples": 0,
+  "max_episode_length": 1000,
+  "mean_reward": 48.912540435791016,
+  "mean_cost": 0.0,
+  "mean_length": 1000.0,
+  "survival_rate": 1.0,
+  "tracking_error_xy": 0.28061527013778687,
+  "yaw_error": 0.0760236531496048,
+  "mjlab_metrics": {
+    "Metrics/twist/error_vel_xy": 0.6984853148460388,
+    "Metrics/twist/error_vel_yaw": 0.18413087725639343
+  },
+  "per_episode": {
+    "reward": [
+      48.912540435791016
+    ],
+    "cost": [
+      0.0
+    ],
+    "length": [
+      1000
+    ],
+    "tracking_error_xy": [
+      0.28061527013778687
+    ],
+    "yaw_error": [
+      0.0760236531496048
+    ]
+  }
+}

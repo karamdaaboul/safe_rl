@@ -1,0 +1,41 @@
+{
+  "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-40-13_reppo_v00_s4/model_299.pt",
+  "env_id": "Unitree-Go2-Flat",
+  "algorithm": "REPPO",
+  "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+  "seed": 33,
+  "num_envs": 1,
+  "episodes_requested": 1,
+  "episodes_collected": 1,
+  "one_episode_per_env": true,
+  "action_mode": "deterministic",
+  "q_argmax_samples": 0,
+  "max_episode_length": 1000,
+  "mean_reward": 40.34608459472656,
+  "mean_cost": 0.0,
+  "mean_length": 1000.0,
+  "survival_rate": 1.0,
+  "tracking_error_xy": 0.899330735206604,
+  "yaw_error": 0.2039068043231964,
+  "mjlab_metrics": {
+    "Metrics/twist/error_vel_xy": 2.2491660118103027,
+    "Metrics/twist/error_vel_yaw": 0.501600980758667
+  },
+  "per_episode": {
+    "reward": [
+      40.34608459472656
+    ],
+    "cost": [
+      0.0
+    ],
+    "length": [
+      1000
+    ],
+    "tracking_error_xy": [
+      0.899330735206604
+    ],
+    "yaw_error": [
+      0.2039068043231964
+    ]
+  }
+}

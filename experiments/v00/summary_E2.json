@@ -1,0 +1,3740 @@
+[
+  {
+    "arm": "reppo_v00_s1",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 36.50725212097168,
+      "median": 33.43189239501953,
+      "iqm": 37.937487284342446,
+      "ci_lo": 24.667040252685545,
+      "ci_hi": 48.34746398925781,
+      "worst": 15.090230941772461,
+      "n": 5
+    },
+    "length": {
+      "mean": 896.4,
+      "median": 1000.0,
+      "iqm": 968.0,
+      "ci_lo": 727.6,
+      "ci_hi": 1000.0,
+      "worst": 578.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.6,
+      "median": 1.0,
+      "iqm": 0.6666666666666666,
+      "ci_lo": 0.2,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7420400619506836,
+      "median": 0.7668996453285217,
+      "iqm": 0.7244430581728617,
+      "ci_lo": 0.5022969603538513,
+      "ci_hi": 0.9823975324630737,
+      "worst": 1.168519377708435,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.21268509030342103,
+      "median": 0.17424754798412323,
+      "iqm": 0.18048568069934845,
+      "ci_lo": 0.1721186012029648,
+      "ci_hi": 0.2840573191642761,
+      "worst": 0.35231301188468933,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 53.633567810058594,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.3683517575263977,
+        "yaw_error": 0.17424754798412323,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.9184881448745728,
+          "Metrics/twist/error_vel_yaw": 0.42974933981895447
+        },
+        "per_episode": {
+          "reward": [
+            53.633567810058594
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.3683517575263977
+          ],
+          "yaw_error": [
+            0.17424754798412323
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 33.43189239501953,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 1.168519377708435,
+        "yaw_error": 0.16965539753437042,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.9210309982299805,
+          "Metrics/twist/error_vel_yaw": 0.41665759682655334
+        },
+        "per_episode": {
+          "reward": [
+            33.43189239501953
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            1.168519377708435
+          ],
+          "yaw_error": [
+            0.16965539753437042
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 15.090230941772461,
+        "mean_cost": 0.0,
+        "mean_length": 578.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.7668996453285217,
+        "yaw_error": 0.35231301188468933,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.1074035167694092,
+          "Metrics/twist/error_vel_yaw": 0.49962741136550903
+        },
+        "per_episode": {
+          "reward": [
+            15.090230941772461
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            578
+          ],
+          "tracking_error_xy": [
+            0.7668996453285217
+          ],
+          "yaw_error": [
+            0.35231301188468933
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 50.51914596557617,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5120785236358643,
+        "yaw_error": 0.17351733148097992,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.2792696952819824,
+          "Metrics/twist/error_vel_yaw": 0.426645964384079
+        },
+        "per_episode": {
+          "reward": [
+            50.51914596557617
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5120785236358643
+          ],
+          "yaw_error": [
+            0.17351733148097992
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_12-31-06_reppo_v00_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 29.86142349243164,
+        "mean_cost": 0.0,
+        "mean_length": 904.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.8943510055541992,
+        "yaw_error": 0.1936921626329422,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.02150559425354,
+          "Metrics/twist/error_vel_yaw": 0.43058228492736816
+        },
+        "per_episode": {
+          "reward": [
+            29.86142349243164
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            904
+          ],
+          "tracking_error_xy": [
+            0.8943510055541992
+          ],
+          "yaw_error": [
+            0.1936921626329422
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v00_s2",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 2,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 28.358329391479494,
+      "median": 24.399005889892578,
+      "iqm": 28.093809763590496,
+      "ci_lo": 15.658139038085938,
+      "ci_hi": 41.61616973876953,
+      "worst": 8.110742568969727,
+      "n": 5
+    },
+    "length": {
+      "mean": 696.0,
+      "median": 663.0,
+      "iqm": 705.6666666666666,
+      "ci_lo": 459.4,
+      "ci_hi": 932.6,
+      "worst": 363.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.4,
+      "median": 0.0,
+      "iqm": 0.3333333333333333,
+      "ci_lo": 0.0,
+      "ci_hi": 0.8,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7345705270767212,
+      "median": 0.6287594437599182,
+      "iqm": 0.6535404324531555,
+      "ci_lo": 0.5430062413215637,
+      "ci_hi": 0.981605052947998,
+      "worst": 1.1948366165161133,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.1944505453109741,
+      "median": 0.19312629103660583,
+      "iqm": 0.18695851663748422,
+      "ci_lo": 0.16310645937919616,
+      "ci_hi": 0.23227024972438812,
+      "worst": 0.26453399658203125,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-29-24_reppo_v00_s2/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 18.835102081298828,
+        "mean_cost": 0.0,
+        "mean_length": 454.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.5173947215080261,
+        "yaw_error": 0.19312629103660583,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.5813775658607483,
+          "Metrics/twist/error_vel_yaw": 0.2163364589214325
+        },
+        "per_episode": {
+          "reward": [
+            18.835102081298828
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            454
+          ],
+          "tracking_error_xy": [
+            0.5173947215080261
+          ],
+          "yaw_error": [
+            0.19312629103660583
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-29-24_reppo_v00_s2/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 8.110742568969727,
+        "mean_cost": 0.0,
+        "mean_length": 363.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 1.1948366165161133,
+        "yaw_error": 0.26453399658203125,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.082251787185669,
+          "Metrics/twist/error_vel_yaw": 0.2391488254070282
+        },
+        "per_episode": {
+          "reward": [
+            8.110742568969727
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            363
+          ],
+          "tracking_error_xy": [
+            1.1948366165161133
+          ],
+          "yaw_error": [
+            0.26453399658203125
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-29-24_reppo_v00_s2/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 41.04732131958008,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.6287594437599182,
+        "yaw_error": 0.20338943600654602,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.5701448917388916,
+          "Metrics/twist/error_vel_yaw": 0.5005061030387878
+        },
+        "per_episode": {
+          "reward": [
+            41.04732131958008
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.6287594437599182
+          ],
+          "yaw_error": [
+            0.20338943600654602
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-29-24_reppo_v00_s2/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 49.39947509765625,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5257411599159241,
+        "yaw_error": 0.16435982286930084,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.3137842416763306,
+          "Metrics/twist/error_vel_yaw": 0.40066829323768616
+        },
+        "per_episode": {
+          "reward": [
+            49.39947509765625
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5257411599159241
+          ],
+          "yaw_error": [
+            0.16435982286930084
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-29-24_reppo_v00_s2/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 24.399005889892578,
+        "mean_cost": 0.0,
+        "mean_length": 663.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.8061206936836243,
+        "yaw_error": 0.14684318006038666,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.335832953453064,
+          "Metrics/twist/error_vel_yaw": 0.23822179436683655
+        },
+        "per_episode": {
+          "reward": [
+            24.399005889892578
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            663
+          ],
+          "tracking_error_xy": [
+            0.8061206936836243
+          ],
+          "yaw_error": [
+            0.14684318006038666
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v00_s4",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 4,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 43.57976760864258,
+      "median": 41.39314270019531,
+      "iqm": 44.42526880900065,
+      "ci_lo": 37.31309509277344,
+      "ci_hi": 49.846440124511716,
+      "worst": 32.240081787109375,
+      "n": 5
+    },
+    "length": {
+      "mean": 1000.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 1000.0,
+      "ci_hi": 1000.0,
+      "worst": 1000.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 1.0,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "worst": 1.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7635577499866486,
+      "median": 0.6762546300888062,
+      "iqm": 0.7030515472094218,
+      "ci_lo": 0.5102624297142029,
+      "ci_hi": 1.0533066272735596,
+      "worst": 1.3046746253967285,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.20704304575920104,
+      "median": 0.20355261862277985,
+      "iqm": 0.1911621888478597,
+      "ci_lo": 0.16597019731998444,
+      "ci_hi": 0.25904057919979095,
+      "worst": 0.3084229826927185,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-40-13_reppo_v00_s4/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 52.38294982910156,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.4039594829082489,
+        "yaw_error": 0.20355261862277985,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.0072587728500366,
+          "Metrics/twist/error_vel_yaw": 0.5057624578475952
+        },
+        "per_episode": {
+          "reward": [
+            52.38294982910156
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.4039594829082489
+          ],
+          "yaw_error": [
+            0.20355261862277985
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-40-13_reppo_v00_s4/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 32.240081787109375,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 1.3046746253967285,
+        "yaw_error": 0.3084229826927185,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 3.260737419128418,
+          "Metrics/twist/error_vel_yaw": 0.7645240426063538
+        },
+        "per_episode": {
+          "reward": [
+            32.240081787109375
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            1.3046746253967285
+          ],
+          "yaw_error": [
+            0.3084229826927185
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-40-13_reppo_v00_s4/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 41.39314270019531,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.6762546300888062,
+        "yaw_error": 0.15330567955970764,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.6875883340835571,
+          "Metrics/twist/error_vel_yaw": 0.375401109457016
+        },
+        "per_episode": {
+          "reward": [
+            41.39314270019531
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.6762546300888062
+          ],
+          "yaw_error": [
+            0.15330567955970764
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-40-13_reppo_v00_s4/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 51.53657913208008,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5335692763328552,
+        "yaw_error": 0.16602714359760284,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.3323748111724854,
+          "Metrics/twist/error_vel_yaw": 0.40959277749061584
+        },
+        "per_episode": {
+          "reward": [
+            51.53657913208008
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5335692763328552
+          ],
+          "yaw_error": [
+            0.16602714359760284
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-40-13_reppo_v00_s4/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 40.34608459472656,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.899330735206604,
+        "yaw_error": 0.2039068043231964,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.2491660118103027,
+          "Metrics/twist/error_vel_yaw": 0.501600980758667
+        },
+        "per_episode": {
+          "reward": [
+            40.34608459472656
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.899330735206604
+          ],
+          "yaw_error": [
+            0.2039068043231964
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v00_s3",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 3,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 34.082915496826175,
+      "median": 40.75741958618164,
+      "iqm": 35.64665444691976,
+      "ci_lo": 17.976053619384764,
+      "ci_hi": 50.18977737426758,
+      "worst": 9.598248481750488,
+      "n": 5
+    },
+    "length": {
+      "mean": 798.6,
+      "median": 1000.0,
+      "iqm": 872.6666666666666,
+      "ci_lo": 548.6,
+      "ci_hi": 1000.0,
+      "worst": 375.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.6,
+      "median": 1.0,
+      "iqm": 0.6666666666666666,
+      "ci_lo": 0.2,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7109187841415405,
+      "median": 0.6108136177062988,
+      "iqm": 0.6572104891141256,
+      "ci_lo": 0.469329833984375,
+      "ci_hi": 0.9878294229507446,
+      "worst": 1.2391732931137085,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.22739714682102202,
+      "median": 0.19090035557746887,
+      "iqm": 0.21592112878958383,
+      "ci_lo": 0.15369715690612792,
+      "ci_hi": 0.30109713673591615,
+      "worst": 0.34692591428756714,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-23-43_reppo_v00_s3/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 53.876365661621094,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.34378916025161743,
+        "yaw_error": 0.1422964334487915,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.8568134903907776,
+          "Metrics/twist/error_vel_yaw": 0.3505037724971771
+        },
+        "per_episode": {
+          "reward": [
+            53.876365661621094
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.34378916025161743
+          ],
+          "yaw_error": [
+            0.1422964334487915
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-23-43_reppo_v00_s3/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 14.963175773620605,
+        "mean_cost": 0.0,
+        "mean_length": 618.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 1.2391732931137085,
+        "yaw_error": 0.34692591428756714,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.912297248840332,
+          "Metrics/twist/error_vel_yaw": 0.5326263308525085
+        },
+        "per_episode": {
+          "reward": [
+            14.963175773620605
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            618
+          ],
+          "tracking_error_xy": [
+            1.2391732931137085
+          ],
+          "yaw_error": [
+            0.34692591428756714
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-23-43_reppo_v00_s3/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 9.598248481750488,
+        "mean_cost": 0.0,
+        "mean_length": 375.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.6108136177062988,
+        "yaw_error": 0.31036674976348877,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.5711148977279663,
+          "Metrics/twist/error_vel_yaw": 0.28545403480529785
+        },
+        "per_episode": {
+          "reward": [
+            9.598248481750488
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            375
+          ],
+          "tracking_error_xy": [
+            0.6108136177062988
+          ],
+          "yaw_error": [
+            0.31036674976348877
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-23-43_reppo_v00_s3/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 51.21936798095703,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5241286158561707,
+        "yaw_error": 0.14649628102779388,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.3106937408447266,
+          "Metrics/twist/error_vel_yaw": 0.35803309082984924
+        },
+        "per_episode": {
+          "reward": [
+            51.21936798095703
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5241286158561707
+          ],
+          "yaw_error": [
+            0.14649628102779388
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-23-43_reppo_v00_s3/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 40.75741958618164,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.8366892337799072,
+        "yaw_error": 0.19090035557746887,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.0922722816467285,
+          "Metrics/twist/error_vel_yaw": 0.4702986180782318
+        },
+        "per_episode": {
+          "reward": [
+            40.75741958618164
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.8366892337799072
+          ],
+          "yaw_error": [
+            0.19090035557746887
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v00_s5",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 5,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 41.4525951385498,
+      "median": 41.31806564331055,
+      "iqm": 42.31826655069987,
+      "ci_lo": 33.1867115020752,
+      "ci_hi": 49.387299346923825,
+      "worst": 26.765607833862305,
+      "n": 5
+    },
+    "length": {
+      "mean": 940.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 820.0,
+      "ci_hi": 1000.0,
+      "worst": 700.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.8,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 0.4,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7159741520881653,
+      "median": 0.6772773861885071,
+      "iqm": 0.6550534168879191,
+      "ci_lo": 0.4824978709220886,
+      "ci_hi": 0.9919169664382934,
+      "worst": 1.2421685457229614,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.1512410372495651,
+      "median": 0.14784787595272064,
+      "iqm": 0.15045316020647684,
+      "ci_lo": 0.13576197922229766,
+      "ci_hi": 0.16734450161457062,
+      "worst": 0.17773696780204773,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-38-31_reppo_v00_s5/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 53.54256820678711,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.37254196405410767,
+        "yaw_error": 0.1383722722530365,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.9286454916000366,
+          "Metrics/twist/error_vel_yaw": 0.34171462059020996
+        },
+        "per_episode": {
+          "reward": [
+            53.54256820678711
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.37254196405410767
+          ],
+          "yaw_error": [
+            0.1383722722530365
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-38-31_reppo_v00_s5/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 36.370086669921875,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 1.2421685457229614,
+        "yaw_error": 0.17773696780204773,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 3.1051204204559326,
+          "Metrics/twist/error_vel_yaw": 0.4400603175163269
+        },
+        "per_episode": {
+          "reward": [
+            36.370086669921875
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            1.2421685457229614
+          ],
+          "yaw_error": [
+            0.17773696780204773
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-38-31_reppo_v00_s5/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 41.31806564331055,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.6772773861885071,
+        "yaw_error": 0.14784787595272064,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.69091796875,
+          "Metrics/twist/error_vel_yaw": 0.3633197546005249
+        },
+        "per_episode": {
+          "reward": [
+            41.31806564331055
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.6772773861885071
+          ],
+          "yaw_error": [
+            0.14784787595272064
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-38-31_reppo_v00_s5/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 49.26664733886719,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5558018088340759,
+        "yaw_error": 0.1651393324136734,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.3889962434768677,
+          "Metrics/twist/error_vel_yaw": 0.40620213747024536
+        },
+        "per_episode": {
+          "reward": [
+            49.26664733886719
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5558018088340759
+          ],
+          "yaw_error": [
+            0.1651393324136734
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_14-38-31_reppo_v00_s5/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v00_baseline.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 26.765607833862305,
+        "mean_cost": 0.0,
+        "mean_length": 700.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.7320810556411743,
+        "yaw_error": 0.12710873782634735,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.2795827388763428,
+          "Metrics/twist/error_vel_yaw": 0.21474900841712952
+        },
+        "per_episode": {
+          "reward": [
+            26.765607833862305
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            700
+          ],
+          "tracking_error_xy": [
+            0.7320810556411743
+          ],
+          "yaw_error": [
+            0.12710873782634735
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "ppo_39M_s1",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 44.538150024414065,
+      "median": 46.53207015991211,
+      "iqm": 46.54483413696289,
+      "ci_lo": 33.023267364501955,
+      "ci_hi": 53.547837829589845,
+      "worst": 24.004634857177734,
+      "n": 5
+    },
+    "length": {
+      "mean": 921.6,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 764.8,
+      "ci_hi": 1000.0,
+      "worst": 608.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.8,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 0.4,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.3267035335302353,
+      "median": 0.3326135277748108,
+      "iqm": 0.33370572328567505,
+      "ci_lo": 0.24743694961071014,
+      "ci_hi": 0.39533071517944335,
+      "worst": 0.4428401291370392,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.11213139146566391,
+      "median": 0.09863438457250595,
+      "iqm": 0.09597069521745046,
+      "ci_lo": 0.0850145548582077,
+      "ci_hi": 0.15434344857931137,
+      "worst": 0.1941465139389038,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 59.051612854003906,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.18956036865711212,
+        "yaw_error": 0.07859835773706436,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.46751952171325684,
+          "Metrics/twist/error_vel_yaw": 0.19084669649600983
+        },
+        "per_episode": {
+          "reward": [
+            59.051612854003906
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.18956036865711212
+          ],
+          "yaw_error": [
+            0.07859835773706436
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 43.223777770996094,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.4428401291370392,
+        "yaw_error": 0.09863438457250595,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.1018730401992798,
+          "Metrics/twist/error_vel_yaw": 0.24102304875850677
+        },
+        "per_episode": {
+          "reward": [
+            43.223777770996094
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.4428401291370392
+          ],
+          "yaw_error": [
+            0.09863438457250595
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 49.87865447998047,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.3326135277748108,
+        "yaw_error": 0.10462351143360138,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.827724814414978,
+          "Metrics/twist/error_vel_yaw": 0.25533050298690796
+        },
+        "per_episode": {
+          "reward": [
+            49.87865447998047
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.3326135277748108
+          ],
+          "yaw_error": [
+            0.10462351143360138
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 24.004634857177734,
+        "mean_cost": 0.0,
+        "mean_length": 608.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.3529839813709259,
+        "yaw_error": 0.1941465139389038,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.5311010479927063,
+          "Metrics/twist/error_vel_yaw": 0.29159972071647644
+        },
+        "per_episode": {
+          "reward": [
+            24.004634857177734
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            608
+          ],
+          "tracking_error_xy": [
+            0.3529839813709259
+          ],
+          "yaw_error": [
+            0.1941465139389038
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-03-04_ppo_39M_s1/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 46.53207015991211,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.31551966071128845,
+        "yaw_error": 0.08465418964624405,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.786787211894989,
+          "Metrics/twist/error_vel_yaw": 0.2054302990436554
+        },
+        "per_episode": {
+          "reward": [
+            46.53207015991211
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.31551966071128845
+          ],
+          "yaw_error": [
+            0.08465418964624405
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "ppo_39M_s2",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 2,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 50.394937133789064,
+      "median": 49.92097854614258,
+      "iqm": 50.18842061360677,
+      "ci_lo": 45.31058883666992,
+      "ci_hi": 55.721092224121094,
+      "worst": 42.08903121948242,
+      "n": 5
+    },
+    "length": {
+      "mean": 1000.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 1000.0,
+      "ci_hi": 1000.0,
+      "worst": 1000.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 1.0,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "worst": 1.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.31442796289920805,
+      "median": 0.34218350052833557,
+      "iqm": 0.3149571319421132,
+      "ci_lo": 0.23334525525569916,
+      "ci_hi": 0.3840909540653229,
+      "worst": 0.43925562500953674,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.0859672799706459,
+      "median": 0.08454710990190506,
+      "iqm": 0.08519762257734935,
+      "ci_lo": 0.07535567432641983,
+      "ci_hi": 0.0974142000079155,
+      "worst": 0.10534174740314484,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 59.32039260864258,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.18801279366016388,
+        "yaw_error": 0.06890178471803665,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.4639330208301544,
+          "Metrics/twist/error_vel_yaw": 0.1670336276292801
+        },
+        "per_episode": {
+          "reward": [
+            59.32039260864258
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.18801279366016388
+          ],
+          "yaw_error": [
+            0.06890178471803665
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 42.08903121948242,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.43925562500953674,
+        "yaw_error": 0.09383191168308258,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.0931657552719116,
+          "Metrics/twist/error_vel_yaw": 0.23076938092708588
+        },
+        "per_episode": {
+          "reward": [
+            42.08903121948242
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.43925562500953674
+          ],
+          "yaw_error": [
+            0.09383191168308258
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 49.92097854614258,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.3481452763080597,
+        "yaw_error": 0.10534174740314484,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.8670393228530884,
+          "Metrics/twist/error_vel_yaw": 0.25676125288009644
+        },
+        "per_episode": {
+          "reward": [
+            49.92097854614258
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.3481452763080597
+          ],
+          "yaw_error": [
+            0.10534174740314484
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 54.41733169555664,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.25454261898994446,
+        "yaw_error": 0.08454710990190506,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.6321526765823364,
+          "Metrics/twist/error_vel_yaw": 0.20327511429786682
+        },
+        "per_episode": {
+          "reward": [
+            54.41733169555664
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.25454261898994446
+          ],
+          "yaw_error": [
+            0.08454710990190506
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-10-49_ppo_39M_s2/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 46.226951599121094,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.34218350052833557,
+        "yaw_error": 0.0772138461470604,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.8535597324371338,
+          "Metrics/twist/error_vel_yaw": 0.18778559565544128
+        },
+        "per_episode": {
+          "reward": [
+            46.226951599121094
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.34218350052833557
+          ],
+          "yaw_error": [
+            0.0772138461470604
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "ppo_39M_s3",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 3,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 44.2831787109375,
+      "median": 46.52277374267578,
+      "iqm": 46.425149281819664,
+      "ci_lo": 32.41341934204102,
+      "ci_hi": 53.71395416259766,
+      "worst": 23.007183074951172,
+      "n": 5
+    },
+    "length": {
+      "mean": 926.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 778.0,
+      "ci_hi": 1000.0,
+      "worst": 630.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.8,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 0.4,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.35334788262844086,
+      "median": 0.36229854822158813,
+      "iqm": 0.36898090442021686,
+      "ci_lo": 0.26183938086032865,
+      "ci_hi": 0.42764210104942324,
+      "worst": 0.47161245346069336,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.1037599578499794,
+      "median": 0.08294381946325302,
+      "iqm": 0.08835741132497787,
+      "ci_lo": 0.07858860343694687,
+      "ci_hi": 0.14317408204078674,
+      "worst": 0.18128648400306702,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 59.133262634277344,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.1881842464208603,
+        "yaw_error": 0.07244107127189636,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.4641138017177582,
+          "Metrics/twist/error_vel_yaw": 0.17585241794586182
+        },
+        "per_episode": {
+          "reward": [
+            59.133262634277344
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.1881842464208603
+          ],
+          "yaw_error": [
+            0.07244107127189636
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 42.65159225463867,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.47161245346069336,
+        "yaw_error": 0.0995698869228363,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.1746867895126343,
+          "Metrics/twist/error_vel_yaw": 0.24480493366718292
+        },
+        "per_episode": {
+          "reward": [
+            42.65159225463867
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.47161245346069336
+          ],
+          "yaw_error": [
+            0.0995698869228363
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 50.10108184814453,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.3835695683956146,
+        "yaw_error": 0.08294381946325302,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.9558854699134827,
+          "Metrics/twist/error_vel_yaw": 0.20185114443302155
+        },
+        "per_episode": {
+          "reward": [
+            50.10108184814453
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.3835695683956146
+          ],
+          "yaw_error": [
+            0.08294381946325302
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 23.007183074951172,
+        "mean_cost": 0.0,
+        "mean_length": 630.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.36229854822158813,
+        "yaw_error": 0.18128648400306702,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.5650972723960876,
+          "Metrics/twist/error_vel_yaw": 0.27879008650779724
+        },
+        "per_episode": {
+          "reward": [
+            23.007183074951172
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            630
+          ],
+          "tracking_error_xy": [
+            0.36229854822158813
+          ],
+          "yaw_error": [
+            0.18128648400306702
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-18-00_ppo_39M_s3/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 46.52277374267578,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.3610745966434479,
+        "yaw_error": 0.0825585275888443,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.9004788398742676,
+          "Metrics/twist/error_vel_yaw": 0.20063123106956482
+        },
+        "per_episode": {
+          "reward": [
+            46.52277374267578
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.3610745966434479
+          ],
+          "yaw_error": [
+            0.0825585275888443
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "ppo_39M_s4",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 4,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 50.621456909179685,
+      "median": 50.15024185180664,
+      "iqm": 50.05378341674805,
+      "ci_lo": 46.19816513061524,
+      "ci_hi": 55.531514739990236,
+      "worst": 43.730445861816406,
+      "n": 5
+    },
+    "length": {
+      "mean": 1000.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 1000.0,
+      "ci_hi": 1000.0,
+      "worst": 1000.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 1.0,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "worst": 1.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.3183052778244019,
+      "median": 0.33790987730026245,
+      "iqm": 0.3205837309360504,
+      "ci_lo": 0.23808905482292175,
+      "ci_hi": 0.3907816529273987,
+      "worst": 0.4470091164112091,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.09188720285892486,
+      "median": 0.091293103992939,
+      "iqm": 0.09440695991118749,
+      "ci_lo": 0.08101366609334945,
+      "ci_hi": 0.10148652493953705,
+      "worst": 0.10516828298568726,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 59.21548843383789,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.18276607990264893,
+        "yaw_error": 0.0710468515753746,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.4509204626083374,
+          "Metrics/twist/error_vel_yaw": 0.1724664568901062
+        },
+        "per_episode": {
+          "reward": [
+            59.21548843383789
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.18276607990264893
+          ],
+          "yaw_error": [
+            0.0710468515753746
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 43.730445861816406,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.4470091164112091,
+        "yaw_error": 0.10516828298568726,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.1130571365356445,
+          "Metrics/twist/error_vel_yaw": 0.2567604184150696
+        },
+        "per_episode": {
+          "reward": [
+            43.730445861816406
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.4470091164112091
+          ],
+          "yaw_error": [
+            0.10516828298568726
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 50.15024185180664,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.34887027740478516,
+        "yaw_error": 0.08985242247581482,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.8691591620445251,
+          "Metrics/twist/error_vel_yaw": 0.21786004304885864
+        },
+        "per_episode": {
+          "reward": [
+            50.15024185180664
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.34887027740478516
+          ],
+          "yaw_error": [
+            0.08985242247581482
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 53.32126235961914,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.27497103810310364,
+        "yaw_error": 0.10207535326480865,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.6831421256065369,
+          "Metrics/twist/error_vel_yaw": 0.247841015458107
+        },
+        "per_episode": {
+          "reward": [
+            53.32126235961914
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.27497103810310364
+          ],
+          "yaw_error": [
+            0.10207535326480865
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-25-08_ppo_39M_s4/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 46.68984603881836,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.33790987730026245,
+        "yaw_error": 0.091293103992939,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.8420613408088684,
+          "Metrics/twist/error_vel_yaw": 0.221272274851799
+        },
+        "per_episode": {
+          "reward": [
+            46.68984603881836
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.33790987730026245
+          ],
+          "yaw_error": [
+            0.091293103992939
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "ppo_39M_s5",
+    "algorithm": "PPO",
+    "env_steps": 39321600,
+    "train_seed": 5,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 44.379364013671875,
+      "median": 46.89341354370117,
+      "iqm": 46.694601694742836,
+      "ci_lo": 32.36385269165039,
+      "ci_hi": 53.57242202758789,
+      "worst": 22.677478790283203,
+      "n": 5
+    },
+    "length": {
+      "mean": 922.8,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 768.4,
+      "ci_hi": 1000.0,
+      "worst": 614.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.8,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 0.4,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.3259323418140411,
+      "median": 0.31945541501045227,
+      "iqm": 0.32761719822883606,
+      "ci_lo": 0.25181974172592164,
+      "ci_hi": 0.39672772884368895,
+      "worst": 0.4482426047325134,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.11785615235567093,
+      "median": 0.11334139853715897,
+      "iqm": 0.10914265861113866,
+      "ci_lo": 0.08976660072803497,
+      "ci_hi": 0.1554989457130432,
+      "worst": 0.18780271708965302,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-32-33_ppo_39M_s5/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 59.135536193847656,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.19856750965118408,
+        "yaw_error": 0.07405006885528564,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.4904922544956207,
+          "Metrics/twist/error_vel_yaw": 0.18045218288898468
+        },
+        "per_episode": {
+          "reward": [
+            59.135536193847656
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.19856750965118408
+          ],
+          "yaw_error": [
+            0.07405006885528564
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-32-33_ppo_39M_s5/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 43.56208801269531,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.4482426047325134,
+        "yaw_error": 0.11334139853715897,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.1161197423934937,
+          "Metrics/twist/error_vel_yaw": 0.2775019109249115
+        },
+        "per_episode": {
+          "reward": [
+            43.56208801269531
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.4482426047325134
+          ],
+          "yaw_error": [
+            0.11334139853715897
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-32-33_ppo_39M_s5/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 49.62830352783203,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.31945541501045227,
+        "yaw_error": 0.11375990509986877,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.7946043610572815,
+          "Metrics/twist/error_vel_yaw": 0.2770039737224579
+        },
+        "per_episode": {
+          "reward": [
+            49.62830352783203
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.31945541501045227
+          ],
+          "yaw_error": [
+            0.11375990509986877
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-32-33_ppo_39M_s5/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 22.677478790283203,
+        "mean_cost": 0.0,
+        "mean_length": 614.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.34925585985183716,
+        "yaw_error": 0.18780271708965302,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.5300309658050537,
+          "Metrics/twist/error_vel_yaw": 0.2819877564907074
+        },
+        "per_episode": {
+          "reward": [
+            22.677478790283203
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            614
+          ],
+          "tracking_error_xy": [
+            0.34925585985183716
+          ],
+          "yaw_error": [
+            0.18780271708965302
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_v00/2026-08-03_13-32-33_ppo_39M_s5/model_399.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "config/mjlab_go2_ppo.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 46.89341354370117,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.31414031982421875,
+        "yaw_error": 0.10032667219638824,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.7830162048339844,
+          "Metrics/twist/error_vel_yaw": 0.2442585527896881
+        },
+        "per_episode": {
+          "reward": [
+            46.89341354370117
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.31414031982421875
+          ],
+          "yaw_error": [
+            0.10032667219638824
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "ppo_196M",
+    "algorithm": "PPO",
+    "env_steps": 196608000,
+    "train_seed": 1,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 51.94141540527344,
+      "median": 51.32966232299805,
+      "iqm": 51.452388763427734,
+      "ci_lo": 47.74682388305664,
+      "ci_hi": 56.60048828125,
+      "worst": 45.235538482666016,
+      "n": 5
+    },
+    "length": {
+      "mean": 1000.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 1000.0,
+      "ci_hi": 1000.0,
+      "worst": 1000.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 1.0,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "worst": 1.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.2702705770730972,
+      "median": 0.28061527013778687,
+      "iqm": 0.264249453941981,
+      "ci_lo": 0.20871221721172334,
+      "ci_hi": 0.3307604670524597,
+      "worst": 0.38146185874938965,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.0849368467926979,
+      "median": 0.08715149760246277,
+      "iqm": 0.0848719800511996,
+      "ci_lo": 0.0746701791882515,
+      "ci_hi": 0.09458240568637848,
+      "worst": 0.1014394760131836,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 60.11437225341797,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.1771426647901535,
+        "yaw_error": 0.06862881779670715,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.43703338503837585,
+          "Metrics/twist/error_vel_yaw": 0.16684049367904663
+        },
+        "per_episode": {
+          "reward": [
+            60.11437225341797
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.1771426647901535
+          ],
+          "yaw_error": [
+            0.06862881779670715
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 45.235538482666016,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.38146185874938965,
+        "yaw_error": 0.09144078940153122,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.9484120011329651,
+          "Metrics/twist/error_vel_yaw": 0.22410812973976135
+        },
+        "per_episode": {
+          "reward": [
+            45.235538482666016
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.38146185874938965
+          ],
+          "yaw_error": [
+            0.09144078940153122
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 51.32966232299805,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.28333160281181335,
+        "yaw_error": 0.1014394760131836,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.7039242386817932,
+          "Metrics/twist/error_vel_yaw": 0.24686795473098755
+        },
+        "per_episode": {
+          "reward": [
+            51.32966232299805
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.28333160281181335
+          ],
+          "yaw_error": [
+            0.1014394760131836
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 54.11496353149414,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.22880148887634277,
+        "yaw_error": 0.08715149760246277,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.5670804381370544,
+          "Metrics/twist/error_vel_yaw": 0.20939287543296814
+        },
+        "per_episode": {
+          "reward": [
+            54.11496353149414
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.22880148887634277
+          ],
+          "yaw_error": [
+            0.08715149760246277
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/model_1999.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "PPO",
+        "config": "logs/juwels_pull/2026-07-31_12-58-54_go2_ppo_4096/params/agent.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 48.912540435791016,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.28061527013778687,
+        "yaw_error": 0.0760236531496048,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.6984853148460388,
+          "Metrics/twist/error_vel_yaw": 0.18413087725639343
+        },
+        "per_episode": {
+          "reward": [
+            48.912540435791016
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.28061527013778687
+          ],
+          "yaw_error": [
+            0.0760236531496048
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v28_refparity",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 41.505211639404294,
+      "median": 39.941123962402344,
+      "iqm": 42.52959696451823,
+      "ci_lo": 33.74539031982422,
+      "ci_hi": 49.2760368347168,
+      "worst": 27.02642822265625,
+      "n": 5
+    },
+    "length": {
+      "mean": 1000.0,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 1000.0,
+      "ci_hi": 1000.0,
+      "worst": 1000.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 1.0,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "worst": 1.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7339154481887817,
+      "median": 0.6151155829429626,
+      "iqm": 0.6748787562052408,
+      "ci_lo": 0.4900821566581726,
+      "ci_hi": 1.0070156931877137,
+      "worst": 1.2533234357833862,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.21680046021938323,
+      "median": 0.18923431634902954,
+      "iqm": 0.17988202969233194,
+      "ci_lo": 0.15016697645187377,
+      "ci_hi": 0.3124967634677887,
+      "worst": 0.40415990352630615,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_09-11-35_go2_v28_refparity_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v28_refparity.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 52.91083908081055,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.3916175365447998,
+        "yaw_error": 0.1401963084936142,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.9762739539146423,
+          "Metrics/twist/error_vel_yaw": 0.34640321135520935
+        },
+        "per_episode": {
+          "reward": [
+            52.91083908081055
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.3916175365447998
+          ],
+          "yaw_error": [
+            0.1401963084936142
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_09-11-35_go2_v28_refparity_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v28_refparity.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 27.02642822265625,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 1.2533234357833862,
+        "yaw_error": 0.40415990352630615,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 3.1325442790985107,
+          "Metrics/twist/error_vel_yaw": 1.006170630455017
+        },
+        "per_episode": {
+          "reward": [
+            27.02642822265625
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            1.2533234357833862
+          ],
+          "yaw_error": [
+            0.40415990352630615
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_09-11-35_go2_v28_refparity_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v28_refparity.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 39.941123962402344,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.6151155829429626,
+        "yaw_error": 0.20980779826641083,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.5357255935668945,
+          "Metrics/twist/error_vel_yaw": 0.5185947418212891
+        },
+        "per_episode": {
+          "reward": [
+            39.941123962402344
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.6151155829429626
+          ],
+          "yaw_error": [
+            0.20980779826641083
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_09-11-35_go2_v28_refparity_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v28_refparity.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 49.82699966430664,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5260300636291504,
+        "yaw_error": 0.14060397446155548,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.3141824007034302,
+          "Metrics/twist/error_vel_yaw": 0.34445133805274963
+        },
+        "per_episode": {
+          "reward": [
+            49.82699966430664
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5260300636291504
+          ],
+          "yaw_error": [
+            0.14060397446155548
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_09-11-35_go2_v28_refparity_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v28_refparity.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 37.8206672668457,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.8834906220436096,
+        "yaw_error": 0.18923431634902954,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.2096633911132812,
+          "Metrics/twist/error_vel_yaw": 0.46790018677711487
+        },
+        "per_episode": {
+          "reward": [
+            37.8206672668457
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.8834906220436096
+          ],
+          "yaw_error": [
+            0.18923431634902954
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v29_dualclip",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 32.99152450561523,
+      "median": 42.15076446533203,
+      "iqm": 33.894906997680664,
+      "ci_lo": 18.882991790771484,
+      "ci_hi": 45.963113403320314,
+      "worst": 11.62700080871582,
+      "n": 5
+    },
+    "length": {
+      "mean": 786.4,
+      "median": 1000.0,
+      "iqm": 869.3333333333334,
+      "ci_lo": 516.0,
+      "ci_hi": 1000.0,
+      "worst": 324.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.6,
+      "median": 1.0,
+      "iqm": 0.6666666666666666,
+      "ci_lo": 0.2,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7375866115093231,
+      "median": 0.6451374292373657,
+      "iqm": 0.6958916187286377,
+      "ci_lo": 0.42534810304641724,
+      "ci_hi": 1.0570685863494873,
+      "worst": 1.3316893577575684,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.18627723157405854,
+      "median": 0.17397503554821014,
+      "iqm": 0.17555518448352814,
+      "ci_lo": 0.15846194922924042,
+      "ci_hi": 0.2218291223049164,
+      "worst": 0.2537318468093872,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_10-10-40_go2_v29_dualclip_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v29_dualclip.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 51.64590072631836,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.4722326993942261,
+        "yaw_error": 0.17397503554821014,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.177537202835083,
+          "Metrics/twist/error_vel_yaw": 0.43140897154808044
+        },
+        "per_episode": {
+          "reward": [
+            51.64590072631836
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.4722326993942261
+          ],
+          "yaw_error": [
+            0.17397503554821014
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_10-10-40_go2_v29_dualclip_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v29_dualclip.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 17.347455978393555,
+        "mean_cost": 0.0,
+        "mean_length": 608.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 1.3316893577575684,
+        "yaw_error": 0.19451192021369934,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.023324966430664,
+          "Metrics/twist/error_vel_yaw": 0.2928870618343353
+        },
+        "per_episode": {
+          "reward": [
+            17.347455978393555
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            608
+          ],
+          "tracking_error_xy": [
+            1.3316893577575684
+          ],
+          "yaw_error": [
+            0.19451192021369934
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_10-10-40_go2_v29_dualclip_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v29_dualclip.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 42.186500549316406,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.6451374292373657,
+        "yaw_error": 0.15817859768867493,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.6101810932159424,
+          "Metrics/twist/error_vel_yaw": 0.39029592275619507
+        },
+        "per_episode": {
+          "reward": [
+            42.186500549316406
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.6451374292373657
+          ],
+          "yaw_error": [
+            0.15817859768867493
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_10-10-40_go2_v29_dualclip_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v29_dualclip.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 11.62700080871582,
+        "mean_cost": 0.0,
+        "mean_length": 324.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.26856884360313416,
+        "yaw_error": 0.2537318468093872,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.21561472117900848,
+          "Metrics/twist/error_vel_yaw": 0.20211902260780334
+        },
+        "per_episode": {
+          "reward": [
+            11.62700080871582
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            324
+          ],
+          "tracking_error_xy": [
+            0.26856884360313416
+          ],
+          "yaw_error": [
+            0.2537318468093872
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_10-10-40_go2_v29_dualclip_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v29_dualclip.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 42.15076446533203,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.9703047275543213,
+        "yaw_error": 0.15098875761032104,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.4267592430114746,
+          "Metrics/twist/error_vel_yaw": 0.37184980511665344
+        },
+        "per_episode": {
+          "reward": [
+            42.15076446533203
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.9703047275543213
+          ],
+          "yaw_error": [
+            0.15098875761032104
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "arm": "reppo_v30_atoms151",
+    "algorithm": "REPPO",
+    "env_steps": 39321600,
+    "train_seed": 1,
+    "action_mode": "deterministic",
+    "protocol": "E2",
+    "eval_seeds": [
+      3,
+      7,
+      11,
+      21,
+      33
+    ],
+    "reward": {
+      "mean": 39.9420726776123,
+      "median": 41.53048324584961,
+      "iqm": 42.235251108805336,
+      "ci_lo": 28.671737289428712,
+      "ci_hi": 50.0355583190918,
+      "worst": 19.394472122192383,
+      "n": 5
+    },
+    "length": {
+      "mean": 918.2,
+      "median": 1000.0,
+      "iqm": 1000.0,
+      "ci_lo": 754.6,
+      "ci_hi": 1000.0,
+      "worst": 591.0,
+      "n": 5
+    },
+    "survival_rate": {
+      "mean": 0.8,
+      "median": 1.0,
+      "iqm": 1.0,
+      "ci_lo": 0.4,
+      "ci_hi": 1.0,
+      "worst": 0.0,
+      "n": 5
+    },
+    "tracking_error_xy": {
+      "mean": 0.7067388355731964,
+      "median": 0.6880412101745605,
+      "iqm": 0.6750616033871969,
+      "ci_lo": 0.47415820956230165,
+      "ci_hi": 0.9548765182495117,
+      "worst": 1.1639602184295654,
+      "n": 5
+    },
+    "yaw_error": {
+      "mean": 0.18788931965827943,
+      "median": 0.1871173232793808,
+      "iqm": 0.18469206988811493,
+      "ci_lo": 0.15655469596385957,
+      "ci_hi": 0.2191090077161789,
+      "worst": 0.24676552414894104,
+      "n": 5
+    },
+    "per_seed": [
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_11-02-06_go2_v30_atoms151_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v30_atoms151.yaml",
+        "seed": 3,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 53.610137939453125,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.34454914927482605,
+        "yaw_error": 0.13860486447811127,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 0.8586986064910889,
+          "Metrics/twist/error_vel_yaw": 0.3434221148490906
+        },
+        "per_episode": {
+          "reward": [
+            53.610137939453125
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.34454914927482605
+          ],
+          "yaw_error": [
+            0.13860486447811127
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_11-02-06_go2_v30_atoms151_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v30_atoms151.yaml",
+        "seed": 7,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 34.461753845214844,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 1.1639602184295654,
+        "yaw_error": 0.24676552414894104,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.9097931385040283,
+          "Metrics/twist/error_vel_yaw": 0.6104255318641663
+        },
+        "per_episode": {
+          "reward": [
+            34.461753845214844
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            1.1639602184295654
+          ],
+          "yaw_error": [
+            0.24676552414894104
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_11-02-06_go2_v30_atoms151_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v30_atoms151.yaml",
+        "seed": 11,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 19.394472122192383,
+        "mean_cost": 0.0,
+        "mean_length": 591.0,
+        "survival_rate": 0.0,
+        "tracking_error_xy": 0.6880412101745605,
+        "yaw_error": 0.19882774353027344,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.0157866477966309,
+          "Metrics/twist/error_vel_yaw": 0.286301851272583
+        },
+        "per_episode": {
+          "reward": [
+            19.394472122192383
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            591
+          ],
+          "tracking_error_xy": [
+            0.6880412101745605
+          ],
+          "yaw_error": [
+            0.19882774353027344
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_11-02-06_go2_v30_atoms151_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v30_atoms151.yaml",
+        "seed": 21,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 50.71351623535156,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.5216562151908875,
+        "yaw_error": 0.1871173232793808,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 1.3041846752166748,
+          "Metrics/twist/error_vel_yaw": 0.4574184715747833
+        },
+        "per_episode": {
+          "reward": [
+            50.71351623535156
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.5216562151908875
+          ],
+          "yaw_error": [
+            0.1871173232793808
+          ]
+        }
+      },
+      {
+        "checkpoint": "/home/human/workspaces/safe_rl/logs/safe_rl/go2_velocity/2026-08-03_11-02-06_go2_v30_atoms151_s1/model_299.pt",
+        "env_id": "Unitree-Go2-Flat",
+        "algorithm": "REPPO",
+        "config": "config/mjlab_go2_reppo_v30_atoms151.yaml",
+        "seed": 33,
+        "num_envs": 1,
+        "episodes_requested": 1,
+        "episodes_collected": 1,
+        "one_episode_per_env": true,
+        "action_mode": "deterministic",
+        "q_argmax_samples": 0,
+        "max_episode_length": 1000,
+        "mean_reward": 41.53048324584961,
+        "mean_cost": 0.0,
+        "mean_length": 1000.0,
+        "survival_rate": 1.0,
+        "tracking_error_xy": 0.8154873847961426,
+        "yaw_error": 0.16813114285469055,
+        "mjlab_metrics": {
+          "Metrics/twist/error_vel_xy": 2.0395288467407227,
+          "Metrics/twist/error_vel_yaw": 0.41483640670776367
+        },
+        "per_episode": {
+          "reward": [
+            41.53048324584961
+          ],
+          "cost": [
+            0.0
+          ],
+          "length": [
+            1000
+          ],
+          "tracking_error_xy": [
+            0.8154873847961426
+          ],
+          "yaw_error": [
+            0.16813114285469055
+          ]
+        }
+      }
+    ]
+  }
+]
