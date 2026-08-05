@@ -9,22 +9,26 @@ import yaml
 
 from safe_rl.envs import make_env
 from safe_rl.runners import MetaOnPolicyRunner, OffPolicyRunner, OnPolicyRunner
+from safe_rl.utils.seeding import seed_everything
 
 # Algorithms that use off-policy training
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
 
 # Algorithms that use on-policy training
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "CUP", "REPPO", "Distillation"}
+ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "RCPPO", "CUP", "REPPO", "Distillation"}
 
 
-def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
+def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any], int, str, str]:
     """Load training configuration from YAML file.
 
     Returns:
-        Tuple of (train_cfg dict, max_iterations, runner_class_name, experiment_name)
+        Tuple of (train_cfg dict, env_cfg dict, max_iterations, runner_class_name, experiment_name)
     """
     with open(config_path, "r", encoding="utf-8") as file:
         cfg = yaml.safe_load(file)
+
+    # Environment-construction options (e.g. hidden_goal); merged with CLI flags in main().
+    env_cfg = cfg.get("env", {}) or {}
 
     algorithm_cfg = cfg["algorithm"]
     policy_cfg = cfg["policy"]
@@ -58,6 +62,7 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
                 "start_random_steps": runner_cfg.get("start_random_steps", 10000),
                 "update_after": runner_cfg.get("update_after", 1000),
                 "update_every": runner_cfg.get("update_every", 50),
+                "n_step": runner_cfg.get("n_step", 1),
             },
         }
     else:
@@ -81,9 +86,11 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
         train_cfg["meta"] = cfg.get("meta", {}) or {}
         # Carry the CBF config block through (used by OnPolicyRunner and make_env).
         train_cfg["cbf"] = cfg.get("cbf", None)
+        # Carry the reachability-safety-filter block through (used by OnPolicyRunner).
+        train_cfg["reach_filter"] = cfg.get("reach_filter", None)
 
     max_iterations = runner_cfg.get("max_iterations", 1000)
-    return train_cfg, max_iterations, runner_class_name, experiment_name
+    return train_cfg, env_cfg, max_iterations, runner_class_name, experiment_name
 
 
 def parse_cost_limits(cost_limits: str | None) -> list[float] | None:
@@ -108,7 +115,12 @@ def main() -> None:
     parser.add_argument("--cost_limits", type=str, default=None, help="Comma-separated cost limits.")
     parser.add_argument("--render_mode", type=str, default=None, help="Render mode (e.g. human, rgb_array).")
     parser.add_argument("--log_dir", type=str, default="logs/safety_gymnasium", help="Root log directory.")
-    parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed for the environment AND the global torch/numpy/python RNGs "
+                             "(network init, action sampling, replay sampling).")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Request deterministic kernels (slower; some CUDA ops have no "
+                             "deterministic implementation). Used by the regression tests.")
     parser.add_argument("--task_seeds", type=str, default=None, help="Comma-separated env seeds to train jointly as a fixed task set (hidden-goal multi-task baseline); spread round-robin across num_envs and overrides --seed for the env layout.")
     parser.add_argument("--disable_rnd", action="store_true", help="Disable RND even if configured.")
     parser.add_argument("--wandb_project", type=str, default=None, help="Override wandb project name from config.")
@@ -145,8 +157,14 @@ def main() -> None:
     parser.add_argument("--eta_penalized", action="store_true", help="Enable the eta-penalized meta cost step (sec. 7.5).")
     parser.add_argument("--no_protect_std", action="store_true", help="Let the eta cost step update the exploration std too (disables Fix A; for the diagnostic run).")
     parser.add_argument("--no_eta_deadband", action="store_true", help="Fire the eta cost step every iter even when already safe (disables the deadband; old behavior).")
-    parser.add_argument("--hidden_goal", action="store_true", help="Hidden-goal meta-RL task: mask goal_lidar, one fixed goal per task, terminate on reach.")
+    parser.add_argument("--hidden_goal", action="store_true", help="Hidden-goal meta-RL task: mask goal_lidar, one fixed goal per task, terminate on reach. Also enabled by `env: hidden_goal: true` in the config.")
     parser.add_argument("--hidden_goal_continue", action="store_true", help="With --hidden_goal: respawn a new hidden goal on reach (continue_goal=True) instead of terminating; measures goals reached per episode.")
+    parser.add_argument("--no_hidden_goal", action="store_true", help="Force hidden_goal off even if the config's env block enables it (goal-conditioned ablation; MetaOnPolicyRunner then requires meta.allow_goal_obs).")
+    parser.add_argument("--geom_margin", action="store_true", help="Replace the sparse hazard cost with a signed geometric margin h(s) = d_safe - dist(agent, nearest hazard); pair with RCPPO signed_margin: true.")
+    parser.add_argument("--geom_margin_d_safe", type=float, default=0.4, help="Safety distance from hazard centers for --geom_margin (must exceed the hazard radius).")
+    parser.add_argument("--geom_margin_min", type=float, default=None, help="Lower clip for the signed margin (default: -d_safe).")
+    parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to a model_*.pt to warm-start the policy from (Lagrangian/PID state restarts fresh).")
+    parser.add_argument("--resume_reset_std", type=float, default=None, help="With --resume_checkpoint: re-inflate the actor's action std to this value (converged policies have collapsed std and cannot explore toward the constraint).")
 
     # Vision observations (Safety-Gymnasium *Vision-v0 envs)
     parser.add_argument("--vision", action="store_true", help="Enable image observations (auto-enabled when the env id contains 'Vision').")
@@ -168,7 +186,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    train_cfg, max_iterations, runner_class_name, experiment_name = load_train_cfg(args.config)
+    # Seed BEFORE anything constructs a module or samples: policy init, action sampling and
+    # replay sampling all draw from the global torch generator. Previously --seed reached only
+    # make_env, so runs were not reproducible (see safe_rl/utils/seeding.py).
+    if args.seed is not None:
+        seed_everything(args.seed, deterministic=args.deterministic)
+        print(f"[INFO] Seeded torch/numpy/python with {args.seed}"
+              f"{' (deterministic kernels)' if args.deterministic else ''}")
+
+    train_cfg, env_cfg, max_iterations, runner_class_name, experiment_name = load_train_cfg(args.config)
     algorithm_cfg = train_cfg["algorithm"]
 
     # Apply CLI overrides to algorithm config
@@ -210,8 +236,8 @@ def main() -> None:
         else:
             train_cfg["num_steps_per_env"] = args.num_steps_per_env
 
-    # Apply PPOL-PID specific overrides
-    if algorithm_cfg.get("class_name") == "PPOL_PID":
+    # Apply PPOL-PID specific overrides (RCPPO inherits the PID Lagrangian)
+    if algorithm_cfg.get("class_name") in ("PPOL_PID", "RCPPO"):
         # Update PID gains if any are provided
         current_pid = algorithm_cfg.get("lagrangian_pid", [0.1, 0.01, 0.01])
         if args.pid_kp is not None:
@@ -273,11 +299,25 @@ def main() -> None:
         cost_limits = algorithm_cfg["cost_limits"]
 
     # Pass cost_limits to algorithm config for Safe RL algorithms
-    if algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID", "P3O", "CUP") and cost_limits is not None:
+    if (
+        algorithm_cfg.get("class_name") in ("SafeSAC", "SafePPO", "PPOL_PID", "RCPPO", "P3O", "CUP")
+        and cost_limits is not None
+    ):
         algorithm_cfg["cost_limits"] = cost_limits
+    # For RCPPO the limit is a feasibility threshold on the reachability value, not a budget.
+    if algorithm_cfg.get("class_name") == "RCPPO" and cost_limits is not None:
+        print(f"[INFO] RCPPO: cost_limits={cost_limits} acts as the feasibility threshold epsilon on E[V_h].")
 
     cbf_cfg = train_cfg.get("cbf", None)
     cbf_state = bool(cbf_cfg and cbf_cfg.get("enabled", False))
+
+    # Resolve hidden_goal: CLI or the config's env block enables it; --no_hidden_goal wins.
+    hidden_goal = (args.hidden_goal or bool(env_cfg.get("hidden_goal", False))) and not args.no_hidden_goal
+    hidden_goal_continue = args.hidden_goal_continue or bool(env_cfg.get("hidden_goal_continue", False))
+    if hidden_goal and not args.hidden_goal:
+        print("[INFO] hidden_goal enabled by the config's env block (goal_lidar removed from the observation).")
+    if args.no_hidden_goal and (args.hidden_goal or env_cfg.get("hidden_goal", False)):
+        print("[INFO] --no_hidden_goal: goal observation KEPT (goal-conditioned ablation).")
 
     vision = args.vision or "Vision" in args.env_id
     vec_kwargs = {}
@@ -296,8 +336,11 @@ def main() -> None:
         render_mode=args.render_mode,
         cost_limits=cost_limits,
         seed=args.seed,
-        hidden_goal=args.hidden_goal,
-        hidden_goal_continue=args.hidden_goal_continue,
+        hidden_goal=hidden_goal,
+        hidden_goal_continue=hidden_goal_continue,
+        geom_margin=args.geom_margin,
+        geom_margin_d_safe=args.geom_margin_d_safe,
+        geom_margin_min=args.geom_margin_min,
         task_seeds=parse_task_seeds(args.task_seeds),
         cbf_state=cbf_state,
         vision=vision,
@@ -347,6 +390,19 @@ def main() -> None:
     else:
         print(f"[INFO] Using OnPolicyRunner for algorithm: {algorithm_cfg.get('class_name')}")
         runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)
+
+    if args.resume_checkpoint:
+        # Warm-start from a previous run's policy (and optimizer). Lagrangian/PID
+        # state is not stored in checkpoints, so lambda restarts from the config's
+        # lambda_init — intentional for constraint-rescue fine-tuning.
+        print(f"[INFO] Resuming policy from {args.resume_checkpoint}")
+        runner.load(args.resume_checkpoint, load_optimizer=True)
+        if args.resume_reset_std is not None:
+            import torch
+
+            with torch.no_grad():
+                runner.alg.policy.actor.std.fill_(args.resume_reset_std)
+            print(f"[INFO] Actor std re-inflated to {args.resume_reset_std} for constraint-rescue exploration.")
 
     runner.learn(max_iterations)
     env.close()
