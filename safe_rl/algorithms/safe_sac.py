@@ -89,6 +89,8 @@ class SafeSAC(SAC):
 
         self.cost_limits = cost_limits
         self.num_costs = len(cost_limits)
+        # Hazard-stratified replay diagnostics, refreshed each cost-critic update.
+        self._last_replay_info: dict[str, float] = {}
         if hasattr(policy, 'num_costs') and policy.num_costs != self.num_costs:
             print(f"WARNING: Policy num_costs ({policy.num_costs}) doesn't match cost_limits ({self.num_costs})")
 
@@ -272,14 +274,46 @@ class SafeSAC(SAC):
         next_critic_obs: torch.Tensor,
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
+        obs_normalizer=None,
+        critic_obs_normalizer=None,
     ) -> dict[str, float]:
-        """Train the cost critics inside SAC's update loop (see :meth:`SAC.update`)."""
-        costs = batch.get("costs")
+        """Train the cost critics inside SAC's update loop (see :meth:`SAC.update`).
+
+        With ``hazard_fraction > 0`` the cost critic trains on its OWN hazard-stratified
+        batch, drawn from the same storage. The batch this hook is handed stays uniform
+        and continues to feed the reward critic, the CVPO E-step, the eta dual, the
+        lambda controller and the M-step -- all of which take plain means over the
+        sampled states and would be biased by a stratified batch.
+        """
+        cost_is_weights = None
+        if self.hazard_fraction > 0.0 and self.storage is not None:
+            cost_batch = self.storage.sample(self.batch_size, stratified=True)
+            costs = cost_batch.get("costs")
+            obs = cost_batch["observations"]
+            critic_obs = cost_batch.get("critic_observations", obs)
+            actions = cost_batch["actions"]
+            dones = cost_batch["dones"]
+            next_obs = cost_batch["next_observations"]
+            next_critic_obs = cost_batch.get("next_critic_observations", next_obs)
+            bootstrap = cost_batch.get("bootstrap")
+            effective_n_steps = cost_batch.get("effective_n_steps")
+            obs, critic_obs, next_obs, next_critic_obs = self._normalize_obs_tensors(
+                obs, critic_obs, next_obs, next_critic_obs, obs_normalizer, critic_obs_normalizer
+            )
+            cost_is_weights = cost_batch["cost_is_weights"]
+            # Exact stratum composition from the sampler itself. Recomputing it from the
+            # sampled costs would be wrong under n_step > 1, where a safe-stratum start
+            # can still carry a positive aggregated cost from later in its window.
+            self._last_replay_info = dict(self.storage.last_stratified_info)
+        else:
+            costs = batch.get("costs")
+
         if costs is None:
             costs = torch.zeros(actions.shape[0], self.num_costs, device=self.device)
         cost_critic_loss = self._update_cost_critic(
             obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs,
             bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+            cost_is_weights=cost_is_weights,
         )
         return {"cost_critic": cost_critic_loss}
 
@@ -294,6 +328,7 @@ class SafeSAC(SAC):
         next_critic_obs: torch.Tensor,
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
+        cost_is_weights: torch.Tensor | None = None,
     ) -> float:
         """Update cost Q-networks.
 
@@ -308,10 +343,21 @@ class SafeSAC(SAC):
             next_critic_obs: Next critic observations.
             bootstrap: Optional timeout flag for the bootstrap mask.
             effective_n_steps: Optional per-sample n-step horizon for the discount.
+            cost_is_weights: Optional per-transition importance weights [batch_size, 1]
+                from hazard-stratified replay. ``None`` reduces to the plain unweighted
+                mean, which is arithmetically identical to the previous ``F.mse_loss``.
+                These weights must reach NO other loss.
 
         Returns:
             Cost critic loss value.
         """
+        if getattr(self.policy, "is_distributional_cost_critic", False):
+            return self._update_cost_critic_distributional(
+                obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs,
+                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                cost_is_weights=cost_is_weights,
+            )
+
         with torch.no_grad():
             next_actions, _ = self.policy.sample_with_log_prob(next_obs)
             cost_q_target = self.policy.evaluate_cost_q_target(next_critic_obs, next_actions)
@@ -323,7 +369,74 @@ class SafeSAC(SAC):
             target_cost_q = costs + discount * mask * cost_q_target
 
         cost_q = self.policy.evaluate_cost_q(critic_obs, actions)
-        cost_critic_loss = F.mse_loss(cost_q, target_cost_q)
+        # Per-transition Bellman error so hazard-stratified replay can reweight it.
+        cost_td_error = cost_q - target_cost_q  # [batch, num_costs]
+        per_sample_cost_loss = cost_td_error.pow(2)
+        if cost_is_weights is None:
+            cost_critic_loss = per_sample_cost_loss.mean()  # == F.mse_loss, exactly
+        else:
+            # view(-1, 1) is the explicit guard against a [batch]-shaped weight
+            # broadcasting into a [batch, batch] matrix. One weight per transition,
+            # applied to every constraint before reducing.
+            weights = cost_is_weights.view(-1, 1)
+            cost_critic_loss = (weights * per_sample_cost_loss).mean()
+
+        self.cost_critic_optimizer.zero_grad()
+        cost_critic_loss.backward()
+        cost_critic_params = []
+        for critic in self.policy.cost_critics:
+            cost_critic_params.extend(list(critic.parameters()))
+        nn.utils.clip_grad_norm_(cost_critic_params, self.max_grad_norm)
+        self.cost_critic_optimizer.step()
+
+        return cost_critic_loss.item()
+
+    def _update_cost_critic_distributional(
+        self,
+        obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        costs: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
+        effective_n_steps: torch.Tensor | None = None,
+        cost_is_weights: torch.Tensor | None = None,
+    ) -> float:
+        """Categorical (C51) cost-critic update.
+
+        Mirrors :meth:`SAC._update_critic_distributional` with two differences: no entropy
+        term (cost carries no entropy bonus) and no min-over-twins pessimism (understating
+        cost is the unsafe direction, and the cost channel uses a single critic by default).
+        """
+        costs = costs.squeeze(-1)  # [batch, 1] -> [batch]; distributional cost critic is single-constraint
+        bootstrap_mask = self._bootstrap_mask(dones, bootstrap).squeeze(-1)
+        discount = self._bootstrap_discount(effective_n_steps)
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1)
+
+        with torch.no_grad():
+            next_actions, _ = self.policy.sample_with_log_prob(next_obs)
+            next_obs_norm = self.policy.critic_obs_normalizer(next_critic_obs)
+            target_dists = []
+            for target in self.policy.cost_critic_targets:
+                dist = target.get_dist(target(next_obs_norm, next_actions))
+                target_dists.append(
+                    target.project(
+                        next_dist=dist, rewards=costs, bootstrap=bootstrap_mask, discount=discount
+                    )
+                )
+
+        obs_normalized = self.policy.critic_obs_normalizer(critic_obs)
+        # Per-transition weights from hazard-stratified replay; [batch] to match the
+        # per-sample cross-entropy, and 1.0 when stratification is off.
+        weights = 1.0 if cost_is_weights is None else cost_is_weights.view(-1)
+        cost_critic_loss = 0.0
+        for critic, target_dist in zip(self.policy.cost_critics, target_dists):
+            logits = critic(obs_normalized, actions)
+            per_sample_cost_loss = -torch.sum(target_dist * F.log_softmax(logits, dim=-1), dim=-1)
+            cost_critic_loss = cost_critic_loss + (weights * per_sample_cost_loss).mean()
 
         self.cost_critic_optimizer.zero_grad()
         cost_critic_loss.backward()

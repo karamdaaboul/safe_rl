@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -348,3 +350,383 @@ def test_cvpo_dual_logsumexp_stable_at_extreme_scale() -> None:
     weights = _stable_softmax((q - lam_s * qc) / 1e-3)  # force eta = 1e-3
     assert np.isfinite(weights).all()
     assert np.allclose(weights.sum(axis=0), 1.0, atol=1e-6)
+
+
+def _make_safe_ac(critic_type: str):
+    from safe_rl.modules import SafeActorCritic
+
+    ckw = (
+        {"hidden_dims": [32, 32]}
+        if critic_type == "standard"
+        else {"num_atoms": 51, "v_min": -10.0, "v_max": 10.0, "network_kwargs": {"hidden_dims": [32, 32]}}
+    )
+    return SafeActorCritic(
+        num_actor_obs=NUM_OBS,
+        num_critic_obs=NUM_OBS,
+        num_actions=NUM_ACT,
+        num_costs=1,
+        critic_type=critic_type,
+        actor_kwargs={"hidden_dims": [32, 32]},
+        critic_kwargs=ckw,
+        cost_critic_kwargs={"hidden_dims": [32, 32]},
+    )
+
+
+def test_safe_actor_critic_supports_both_critic_types() -> None:
+    from safe_rl.modules import SafeActorCritic
+
+    std = _make_safe_ac("standard")
+    dist = _make_safe_ac("distributional")
+    assert std.is_distributional_critic is False
+    assert dist.is_distributional_critic is True
+    # Cost critics stay scalar in both modes: the E-step needs Q_c as a plain expectation.
+    obs, act = torch.randn(4, NUM_OBS), torch.rand(4, NUM_ACT) * 2 - 1
+    for p in (std, dist):
+        q1, q2 = p.evaluate_q(obs, act)
+        t1, t2 = p.evaluate_q_target(obs, act)
+        assert q1.shape == q2.shape == t1.shape == t2.shape == (4, 1)
+        assert p.evaluate_cost_q(obs, act).shape == (4, 1)
+    with pytest.raises(ValueError, match="critic_type"):
+        SafeActorCritic(num_actor_obs=NUM_OBS, num_critic_obs=NUM_OBS, num_actions=NUM_ACT, critic_type="quantile")
+
+
+def test_cvpo_runs_with_distributional_critics_and_nstep() -> None:
+    from safe_rl.algorithms import CVPO
+
+    alg = CVPO(
+        _make_safe_ac("distributional"),
+        batch_size=32,
+        num_updates_per_step=2,
+        sample_action_num=16,
+        mstep_iteration_num=2,
+        cost_limits=[25.0],
+        n_step=3,
+        device="cpu",
+    )
+    assert alg.policy.is_distributional_critic
+    alg.init_storage(buffer_size=500, num_envs=1, obs_shape=[NUM_OBS], act_shape=[NUM_ACT])
+    for _ in range(128):
+        alg.store_transition(
+            torch.randn(1, NUM_OBS),
+            torch.rand(1, NUM_ACT) * 2 - 1,
+            torch.randn(1),
+            torch.zeros(1),
+            torch.randn(1, NUM_OBS),
+            cost=torch.rand(1, 1),
+        )
+    info = alg.update(current_costs=[20.0])
+    for key in ("critic", "actor", "cost_critic"):
+        assert torch.isfinite(torch.tensor(info[key])), key
+    pen = alg.get_penalty_info()
+    assert 1.0 <= pen["ess_min"] <= alg.sample_action_num + 1e-6
+
+
+def _cvpo_adaptive(**kw):
+    from safe_rl.algorithms import CVPO
+
+    base = dict(
+        batch_size=32,
+        num_updates_per_step=1,
+        sample_action_num=16,
+        mstep_iteration_num=2,
+        cost_limits=[25.0],
+        qc_thres_adapt=True,
+        qc_thres_lr=0.05,
+        qc_ema=1.0,
+        device="cpu",
+    )
+    base.update(kw)
+    return CVPO(_make_safe_ac("standard"), **base)
+
+
+def test_qc_thres_tightens_when_budget_is_exceeded() -> None:
+    alg = _cvpo_adaptive()
+    start = alg.qc_thres
+    for _ in range(20):
+        alg.update_lagrangian_multipliers([50.0])  # 2x the limit
+    assert alg.qc_thres < start, "threshold must tighten when realized cost exceeds the limit"
+    assert alg.qc_thres >= alg.qc_thres_min_frac * alg._qc_thres_initial
+
+
+def test_qc_thres_never_exceeds_the_analytic_value() -> None:
+    # Undershooting the budget may relax the threshold, but never past the requested limit.
+    alg = _cvpo_adaptive()
+    for _ in range(50):
+        alg.update_lagrangian_multipliers([0.0])
+    assert alg.qc_thres <= alg._qc_thres_initial + 1e-9
+
+
+def test_qc_thres_is_static_when_adaptation_is_off() -> None:
+    from safe_rl.algorithms import CVPO
+
+    alg = CVPO(
+        _make_safe_ac("standard"),
+        batch_size=32,
+        num_updates_per_step=1,
+        sample_action_num=16,
+        mstep_iteration_num=2,
+        cost_limits=[25.0],
+        device="cpu",
+    )
+    before = alg.qc_thres
+    for _ in range(10):
+        alg.update_lagrangian_multipliers([100.0])
+    assert alg.qc_thres == before
+
+
+# ---------------------------------------------------------------------------
+# qc_scale calibration source (static recalibration of episodic -> Q-space units)
+# ---------------------------------------------------------------------------
+
+
+def test_qc_scale_analytic_is_the_default() -> None:
+    alg = _make_cvpo()
+    assert alg.qc_scale_source == "analytic"
+    # (1 - g^H)/(1 - g)/H with g=0.99, H=1000 -> ~0.1
+    assert alg._qc_scale == pytest.approx(0.1, abs=1e-4)
+    assert alg.qc_thres == pytest.approx(25.0 * alg._qc_scale)
+
+
+def test_qc_scale_measured_overrides_the_threshold() -> None:
+    alg = _make_cvpo(
+        qc_scale_source="measured",
+        qc_scale_measured=0.0764,
+        qc_scale_probe="probe_runs/example.jsonl",
+    )
+    assert alg._qc_scale == pytest.approx(0.0764)
+    assert alg.qc_thres == pytest.approx(25.0 * 0.0764)  # 1.91
+    # The analytic value stays available for comparison, and provenance is retained.
+    assert alg._qc_scale_analytic == pytest.approx(0.1, abs=1e-4)
+    assert alg.qc_scale_probe == "probe_runs/example.jsonl"
+    assert alg.get_penalty_info()["qc_scale"] == pytest.approx(0.0764)
+
+
+def test_qc_scale_measured_requires_a_positive_value() -> None:
+    with pytest.raises(ValueError, match="qc_scale_measured"):
+        _make_cvpo(qc_scale_source="measured")
+    with pytest.raises(ValueError, match="qc_scale_measured"):
+        _make_cvpo(qc_scale_source="measured", qc_scale_measured=0.0)
+
+
+def test_qc_scale_source_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="qc_scale_source"):
+        _make_cvpo(qc_scale_source="guessed")
+
+
+def test_measured_qc_scale_does_not_enable_the_adaptive_loop() -> None:
+    # Task 4 is a static units fix; it must not turn the ratchet on.
+    alg = _make_cvpo(qc_scale_source="measured", qc_scale_measured=0.0764)
+    assert alg.qc_thres_adapt is False
+    before = alg.qc_thres
+    for _ in range(10):
+        alg.update_lagrangian_multipliers([100.0])
+    assert alg.qc_thres == before
+
+
+# ---------------------------------------------------------------------------
+# non-negative cost critic head
+# ---------------------------------------------------------------------------
+
+
+def test_cost_critic_can_emit_negative_values_by_default() -> None:
+    """Documents the invariant violation the flag exists to fix."""
+    policy = _make_policy()
+    assert policy.cost_critic_nonneg is False
+    # The head is linear, so a negative output is representable at all.
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for critic in policy.cost_critics:
+            torch.nn.init.constant_(critic.network[-1].bias, -1.0)
+            torch.nn.init.zeros_(critic.network[-1].weight)
+        q = policy.evaluate_cost_q(torch.randn(8, NUM_OBS), torch.randn(8, NUM_ACT))
+    assert (q < 0).all()
+
+
+def test_nonneg_cost_head_clamps_both_online_and_target() -> None:
+    from safe_rl.modules import SafeSACActorCritic
+
+    policy = SafeSACActorCritic(
+        num_actor_obs=NUM_OBS,
+        num_critic_obs=NUM_OBS,
+        num_actions=NUM_ACT,
+        num_costs=1,
+        cost_critic_nonneg=True,
+        actor_kwargs={"hidden_dims": [32, 32]},
+        critic_kwargs={"hidden_dims": [32, 32]},
+        cost_critic_kwargs={"hidden_dims": [32, 32]},
+    )
+    with torch.no_grad():
+        for critic in list(policy.cost_critics) + list(policy.cost_critic_targets):
+            torch.nn.init.constant_(critic.network[-1].bias, -5.0)
+            torch.nn.init.zeros_(critic.network[-1].weight)
+        obs, act = torch.randn(16, NUM_OBS), torch.randn(16, NUM_ACT)
+        assert (policy.evaluate_cost_q(obs, act) >= 0).all()
+        assert (policy.evaluate_cost_q_target(obs, act) >= 0).all()
+
+
+def test_nonneg_cost_head_keeps_cvpo_update_running() -> None:
+    policy = _make_policy()
+    policy.cost_critic_nonneg = True
+    from safe_rl.algorithms import CVPO
+
+    alg = CVPO(policy, cost_limits=[25.0], batch_size=32, num_updates_per_step=1,
+               sample_action_num=16, mstep_iteration_num=2, device="cpu")
+    _fill_buffer(alg)
+    info = alg.update()
+    assert math.isfinite(info["cost_critic"])
+
+
+# ---------------------------------------------------------------------------
+# distributional cost critic + passive (observer) mode
+# ---------------------------------------------------------------------------
+
+
+def _make_dist_cost_policy(**kw):
+    from safe_rl.modules.safe_actor_critic import SafeActorCritic
+
+    base = dict(
+        critic_type="distributional",
+        cost_critic_type="distributional",
+        num_costs=1,
+        actor_kwargs={"hidden_dims": [32, 32]},
+        critic_kwargs={"num_atoms": 51, "v_min": -5.0, "v_max": 15.0,
+                       "network_kwargs": {"hidden_dims": [32, 32]}},
+        cost_critic_kwargs={"num_atoms": 51, "v_min": 0.0, "v_max": 50.0,
+                            "network_kwargs": {"hidden_dims": [32, 32]}},
+    )
+    base.update(kw)
+    return SafeActorCritic(NUM_OBS, NUM_OBS, NUM_ACT, **base)
+
+
+def test_distributional_cost_critic_cannot_be_negative() -> None:
+    """v_min=0 makes the non-negativity invariant structural, not a patched head."""
+    policy = _make_dist_cost_policy()
+    assert policy.is_distributional_cost_critic
+    obs, act = torch.randn(128, NUM_OBS), torch.randn(128, NUM_ACT)
+    for q in (policy.evaluate_cost_q(obs, act), policy.evaluate_cost_q_target(obs, act)):
+        assert q.shape == (128, 1)
+        assert (q >= 0).all()
+        assert (q <= 50.0 + 1e-4).all()
+
+
+def test_distributional_cost_critic_rejects_multiple_constraints() -> None:
+    with pytest.raises(ValueError, match="single constraint"):
+        _make_dist_cost_policy(num_costs=2)
+
+
+def test_cost_critic_type_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="cost_critic_type"):
+        _make_dist_cost_policy(cost_critic_type="categorical")
+
+
+def test_passive_cost_critic_keeps_lambda_at_zero_but_still_trains_qc() -> None:
+    from safe_rl.algorithms import CVPO
+
+    policy = _make_dist_cost_policy()
+    alg = CVPO(policy, cost_limits=[25.0], batch_size=32, num_updates_per_step=1,
+               sample_action_num=8, mstep_iteration_num=2, cost_critic_passive=True,
+               lambda_mode="grad", lambda_max=0.0, lambda_lr=0.0, n_step=3, device="cpu")
+    assert alg.lam == 0.0
+    alg.init_storage(buffer_size=2000, num_envs=2, obs_shape=[NUM_OBS], act_shape=[NUM_ACT])
+    for _ in range(200):
+        alg.store_transition(torch.randn(2, NUM_OBS), torch.randn(2, NUM_ACT), torch.randn(2),
+                             torch.zeros(2), torch.randn(2, NUM_OBS),
+                             cost=torch.rand(2, 1), bootstrap=torch.zeros(2))
+    before = [p.clone() for p in policy.cost_critics[0].parameters()]
+    info = alg.update()
+    assert alg.lam == 0.0, "passive mode must never raise lambda"
+    assert math.isfinite(info["cost_critic"])
+    after = list(policy.cost_critics[0].parameters())
+    assert any(not torch.equal(b, a) for b, a in zip(before, after)), "cost critic must still train"
+
+
+def test_distributional_cost_target_uses_gamma_to_the_n() -> None:
+    """A constant cost c with no dones has the n-step fixed point c*(1-g^n)/(1-g)/(1-g^n)."""
+    from safe_rl.algorithms import CVPO
+
+    policy = _make_dist_cost_policy()
+    alg = CVPO(policy, cost_limits=[25.0], batch_size=64, num_updates_per_step=1,
+               sample_action_num=8, mstep_iteration_num=1, cost_critic_passive=True,
+               lambda_mode="grad", lambda_max=0.0, lambda_lr=0.0, gamma=0.99, n_step=3,
+               device="cpu")
+    alg.init_storage(buffer_size=2000, num_envs=2, obs_shape=[NUM_OBS], act_shape=[NUM_ACT])
+    for _ in range(300):
+        alg.store_transition(torch.randn(2, NUM_OBS), torch.randn(2, NUM_ACT), torch.randn(2),
+                             torch.zeros(2), torch.randn(2, NUM_OBS),
+                             cost=torch.ones(2, 1), bootstrap=torch.zeros(2))
+    batch = alg.storage.sample(64)
+    expected = sum(0.99 ** k for k in range(3))
+    assert batch["costs"].mean().item() == pytest.approx(expected, abs=1e-4)
+    assert batch["effective_n_steps"].unique().tolist() == [3]
+
+
+# ---------------------------------------------------------------------------
+# CVaR cost constraint (WCSAC-style risk measure, exact from categorical atoms)
+# ---------------------------------------------------------------------------
+
+
+def test_cvar_matches_analytic_gaussian() -> None:
+    """CVaR read off the atoms must match mu + sigma*phi(Phi^-1(a))/(1-a)."""
+    norm = pytest.importorskip("scipy.stats").norm
+    from safe_rl.modules.critic import DistributionalCritic
+
+    c = DistributionalCritic(num_obs=4, num_actions=2, num_atoms=2001, v_min=-30.0, v_max=30.0,
+                             network_kwargs={"hidden_dims": [8]})
+    mu, sg = 3.0, 2.0
+    p = torch.exp(-0.5 * ((c.q_support - mu) / sg) ** 2)
+    p = (p / p.sum()).unsqueeze(0)
+    assert c.get_value(p).item() == pytest.approx(mu, abs=1e-3)
+    assert c.get_var(p).sqrt().item() == pytest.approx(sg, abs=1e-3)
+    for a in (0.5, 0.9, 0.99):
+        expected = mu + sg * norm.pdf(norm.ppf(a)) / (1 - a)
+        assert c.get_cvar(p, a).item() == pytest.approx(expected, abs=0.03)
+        assert c.get_quantile(p, a).item() == pytest.approx(mu + sg * norm.ppf(a), abs=0.05)
+
+
+def test_cvar_edge_cases_and_monotonicity() -> None:
+    from safe_rl.modules.critic import DistributionalCritic
+
+    c = DistributionalCritic(num_obs=4, num_actions=2, num_atoms=201, v_min=0.0, v_max=20.0,
+                             network_kwargs={"hidden_dims": [8]})
+    point = torch.zeros(1, c.num_atoms)
+    point[0, (c.q_support - 5.0).abs().argmin()] = 1.0
+    assert c.get_cvar(point, 0.9).item() == pytest.approx(c.get_value(point).item(), abs=1e-4)
+    p = torch.softmax(torch.randn(4, c.num_atoms), dim=-1)
+    assert torch.allclose(c.get_cvar(p, 0.0), c.get_value(p), atol=1e-5)
+    vals = [c.get_cvar(p, a).mean().item() for a in (0.1, 0.5, 0.9, 0.99)]
+    assert all(x < y for x, y in zip(vals, vals[1:])), "CVaR must increase with alpha"
+    with pytest.raises(ValueError):
+        c.get_cvar(p, 1.0)
+
+
+def test_cvar_mode_is_more_conservative_than_mean() -> None:
+    """The E-step cost signal under 'cvar' must dominate the mean, for the same critic."""
+    from safe_rl.algorithms import CVPO
+
+    policy = _make_dist_cost_policy()
+    common = dict(cost_limits=[25.0], batch_size=16, num_updates_per_step=1, sample_action_num=8,
+                  mstep_iteration_num=1, device="cpu")
+    mean_alg = CVPO(policy, cost_constraint_mode="mean", **common)
+    cvar_alg = CVPO(policy, cost_constraint_mode="cvar", cvar_alpha=0.9, **common)
+    obs, act = torch.randn(64, NUM_OBS), torch.randn(64, NUM_ACT)
+    with torch.no_grad():
+        m = mean_alg._estep_cost(obs, act, target=False)
+        v = cvar_alg._estep_cost(obs, act, target=False)
+    assert m.shape == v.shape == (64, 1)
+    assert (v >= m - 1e-5).all(), "CVaR_0.9 must be >= the mean everywhere"
+    assert v.mean() > m.mean()
+
+
+def test_cvar_mode_requires_a_distributional_cost_critic() -> None:
+    from safe_rl.algorithms import CVPO
+
+    alg = CVPO(_make_policy(), cost_limits=[25.0], cost_constraint_mode="cvar", device="cpu")
+    with pytest.raises(RuntimeError, match="requires a distributional cost critic"):
+        alg._estep_cost(torch.randn(4, NUM_OBS), torch.randn(4, NUM_ACT), target=False)
+
+
+def test_cost_constraint_mode_validation() -> None:
+    with pytest.raises(ValueError, match="cost_constraint_mode"):
+        _make_cvpo(cost_constraint_mode="worst_case")
+    with pytest.raises(ValueError, match="cvar_alpha"):
+        _make_cvpo(cost_constraint_mode="cvar", cvar_alpha=1.0)

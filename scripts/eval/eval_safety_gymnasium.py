@@ -8,7 +8,11 @@ import torch
 import yaml
 
 from safe_rl.envs import make_env
-from safe_rl.runners import OnPolicyRunner
+from safe_rl.runners import OffPolicyRunner, OnPolicyRunner
+
+# Algorithms driven by OffPolicyRunner. Routing these through OnPolicyRunner raises
+# "Training type not found", which is what evaluating an MPO/CVPO checkpoint used to hit.
+OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3", "MPO", "CVPO"}
 
 
 def load_train_cfg(config_path: str) -> Dict[str, Any]:
@@ -28,7 +32,7 @@ def load_train_cfg(config_path: str) -> Dict[str, Any]:
     if rnd_cfg is not None and rnd_cfg.get("weight", 0.0) == 0.0:
         algorithm_cfg["rnd_cfg"] = None
 
-    return {
+    out: Dict[str, Any] = {
         "algorithm": algorithm_cfg,
         "policy": policy_cfg,
         "num_steps_per_env": runner_cfg.get("num_steps_per_env", 24),
@@ -37,6 +41,25 @@ def load_train_cfg(config_path: str) -> Dict[str, Any]:
         "logger": runner_cfg.get("logger", "tensorboard"),
         "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
     }
+    # OffPolicyRunner reads a nested `runner` section (the on-policy path uses the flat keys
+    # above), so evaluating an off-policy checkpoint needs both forms present.
+    if algorithm_cfg.get("class_name", "") in OFF_POLICY_ALGORITHMS:
+        out["runner"] = {
+            "num_steps_per_env": runner_cfg.get("num_steps_per_env", 1),
+            "save_interval": runner_cfg.get("save_interval", 50),
+            "log_interval": runner_cfg.get("log_interval", 1),
+            "empirical_normalization": runner_cfg.get("empirical_normalization", False),
+            "logger": runner_cfg.get("logger", "tensorboard"),
+            "wandb_project": runner_cfg.get("wandb_project", "safe_rl"),
+            "wandb_entity": runner_cfg.get("wandb_entity"),
+            "wandb_dir": runner_cfg.get("wandb_dir"),
+            "max_size": runner_cfg.get("max_size", 1_000_000),
+            "start_random_steps": runner_cfg.get("start_random_steps", 10000),
+            "update_after": runner_cfg.get("update_after", 1000),
+            "update_every": runner_cfg.get("update_every", 50),
+            "n_step": runner_cfg.get("n_step", 1),
+        }
+    return out
 
 
 def parse_cost_limits(cost_limits: str | None) -> list[float] | None:
@@ -80,6 +103,22 @@ def main() -> None:
     parser.add_argument("--render_mode", type=str, default=None, help="Render mode (e.g. human, rgb_array).")
     parser.add_argument("--seed", type=int, default=None, help="Environment seed (= the hidden-goal task to render).")
     parser.add_argument("--hidden_goal", action="store_true", help="Hidden-goal meta-RL task (must match the trained policy's env).")
+    parser.add_argument(
+        "--reach_filter", action="store_true",
+        help="Enable the learned reachability safety filter (needs an RCPPO/ActorCriticReach checkpoint).",
+    )
+    parser.add_argument(
+        "--reach_threshold", type=float, default=0.0,
+        help="Reachability filter: Q_h feasibility threshold epsilon.",
+    )
+    parser.add_argument(
+        "--reach_candidates", type=int, default=16,
+        help="Reachability filter: candidate actions per intervention.",
+    )
+    parser.add_argument(
+        "--reach_mode", type=str, default="switch", choices=["switch", "blend"],
+        help="Reachability filter: replace or blend unsafe actions.",
+    )
     parser.add_argument("--video", action="store_true", help="Record the evaluation rollout(s) to mp4.")
     parser.add_argument("--video_dir", type=str, default=None, help="Directory to store evaluation videos.")
     parser.add_argument("--video_width", type=int, default=640, help="Rendered frame width (px).")
@@ -116,9 +155,26 @@ def main() -> None:
         )
     env = make_env(env_id=args.env_id, num_envs=args.num_envs, **env_kwargs)
 
-    runner = OnPolicyRunner(env, train_cfg, log_dir=None, device=args.device)
+    alg_name = train_cfg.get("algorithm", {}).get("class_name", "")
+    runner_cls = OffPolicyRunner if alg_name in OFF_POLICY_ALGORITHMS else OnPolicyRunner
+    if runner_cls is OffPolicyRunner:
+        print(f"[INFO] Using OffPolicyRunner for algorithm: {alg_name}")
+    runner = runner_cls(env, train_cfg, log_dir=None, device=args.device)
     runner.load(args.checkpoint, load_optimizer=False)
     policy = runner.get_inference_policy(device=args.device)
+
+    reach_filter = None
+    if args.reach_filter:
+        from safe_rl.filters import ReachabilitySafetyFilter
+
+        reach_filter = ReachabilitySafetyFilter(
+            policy=runner.alg.policy,
+            threshold=args.reach_threshold,
+            num_candidates=args.reach_candidates,
+            mode=args.reach_mode,
+            device=args.device,
+        )
+        print(f"[INFO] Reachability safety filter enabled (threshold={args.reach_threshold}, mode={args.reach_mode}).")
 
     obs, _ = env.get_observations()
     obs = obs.to(runner.device)
@@ -141,9 +197,14 @@ def main() -> None:
     reward_buf = torch.zeros(env.num_envs, device=runner.device)
     cost_buf = torch.zeros(env.num_envs, device=runner.device)
 
+    rta_interventions = 0
     while len(ep_rewards) < args.episodes:
         with torch.inference_mode():
             actions = policy(obs)
+            if reach_filter is not None:
+                # Critic obs == actor obs for Safety-Gymnasium; match training-time normalization.
+                actions = reach_filter.filter(actions, runner.privileged_obs_normalizer(obs))
+                rta_interventions += int(reach_filter.last_intervention_frac * env.num_envs)
         obs, rewards, dones, infos = env.step(actions)
         obs = obs.to(runner.device)
         rewards = rewards.to(runner.device)
@@ -171,6 +232,8 @@ def main() -> None:
     print(f"Evaluation over {args.episodes} episodes")
     print(f"Mean reward: {mean_reward:.3f}")
     print(f"Mean cost: {mean_cost:.3f}")
+    if reach_filter is not None:
+        print(f"Reachability filter interventions (env-steps): {rta_interventions}")
 
     env.close()
 

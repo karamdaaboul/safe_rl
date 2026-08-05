@@ -41,6 +41,7 @@ class SafeSACActorCritic(nn.Module):
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
         cost_critic_kwargs: dict[str, Any] | None = None,
+        cost_critic_nonneg: bool = False,
         **kwargs: dict[str, Any],
     ) -> None:
         """Initialize Safe SAC Actor-Critic.
@@ -96,6 +97,10 @@ class SafeSACActorCritic(nn.Module):
         self.critic_type = critic_type
         self.num_reward_critics = num_reward_critics
         self.num_cost_critics = num_cost_critics
+        # Costs are non-negative, so Q_c is too. A linear head can (and does) emit
+        # negative predictions; softplus enforces the invariant. Default off so
+        # existing checkpoints and configs are unaffected.
+        self.cost_critic_nonneg = bool(cost_critic_nonneg)
 
         # ==================== Actor ====================
         init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
@@ -271,6 +276,17 @@ class SafeSACActorCritic(nn.Module):
         q2_target = self.critic_2_target(obs, actions)
         return q1_target, q2_target
 
+    def _cost_head(self, raw: torch.Tensor) -> torch.Tensor:
+        """Optional non-negativity transform on a cost critic's raw output.
+
+        Cost is non-negative, so ``Q_c`` is too, but the critic head is linear and
+        does emit negative predictions (measured: 2.2% of states, concentrated in
+        low-cost ones). ``cost_critic_nonneg`` enforces the invariant with softplus.
+        """
+        if not self.cost_critic_nonneg:
+            return raw
+        return nn.functional.softplus(raw)
+
     def evaluate_cost_q(
         self, obs: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
@@ -286,9 +302,9 @@ class SafeSACActorCritic(nn.Module):
         obs = self.critic_obs_normalizer(obs)
         # Use first cost critic (or average if multiple)
         if self.num_cost_critics == 1:
-            return self.cost_critics[0](obs, actions)
+            return self._cost_head(self.cost_critics[0](obs, actions))
         else:
-            cost_qs = [critic(obs, actions) for critic in self.cost_critics]
+            cost_qs = [self._cost_head(critic(obs, actions)) for critic in self.cost_critics]
             return torch.stack(cost_qs, dim=0).mean(dim=0)
 
     def evaluate_cost_q_target(
@@ -306,9 +322,9 @@ class SafeSACActorCritic(nn.Module):
         obs = self.critic_obs_normalizer(obs)
         # Use first cost critic target (or average if multiple)
         if self.num_cost_critics == 1:
-            return self.cost_critic_targets[0](obs, actions)
+            return self._cost_head(self.cost_critic_targets[0](obs, actions))
         else:
-            cost_qs = [target(obs, actions) for target in self.cost_critic_targets]
+            cost_qs = [self._cost_head(target(obs, actions)) for target in self.cost_critic_targets]
             return torch.stack(cost_qs, dim=0).mean(dim=0)
 
     def soft_update_targets(self, tau: float) -> None:

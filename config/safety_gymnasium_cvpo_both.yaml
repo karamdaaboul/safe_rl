@@ -1,0 +1,100 @@
+# CVPO — Constrained Variational Policy Optimization (Liu et al., ICML 2022)
+# Off-policy EM safe-RL. Reuses the SafeSAC twin reward critics + cost critic + replay
+# buffer; the actor update is the CVPO E-step (per-batch convex dual over eta, lambda ->
+# non-parametric weights) + M-step (weighted MLE under decoupled mean/cov KL trust regions).
+# Chosen over PID-Lagrangian methods because the cost multiplier is re-solved per batch,
+# avoiding the "wait for the multiplier to catch up" oscillation that pins penalty methods
+# on the reward/cost frontier (see codex/distributional-cost-critic.md).
+
+algorithm:
+  class_name: CVPO
+  # -- Discount and target update
+  gamma: 0.99
+  # Cost-critic fix arm. The 1-step cost target at gamma=0.99 on a sparse binary cost
+  # gives a per-sample learning signal ~36x smaller than the per-sample noise, and the
+  # critic settles into a near-constant, level-deficient solution (measured on the
+  # original arm: calibration slope 0.07 against a true cost-to-go range 0-38, level
+  # ~0.6x Bellman-consistent). n-step targets carry n real cost samples per update and
+  # contract the level error by gamma^n per backup instead of gamma.
+  # NOTE: n_step is a buffer-wide setting, so this changes the REWARD critic's horizon too.
+  # It is read from the `runner:` block below (OffPolicyRunner forwards it into the
+  # algorithm); setting it here under `algorithm:` is silently ignored.
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # matched to the improved arm
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 0.1       # ORIGINAL pre-fix caps (this arm reproduces the old behaviour)
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint
+  cost_limits: [25.0]       # episodic cost limit; can be overridden via --cost_limits
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  # Both fixes at once: critic-side (n-step + non-negative head) and units-side.
+  qc_scale_source: measured
+  qc_scale_measured: 0.0764
+  qc_scale_probe: >-
+    scratchpad/probe_runs/cvpo_orig_115723_m29999_seed1_n200_calib.jsonl
+    (200 episodes, seed 1, checkpoint CVPO/20260803_115723/model_29999.pt,
+    G_c(s0) mean 3.550 / J_c mean 46.475)
+  qc_thres_adapt: false
+  # Graded-lambda controller instead of the per-batch joint dual solve. The joint solve is
+  # bang-bang (lambda snaps to a bound) once the sampled action set can't reach qc_thres; the
+  # graded controller integrates the violation for a stable, regulating multiplier.
+  # See codex/cvpo-negative-result.md.
+  lambda_mode: grad         # "grad" (recommended) or "dual" (original per-batch joint SLSQP)
+  lambda_lr: 0.03           # step size for the graded-lambda controller
+  lambda_max: 100.0         # cap on lambda (also the dual upper bound in "dual" mode)
+
+policy:
+  class_name: SafeSACActorCritic
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  log_std_min: -20
+  log_std_max: 2
+  num_costs: 1
+  # Cost is non-negative, so Q_c is too; the linear head emitted negatives on 2.2% of
+  # states, concentrated in low-cost ones (3.1% in the lowest MC bin vs 0.2% in the top).
+  cost_critic_nonneg: true
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step targets for BOTH reward and cost critics
+  experiment_name: safety_gymnasium_cvpo_both
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

@@ -525,17 +525,60 @@ class DistributionalCritic(nn.Module):
     def get_value(self, dist: torch.Tensor) -> torch.Tensor:
         return torch.sum(dist * self.q_support, dim=-1)
 
+    def get_cdf(self, dist: torch.Tensor) -> torch.Tensor:
+        """Cumulative distribution over the atom support. Shape [..., num_atoms]."""
+        return torch.cumsum(dist, dim=-1).clamp(max=1.0)
+
+    def get_var(self, dist: torch.Tensor) -> torch.Tensor:
+        """Variance of the return distribution (second moment minus squared mean)."""
+        mean = self.get_value(dist)
+        second = torch.sum(dist * self.q_support.pow(2), dim=-1)
+        return (second - mean.pow(2)).clamp_min(0.0)
+
+    def get_quantile(self, dist: torch.Tensor, alpha: float) -> torch.Tensor:
+        """Value-at-Risk: the smallest atom whose CDF reaches ``alpha``. Shape [...]."""
+        idx = torch.searchsorted(self.get_cdf(dist).contiguous(),
+                                 torch.full(dist.shape[:-1] + (1,), float(alpha), device=dist.device))
+        idx = idx.clamp(max=self.num_atoms - 1)
+        return self.q_support[idx.squeeze(-1)]
+
+    def get_cvar(self, dist: torch.Tensor, alpha: float, upper: bool = True) -> torch.Tensor:
+        """Conditional Value-at-Risk of the return distribution.
+
+        ``upper=True`` (the cost convention) returns ``E[Z | Z >= VaR_alpha]`` — the mean of
+        the worst ``1 - alpha`` fraction. ``upper=False`` gives the lower tail, which is the
+        risk-averse direction for a *reward*.
+
+        Computed exactly from the categorical atoms, with the partial mass at the VaR atom
+        split correctly, so no Gaussian assumption is needed (contrast WCSAC, which fits a
+        mean and a variance head and reads CVaR off a normal).
+        """
+        if not 0.0 <= alpha < 1.0:
+            raise ValueError(f"alpha must be in [0, 1), got {alpha}")
+        if alpha == 0.0:
+            return self.get_value(dist)
+        tail = 1.0 - alpha if upper else alpha
+        cdf = self.get_cdf(dist)
+        # Take exactly `tail` of probability mass from the requested end, splitting the
+        # boundary atom: weight_i = min(p_i, max(0, tail - mass already beyond atom i)).
+        beyond = (1.0 - cdf).clamp_min(0.0) if upper else (cdf - dist).clamp_min(0.0)
+        w = torch.minimum(dist, torch.clamp(tail - beyond, min=0.0))
+        total = w.sum(dim=-1).clamp_min(1e-12)
+        return torch.sum(w * self.q_support, dim=-1) / total
+
     # @torch.compile()
     def project(
         self,
         next_dist: torch.Tensor,  # [batch, num_atoms]
         rewards: torch.Tensor,  # [batch, ]
         bootstrap: torch.Tensor,  # [batch, ]
-        discount: float,
+        discount: float | torch.Tensor,  # scalar, or [batch] for per-sample n-step gamma**n
     ) -> torch.Tensor:
         delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
         batch_size = rewards.shape[0]
 
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1, 1)  # [batch, 1] broadcasts against the atom support
         target_z = rewards.unsqueeze(1) + bootstrap.unsqueeze(1) * discount * self.q_support
         target_z = target_z.clamp(self.v_min, self.v_max)
         b = (target_z - self.v_min) / delta_z
