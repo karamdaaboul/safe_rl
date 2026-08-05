@@ -10,6 +10,7 @@ from typing import Any
 from scipy.optimize import minimize
 
 from safe_rl.algorithms.mpo import effective_sample_size, nonparametric_kl_from_weights
+from safe_rl.common.cost_scaling import make_thresholds, measured_qc_scale
 from safe_rl.algorithms.safe_sac import SafeSAC
 from safe_rl.modules.safe_sac_actor_critic import SafeSACActorCritic
 
@@ -73,6 +74,8 @@ class CVPO(SafeSAC):
         cost_constraint_mode: str = "mean",  # "mean" = E[Z_c] (CVPO) | "cvar" = tail mean (WCSAC-style)
         cvar_alpha: float = 0.9,  # tail level for cvar mode: constrain the worst 1-alpha fraction
         cost_critic_passive: bool = False,  # train Q_c but never let it influence the policy
+        use_measured_qc_scale: bool = False,  # estimate qc_scale from rollouts, then freeze
+        qc_scale_estimate_episodes: int = 50,  # completed episodes to estimate it from
         qc_scale_source: str = "analytic",  # "analytic" | "measured" — how episodic -> Q-space is scaled
         qc_scale_measured: float | None = None,  # required when qc_scale_source == "measured"
         qc_scale_probe: str | None = None,  # provenance: which probe run the measured value came from
@@ -162,6 +165,22 @@ class CVPO(SafeSAC):
         )
         if qc_scale_source == "measured":
             print(f"CVPO qc_scale provenance: {qc_scale_probe or '(unspecified)'}")
+
+        # Online qc_scale estimation (item 1b). Estimated once from the first
+        # `qc_scale_estimate_episodes` completed episodes, then FROZEN: a continuously moving
+        # threshold would make the lambda controller's delta reflect target motion rather than
+        # policy motion. Inert when the flag is off (`_qc_scale_frozen` starts True).
+        self.use_measured_qc_scale = bool(use_measured_qc_scale)
+        self.qc_scale_estimate_episodes = int(qc_scale_estimate_episodes)
+        self._qc_scale_frozen = not self.use_measured_qc_scale
+        self._qc_scale_open_eps: list[list[float]] | None = None
+        self._qc_scale_done_eps: list[np.ndarray] = []
+        if self.use_measured_qc_scale:
+            print(
+                f"CVPO use_measured_qc_scale: estimating qc_scale from the first "
+                f"{self.qc_scale_estimate_episodes} completed episodes "
+                f"(current {self._qc_scale:.5f}, analytic {self._qc_scale_analytic:.5f})"
+            )
 
         # Frozen target actor: the E-step samples from it and the M-step KL is measured
         # against it. Polyak-averaged toward the online actor after each actor update.
@@ -291,6 +310,54 @@ class CVPO(SafeSAC):
             self._solver_status = -1.0
             self._solver_iters = 0.0
         return max(eta, 1e-6), max(lam, 1e-6)
+
+    def store_transition(self, obs, action, reward, done, next_obs, cost=None, **kwargs) -> None:
+        """Store a transition; additionally collect episode cost traces while estimating qc_scale.
+
+        Collection is read-only with respect to training: it consumes no RNG and touches no
+        parameters (asserted in tests/test_qc_scale_wiring.py).
+        """
+        super().store_transition(obs, action, reward, done, next_obs, cost=cost, **kwargs)
+        if not self._qc_scale_frozen:
+            self._collect_qc_scale_sample(cost, done)
+
+    def _collect_qc_scale_sample(self, cost, done) -> None:
+        """Accumulate per-env episode cost sequences; estimate and freeze once enough finish."""
+        n_envs = int(done.shape[0])
+        if self._qc_scale_open_eps is None:
+            self._qc_scale_open_eps = [[] for _ in range(n_envs)]
+
+        if cost is None:
+            costs = np.zeros(n_envs, dtype=np.float64)
+        else:
+            costs = cost.detach().reshape(n_envs, -1)[:, 0].to("cpu").numpy().astype(np.float64)
+        dones = done.detach().reshape(-1).to("cpu").numpy()
+
+        for e in range(n_envs):
+            self._qc_scale_open_eps[e].append(float(costs[e]))
+            if dones[e] > 0:
+                self._qc_scale_done_eps.append(np.asarray(self._qc_scale_open_eps[e]))
+                self._qc_scale_open_eps[e] = []
+
+        if len(self._qc_scale_done_eps) < self.qc_scale_estimate_episodes:
+            return
+        if sum(float(ep.sum()) for ep in self._qc_scale_done_eps) <= 0.0:
+            return  # no cost observed yet; nothing to estimate from
+
+        scale = measured_qc_scale(self._qc_scale_done_eps, self.gamma)
+        thresholds = make_thresholds(float(self.cost_limits[0]), scale, mode="wcsac")
+        old_thres, old_scale = self.qc_thres, self._qc_scale
+        self._qc_scale = scale
+        self.qc_thres = thresholds["mean"]
+        self._qc_thres_initial = self.qc_thres
+        self._qc_scale_frozen = True
+        self._qc_scale_open_eps = None
+        self._qc_scale_done_eps = []
+        print(
+            f"CVPO qc_scale measured from {self.qc_scale_estimate_episodes} episodes: "
+            f"{old_scale:.5f} -> {scale:.5f} (analytic {self._qc_scale_analytic:.5f}); "
+            f"qc_thres {old_thres:.4f} -> {self.qc_thres:.4f}; frozen"
+        )
 
     def _estep_cost(self, critic_obs: torch.Tensor, actions: torch.Tensor, target: bool) -> torch.Tensor:
         """Cost signal the E-step constrains: either ``E[Z_c]`` or ``CVaR_alpha(Z_c)``.
