@@ -433,10 +433,19 @@ class SafeSAC(SAC):
         # per-sample cross-entropy, and 1.0 when stratification is off.
         weights = 1.0 if cost_is_weights is None else cost_is_weights.view(-1)
         cost_critic_loss = 0.0
-        for critic, target_dist in zip(self.policy.cost_critics, target_dists):
+        for i, (critic, target_dist) in enumerate(zip(self.policy.cost_critics, target_dists)):
             logits = critic(obs_normalized, actions)
             per_sample_cost_loss = -torch.sum(target_dist * F.log_softmax(logits, dim=-1), dim=-1)
             cost_critic_loss = cost_critic_loss + (weights * per_sample_cost_loss).mean()
+            # Feed the CVaR recalibration buffer (CVPO item 2): the PIT of the predicted
+            # distribution evaluated at the realized n-step cost target. Entirely inert
+            # unless a recalibrator exists, i.e. unless recalibrate_cvar is on.
+            if i == 0 and getattr(self, "_recalibrator", None) is not None:
+                with torch.no_grad():
+                    tgt = self.policy.cost_critic_targets[0]
+                    next_q = tgt.get_value(tgt.get_dist(tgt(next_obs_norm, next_actions)))
+                    realized = costs + discount * bootstrap_mask * next_q
+                    self._record_pit(critic.get_dist(logits), realized, critic)
 
         self.cost_critic_optimizer.zero_grad()
         cost_critic_loss.backward()

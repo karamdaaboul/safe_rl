@@ -11,8 +11,17 @@ from scipy.optimize import minimize
 
 from safe_rl.algorithms.mpo import effective_sample_size, nonparametric_kl_from_weights
 from safe_rl.common.cost_scaling import make_thresholds, measured_qc_scale
+from safe_rl.common.recalibration import PITRecalibrator
 from safe_rl.algorithms.safe_sac import SafeSAC
 from safe_rl.modules.safe_sac_actor_critic import SafeSACActorCritic
+
+
+def _ks_uniform(u: np.ndarray) -> float:
+    """Kolmogorov-Smirnov distance of PIT values from uniform (0 = calibrated)."""
+    if u.size == 0:
+        return float("nan")
+    s = np.sort(u)
+    return float(np.max(np.abs(s - (np.arange(1, s.size + 1) / s.size))))
 
 
 class CVPO(SafeSAC):
@@ -74,6 +83,10 @@ class CVPO(SafeSAC):
         cost_constraint_mode: str = "mean",  # "mean" = E[Z_c] (CVPO) | "cvar" = tail mean (WCSAC-style)
         cvar_alpha: float = 0.9,  # tail level for cvar mode: constrain the worst 1-alpha fraction
         cost_critic_passive: bool = False,  # train Q_c but never let it influence the policy
+        recalibrate_cvar: bool = False,  # apply a learned monotone CDF map before reading CVaR
+        recal_interval: int = 500,  # cost-critic updates between isotonic refits
+        recal_capacity: int = 20000,  # PIT samples retained (FIFO)
+        recal_min_samples: int = 500,  # refuse to fit below this
         use_measured_qc_scale: bool = False,  # estimate qc_scale from rollouts, then freeze
         qc_scale_estimate_episodes: int = 50,  # completed episodes to estimate it from
         qc_scale_source: str = "analytic",  # "analytic" | "measured" — how episodic -> Q-space is scaled
@@ -204,6 +217,20 @@ class CVPO(SafeSAC):
             raise ValueError(f"cvar_alpha must be in [0, 1), got {cvar_alpha}.")
         self.cvar_alpha = float(cvar_alpha)
         self.cost_critic_passive = bool(cost_critic_passive)
+
+        # CVaR recalibration (item 2). CVaR-only by construction: the mean constraint never
+        # reaches this code, so enabling it cannot shift the mean arm and re-confound the
+        # comparison. Identity until the buffer reaches recal_min_samples.
+        self.recalibrate_cvar = bool(recalibrate_cvar)
+        self.recal_interval = int(recal_interval)
+        self._recalibrator = (
+            PITRecalibrator(capacity=int(recal_capacity), min_samples=int(recal_min_samples))
+            if self.recalibrate_cvar else None
+        )
+        self._recal_updates = 0
+        self._recal_x_t: torch.Tensor | None = None
+        self._recal_y_t: torch.Tensor | None = None
+        self._recal_ks: float = float("nan")
         self.lam = 0.0 if self.cost_critic_passive else 1.0  # E-step cost multiplier
         self.alpha_mean = np.zeros(dual_dim)  # M-step mean-KL multiplier(s)
         self.alpha_var = np.zeros(dual_dim)  # M-step var-KL multiplier(s)
@@ -359,6 +386,50 @@ class CVPO(SafeSAC):
             f"qc_thres {old_thres:.4f} -> {self.qc_thres:.4f}; frozen"
         )
 
+    def _recalibrate_probs(self, probs: torch.Tensor) -> torch.Tensor:
+        """Remap a categorical distribution's CDF through the fitted isotonic map (torch)."""
+        r = self._recalibrator
+        if r is None or not r.is_fitted:
+            return probs
+        if self._recal_x_t is None:
+            self._recal_x_t = torch.as_tensor(r._x, dtype=probs.dtype, device=probs.device)
+            self._recal_y_t = torch.as_tensor(r._y, dtype=probs.dtype, device=probs.device)
+        x, y = self._recal_x_t, self._recal_y_t
+
+        cdf = probs.cumsum(-1).clamp(0.0, 1.0)
+        idx = torch.searchsorted(x, cdf.contiguous().reshape(-1)).clamp(1, x.numel() - 1)
+        x0, x1 = x[idx - 1], x[idx]
+        y0, y1 = y[idx - 1], y[idx]
+        frac = ((cdf.reshape(-1) - x0) / (x1 - x0).clamp_min(1e-12)).clamp(0.0, 1.0)
+        new_cdf = (y0 + frac * (y1 - y0)).reshape(cdf.shape)
+        new_cdf, _ = torch.cummax(new_cdf, dim=-1)
+        new_cdf = new_cdf.clone()
+        new_cdf[..., -1] = 1.0
+        out = torch.diff(new_cdf, dim=-1, prepend=torch.zeros_like(new_cdf[..., :1])).clamp_min(0.0)
+        total = out.sum(-1, keepdim=True)
+        return torch.where(total > 0, out / total.clamp_min(1e-12), probs)
+
+    def _record_pit(self, dist: torch.Tensor, realized: torch.Tensor, critic) -> None:
+        """Store PIT values u = F_pred(realized) for the recalibration buffer."""
+        if self._recalibrator is None:
+            return
+        z = critic.q_support
+        cdf = critic.get_cdf(dist)
+        idx = torch.searchsorted(z.contiguous(), realized.contiguous().clamp(z[0], z[-1]))
+        idx = idx.clamp(1, z.numel() - 1)
+        lo, hi = z[idx - 1], z[idx]
+        frac = ((realized - lo) / (hi - lo).clamp_min(1e-9)).clamp(0.0, 1.0)
+        c0 = torch.gather(cdf, 1, (idx - 1).unsqueeze(1)).squeeze(1)
+        c1 = torch.gather(cdf, 1, idx.unsqueeze(1)).squeeze(1)
+        pit = (c0 + frac * (c1 - c0)).detach().cpu().numpy()
+        self._recalibrator.update(pit)
+        self._recal_ks = _ks_uniform(pit)
+
+        self._recal_updates += 1
+        if self._recal_updates % self.recal_interval == 0 and self._recalibrator.refit():
+            self._recal_x_t = None  # invalidate cached tensors after a refit
+            self._recal_y_t = None
+
     def _estep_cost(self, critic_obs: torch.Tensor, actions: torch.Tensor, target: bool) -> torch.Tensor:
         """Cost signal the E-step constrains: either ``E[Z_c]`` or ``CVaR_alpha(Z_c)``.
 
@@ -386,7 +457,12 @@ class CVPO(SafeSAC):
             )
         critics = self.policy.cost_critic_targets if target else self.policy.cost_critics
         obs_n = self.policy.critic_obs_normalizer(critic_obs)
-        vals = [c.get_cvar(c.get_dist(c(obs_n, actions)), self.cvar_alpha) for c in critics]
+        vals = []
+        for c in critics:
+            probs = c.get_dist(c(obs_n, actions))
+            if self.recalibrate_cvar:
+                probs = self._recalibrate_probs(probs)
+            vals.append(c.get_cvar(probs, self.cvar_alpha))
         return torch.stack(vals, dim=0).mean(dim=0).unsqueeze(-1)
 
     def _update_actor_and_alpha(self, obs: torch.Tensor, critic_obs: torch.Tensor | None = None) -> tuple[float, float]:
