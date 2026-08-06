@@ -11,6 +11,7 @@ from scipy.optimize import minimize
 
 from safe_rl.algorithms.mpo import effective_sample_size, nonparametric_kl_from_weights
 from safe_rl.common.cost_scaling import make_thresholds, measured_qc_scale
+from safe_rl.common.lambda_controller import LambdaController, rescale_advantage
 from safe_rl.common.recalibration import PITRecalibrator
 from safe_rl.algorithms.safe_sac import SafeSAC
 from safe_rl.modules.safe_sac_actor_critic import SafeSACActorCritic
@@ -83,6 +84,11 @@ class CVPO(SafeSAC):
         cost_constraint_mode: str = "mean",  # "mean" = E[Z_c] (CVPO) | "cvar" = tail mean (WCSAC-style)
         cvar_alpha: float = 0.9,  # tail level for cvar mode: constrain the worst 1-alpha fraction
         cost_critic_passive: bool = False,  # train Q_c but never let it influence the policy
+        lambda_update: str = "sgd",  # "sgd" (legacy integral update) | "pid" (Stooke et al. 2020)
+        lambda_kp: float = 0.0,  # PID proportional gain
+        lambda_kd: float = 0.0,  # PID derivative gain
+        lambda_anti_windup: bool = True,  # freeze integral while saturated (pid only)
+        rescale_by_lambda: bool = False,  # use (Q_r - lam*Q_c)/(1+lam) in the E-step
         recalibrate_cvar: bool = False,  # apply a learned monotone CDF map before reading CVaR
         recal_interval: int = 500,  # cost-critic updates between isotonic refits
         recal_capacity: int = 20000,  # PIT samples retained (FIFO)
@@ -217,6 +223,10 @@ class CVPO(SafeSAC):
             raise ValueError(f"cvar_alpha must be in [0, 1), got {cvar_alpha}.")
         self.cvar_alpha = float(cvar_alpha)
         self.cost_critic_passive = bool(cost_critic_passive)
+        if lambda_update not in ("sgd", "pid"):
+            raise ValueError(f"lambda_update must be 'sgd' or 'pid', got {lambda_update!r}.")
+        self.lambda_update = lambda_update
+        self.rescale_by_lambda = bool(rescale_by_lambda)
 
         # CVaR recalibration (item 2). CVaR-only by construction: the mean constraint never
         # reaches this code, so enabling it cannot shift the mean arm and re-confound the
@@ -232,6 +242,15 @@ class CVPO(SafeSAC):
         self._recal_y_t: torch.Tensor | None = None
         self._recal_ks: float = float("nan")
         self.lam = 0.0 if self.cost_critic_passive else 1.0  # E-step cost multiplier
+        # Lambda controller (item 3). "sgd" reproduces the previous inline update exactly, so
+        # the default path stays bit-identical and the smoke oracle still holds. Seeded from
+        # self.lam so the two never diverge.
+        self._lambda_ctrl = LambdaController(
+            mode=self.lambda_update, lr=self.lambda_lr, kp=float(lambda_kp), ki=self.lambda_lr,
+            kd=float(lambda_kd), lam_max=self.lambda_max, anti_windup=bool(lambda_anti_windup),
+        )
+        self._lambda_ctrl.lam = self.lam
+        self._lambda_ctrl.integral = self.lam
         self.alpha_mean = np.zeros(dual_dim)  # M-step mean-KL multiplier(s)
         self.alpha_var = np.zeros(dual_dim)  # M-step var-KL multiplier(s)
         self._solver_status = -1.0
@@ -386,6 +405,13 @@ class CVPO(SafeSAC):
             f"qc_thres {old_thres:.4f} -> {self.qc_thres:.4f}; frozen"
         )
 
+    def _update_lambda(self, eqc: float) -> float:
+        """Advance the multiplier from the constraint violation ``E_q[Q_c] - qc_thres``."""
+        if self.cost_critic_passive:
+            return self.lam
+        self.lam = self._lambda_ctrl.update(float(eqc) - self.qc_thres)
+        return self.lam
+
     def _recalibrate_probs(self, probs: torch.Tensor) -> torch.Tensor:
         """Remap a categorical distribution's CDF through the fitted isotonic map (torch)."""
         r = self._recalibrator
@@ -507,7 +533,8 @@ class CVPO(SafeSAC):
             self.eta, self.lam = eta, lam
 
             # Non-parametric variational weights q(a|s): softmax over the N samples.
-            logits = (q - lam * qc) / eta  # [N, B]
+            combined = rescale_advantage(q, qc, lam) if self.rescale_by_lambda else (q - lam * qc)
+            logits = combined / eta  # [N, B]
             weights = torch.softmax(logits, dim=0)  # [N, B], columns sum to 1
 
             # Graded-lambda controller: integrate the constraint violation E_q[Q_c] - qc_thres
@@ -515,10 +542,7 @@ class CVPO(SafeSAC):
             # of the joint per-batch solve). Projected onto [0, lambda_max]; warm-started.
             if self.lambda_mode == "grad":
                 eqc = (weights * qc).sum(dim=0).mean().item()  # E_q[Q_c] over states
-                if not self.cost_critic_passive:
-                    self.lam = float(
-                        np.clip(self.lam + self.lambda_lr * (eqc - self.qc_thres), 0.0, self.lambda_max)
-                    )
+                self._update_lambda(eqc)
                 self._eqc = eqc
 
             # E-step health: kl_q is the KL the dual was supposed to hold at eps_dual, so
