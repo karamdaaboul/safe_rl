@@ -1,0 +1,188 @@
+# CVPO with a global E-step temperature and a PER-STATE cost multiplier (CLAUDE.md M5).
+#
+# Delta vs config/safety_gymnasium_cvpo_homotopy.yaml: the E-step dual only. Everything else --
+# critic-side n-step, the non-negative cost head, the measured qc_scale, the measured q_target --
+# is held fixed so the per-state multiplier is the single variable.
+#
+# eta is a trust-region size and stays global; lambda is a tradeoff RATE between two value scales
+# and legitimately varies by state. With eta held fixed each state reduces to 1-D root-finding in
+# a monotone function, so the whole batch is solved by ~30 bisection steps on device: no SciPy, no
+# per-state loop, no learning rate on lambda, no windup. CVPO's authors ruled this out because it
+# meant leaving the vectorized path; it does not, if the solve never leaves the GPU.
+#
+# The per-state target is what makes it work. Held to the static qc_thres at every state, the
+# solver returns a correct but DEGENERATE solution: states whose sampled actions cannot reach the
+# target have dg/dlambda_b < 0 for every lambda, so lambda_b -> lambda_max is genuinely optimal,
+# and because eta is shared their spread drags every other state's multiplier up too. Measured on
+# this repo's cost critic (level 3.12, per-state std across actions 0.038) that pins lambda at the
+# cap almost everywhere while the constraint is still violated by +1.28 at p90. Asking each state
+# only for a reachable reduction brings that to +0.002. See safety_gymnasium_cvpo_perstate_static.yaml
+# for the failing arm, kept deliberately.
+
+algorithm:
+  class_name: CVPOPerState
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 0.1       # matched to the homotopy arm, so the M-step is not a second variable
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Per-state dual solver.
+  # Duals are COMPUTED, never learned: there is no lambda_lr, no PID gain and no nn.Parameter
+  # anywhere below, because the convex program is solved to optimality every update.
+  lambda_mode: per_state
+  dual_sweeps: 1            # block-coordinate sweeps. eta is warm-started from the previous
+                            # update, and at the fixed point ONE sweep reproduces it exactly
+                            # (relative error 0.0e+00, measured on this repo's critic statistics).
+                            # From cold the descent needs ~16 sweeps, so the opening updates of a
+                            # run settle over ~16 updates instead -- negligible against 100k.
+  lambda_bisect_iters: 30   # 2^-30 of lambda_max in absolute resolution
+  eta_bisect_iters: 30      # log-space bisection over [eta_min, eta_max]; ~1e-8 relative
+  eta_min: 1.0e-3           # FIXED bracket. A warm-started, data-dependent bracket would be
+  eta_max: 1.0e4            # marginally tighter and would reintroduce a host synchronisation.
+  solver_dtype: float32     # float64 is for the unit tests; float32 agrees to ~1e-3
+  per_state_eta: false      # true enforces KL_b = eps at every state instead of on average --
+                            # a higher tier of chapter section 5.3, and higher dual variance.
+
+  # -- lambda_max, sized from the E-step spread ratio, NOT from the value scale.
+  # Only the spread across candidate actions survives the per-state softmax; a constant added to
+  # Q_c cancels in the normalisation. lambda_balanced = median_b std_k(Q_r)/std_k(Q_c) reads
+  # 1.86-2.35 on this task, and a constant lambda = 2.0 lands exactly on budget (reward 19.9,
+  # cost 25.3). lambda = 4.0 is already where the pathology returns -- cost 34.74 against
+  # lambda = 3.0's 14.26, with the spread ratio collapsing to 0.02 -- so 3.0 is the cap, not 4.
+  # See codex/cvpo-feasible-threshold-homotopy.md.
+  lambda_max: 3.0
+  lambda_max_mode: fixed          # "balanced" measures lambda_balanced, then FREEZES the cap
+  lambda_max_balanced_mult: 1.5   # only read when lambda_max_mode: balanced
+  lambda_max_warmup_updates: 200
+  lambda_max_clamp: [0.5, 100.0]
+
+  # -- Per-state target d_b = max(q_target, C_now_b - ask_b), C_now_b = E_{a~pi_old}[Q_c(s_b,a)].
+  # No ratchet and no C_now smoothing, unlike the scalar homotopy: a different batch of states
+  # arrives every update, so there is no per-state identity to carry either on. The monotone
+  # downward pressure comes from the floor instead, and frac_states_at_floor -> 1 is the
+  # observable that replaces the ratchet.
+  dstate_mode: beta
+  # Ask only for a reduction the trust region can actually deliver. Ask for more and every state
+  # is infeasible, lambda_b pins at the cap, and you have the static target's degeneracy back.
+  #
+  # "reachable" asks for rho of the drop from C_now_b to reachable_qc_min_b -- the smallest
+  # E_q[Q_c] attainable INSIDE the KL budget. That fraction is attainable by construction, so this
+  # mode cannot be mis-sized and needs no knowledge of the critic's level or spread. Measured
+  # across three regimes (this repo's critic statistics; a live early-training run; a
+  # large-action-spread fixture) the reachable drop was 0.44*sigma in ALL THREE -- it is set by
+  # dual_constraint, not by the critic. So a sigma-sized ask is implicitly a fraction of
+  # reachability, and a fragile one:
+  #     mode                fixture A     live regime B        spread regime C
+  #     kappa = 0.25 sigma  lam 0.36 ok   lam 2.65, 33% AT CAP  lam 1.56 ok
+  #     rho   = 0.50        lam 0.30 ok   lam 2.25, 13% AT CAP  lam 1.30 ok
+  #     rho   = 0.25        lam 0.14 ok   lam 1.00 ok           lam 0.56 ok
+  # rho must stay well under 1: the floor is what the KL budget alone permits, but reaching it
+  # also needs lambda -> infinity, so lambda_max binds first.
+  dstate_beta_mode: reachable
+  dstate_reachable_rho: 0.25
+  dstate_spread_kappa: 0.25 # dstate_beta_mode: spread only
+  dstate_beta: 0.003        # dstate_beta_mode: fixed only (0.003 * 3.12 ~ 0.25 sigma)
+
+  # -- Dispersion gate (phase 2). Where the cost is flat across candidate actions, the per-state
+  # root sits on a curve that is flat to within critic noise, so lambda_b is arbitrary and only
+  # adds dual variance to the M-step. Those states take a batch-level lambda instead. Thresholds
+  # are batch-relative QUANTILES, never absolute Q_c values -- an absolute one would need
+  # re-deriving every time the critic's level moved (cvpo-qc-threshold-calibration.md).
+  # Arms: "spread" (std_k(Q_c): does lambda_b have signal?), "dispersion" (the cost return
+  # distribution's own std: is the critic saying anything here? -- needs a distributional cost
+  # critic), "both". Gate per CLAUDE.md M5: worst-state violation must fall WITHOUT ESS collapse;
+  # if it does not, reverting to a shared lambda is a legitimate result, not a failure.
+  lambda_gate_mode: none
+  gate_spread_quantile: 0.5
+  gate_dispersion_quantile: 0.5
+
+  # -- Amortized lambda_psi(s) (phase 3). The one carve-out to "duals are computed, never learned":
+  # the head has an optimizer because its loss is a REGRESSION onto the KKT targets the bisection
+  # already produced exactly. It never descends dg/dlambda. "observer" trains it while the exact
+  # solve still drives the policy, so its error is measured before it is trusted; "amortized" swaps
+  # it in, with the bisection still running for targets and diagnostics. Watch lambda_head_r2 --
+  # at or below 0 the head is not beating "predict the batch mean" and is not worth amortizing.
+  lambda_head_mode: "off"
+  lambda_head_hidden_dims: [64, 64]
+  lambda_head_lr: 0.001
+
+  # -- Cost constraint
+  cost_limits: [25.0]       # episodic cost limit; can be overridden via --cost_limits
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  qc_scale_source: measured
+  qc_scale_measured: 0.0764
+  qc_scale_probe: >-
+    scratchpad/probe_runs/cvpo_orig_115723_m29999_seed1_n200_calib.jsonl
+    (200 episodes, seed 1, checkpoint CVPO/20260803_115723/model_29999.pt,
+    G_c(s0) mean 3.550 / J_c mean 46.475)
+  qc_thres_adapt: false
+  qc_thres_homotopy: false  # superseded by the per-state target; the class raises if both are on
+
+  # -- Measured q_target: the FLOOR of the per-state target, unchanged from the homotopy arm.
+  # q_target = cost_lim * EMA[C_now] / EMA[J_c], so the Q-space overshoot equals the episodic one.
+  qc_target_ema: true
+  qc_target_ema_horizon: 200
+  qc_target_warmup_reports: 10
+  qc_target_max_rise: 0.01
+  qc_target_min_frac: 0.1
+  qc_target_max_frac: 10.0
+
+  # -- Diagnostics
+  feasibility_probe_interval: 1  # the per-state KL-bounded floor of E_q[Q_c]; now torch, on device
+  diag_interval: 1               # updates between diagnostic reductions; each costs one transfer
+
+policy:
+  class_name: SafeSACActorCritic
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  log_std_min: -20
+  log_std_max: 2
+  num_costs: 1
+  cost_critic_nonneg: true
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10
+  experiment_name: safety_gymnasium_cvpo_perstate
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

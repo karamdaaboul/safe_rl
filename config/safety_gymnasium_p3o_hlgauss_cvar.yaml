@@ -54,7 +54,7 @@ algorithm:
       target_hidden_dims: [-1]
 
 policy:
-  class_name: ActorCritic
+  class_name: ActorCriticCost
   actor_type: gaussian
   critic_type: standard
   actor_kwargs:

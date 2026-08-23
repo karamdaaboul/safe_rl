@@ -1,0 +1,238 @@
+# CVaR ARM c4: c3 (spread match + CVaR ramp) with the DOSE CORRECTED -- reference-median
+# normalization of the per-state match factor.
+#
+# WHY c3 failed (audit 2026-08-22, codex/offpolicy-mismatch-td-lambda.md). Not a readout bug: the
+# E-step takes the cost readout once and s_b and the exponent share it. The fault is that the
+# normalizer was RELATIVE TO THE ACTIVE READOUT --
+#     m(s) = cap( s_b(s) / med_B[s_b] ),   s_b = std_a(Q_r)/std_a(C_active)
+# which is invariant to a global rescale of C_active. So flipping mean -> CVaR passed the tail
+# readout's full spread inflation straight into lam * qc_exp, with nothing downstream adapting:
+# lambda is an episodic PID capped at lambda_max = 1.8, calibrated in MEAN units. Measured dose
+# med_s[std_a(CVaR)/std_a(mean)] on c3's own checkpoints was 2.3-10x (seed 2: 2.97/10.0/3.77/2.91,
+# seed 3: 2.32/10.0/8.41/7.65, seed 4: 6.37/10.0/7.75/5.20 at 5k/10k/15k/20k) -- i.e. 5-8x for two
+# of three seeds, not the 2-3x the arm was designed around. Result: reward median 4.3 vs c2's
+# 14.1, one seed near-idle, for an 8pp tail gain.
+#
+# THE CHANGE (one key): `estep_match_normalizer: reference` divides by the median of the
+# MEAN-readout ratio instead of the active one --
+#     m(s) = cap( s_b^active(s) / med_B[s_b^reference] )
+# The delivered grip lam * m * std_a(C_active)/std_a(Q_r) then collapses to lam / M_ref: flat in
+# the dose, and equal to what the SAME lambda buys at kappa = 0. kappa now changes WHICH actions
+# are penalized, not HOW HARD -- which is what the tail constraint was supposed to buy. At
+# kappa = 0 the two modes are bit-identical, so c2 remains the exact reference point.
+#
+# WATCH: `estep_match_grip` is the headline. It should sit at c2's level and stay FLAT while
+# `estep_cost_dose_vs_mean_median` swings 2-10. If grip tracks the dose, the fix is not engaged.
+# Caveat: grip is proportional to lambda, so it reads 0.0 until the episodic controller engages
+# (lambda_init 0.0 + lambda_episodic_warmup 5). Before that, the leading indicator is
+# `estep_match_scale_median`, which must read ~1/dose under `reference` (~1 would mean the flag
+# did not take). Smoke-checked at kappa=1: dose 3.08, ref/ratio medians 0.899/0.297 = 3.02,
+# scale_median 0.331 = 1/3.02, floored_frac 0.125.
+#
+# KNOWN LIMITATION -- the cap truncates the correction at high dose. Under `reference`, m has
+# median ~1/dose, and the clamp floor is 1/estep_spread_match_max = 0.1. At dose ~10 (which c3 hit
+# at iter 10k on every seed, via softplus-floor collapse of the cost critic: 93% of bottom-90%
+# quantiles below 1e-3) the median state sits ON the floor and the correction is silently
+# under-applied. Measured on a synthetic batch: at dose 10 the delivered grip lands at 1.17x the
+# kappa=0 target with 50% of states floored, versus 1.00x at dose 3 with none floored. The new
+# `estep_match_scale_floored_frac` telemetry makes this visible. `estep_spread_match_max` is
+# deliberately NOT changed here -- one change per arm -- but if floored_frac runs high through the
+# ramp, raising the cap is the follow-up, not a re-tune of lambda.
+#
+# PRE-REGISTERED PREDICTIONS (judged on 3 seeds at 20k, vs c2):
+#   P1  dose telemetry still reads 2-10, but `estep_match_grip` stays flat at the c2 level ->
+#       no idle collapse; reward within seed noise of c2 (median >= 10 at 20k, vs c3's 4.3).
+#   P2  floor-collapse fraction (bottom-90% quantiles < 1e-3, via qc_spread_probe.py) stays well
+#       below c3's 93% at 10k, because the pressure <-> collapse feedback loop is severed.
+#   P3  violation rate improves over c2 (median < 0.417 at 20k) -- the tail steering, now at the
+#       correct dose, does its job.
+# WINNER RULE (same as the c3 decision): better_tail (median viol < c2) AND no_collapse
+# (median reward > 0.7 * c2). Both must hold.
+#
+# Baseline: c2 (`safety_gymnasium_fhdcmpo_c2_spreadmatch_med`, run 20260820_115458, 20k).
+# Everything except fh_risk_mode, estep_match_normalizer and the names is byte-identical to c2.
+#
+# Original c2 header follows.
+#
+# SPREAD-MATCH ARM c2: MEDIAN-NORMALIZED per-state cost spread matching.
+#
+# c1 (run 20260820_101946, killed at 13k) used the raw ratio std_a(Qr)/std_a(Qc) and collapsed
+# into the idle-policy failure by ~13k (Eval reward ~0, cost 7 vs budget 25): the raw ratio
+# multiplied TOTAL cost pressure by the batch balance on top of lambda's tuned gains. c2 divides
+# the ratio by its batch median: influence is EQUALIZED across states (the measured problem --
+# ~30% lambda-inert states) while the median state keeps scale 1, preserving lambda's operating
+# point. Same flag, revised semantics in cvpo.py (2026-08-20).
+#
+# Original c1 header follows.
+#
+# Motivation (codex/offpolicy-mismatch-td-lambda.md + scripts/analysis/qc_spread_probe.py,
+# 2026-08-20): the E-step's cost signal is nearly flat across candidate actions (~0.5-1% of the
+# cost level), so the constraint is inert at ~a third of states no matter how well the critic is
+# calibrated -- and the spread decays a further ~2.5x over training. This arm rescales the cost
+# term per state to match the reward term's across-action spread; lambda keeps its episodic PID
+# controller and its cap, but now buys the same influence at every state.
+#
+# Baseline: safety_gymnasium_fhdcmpo_a2_lag_cc4_60k (run 20260819_080249, seed 2). Everything
+# except estep_cost_spread_match/estep_spread_match_max and the names is byte-identical.
+
+algorithm:
+  class_name: FHDCMPO
+
+  # -- Discount and target update. gamma is the REWARD discount; the cost channel is
+  # undiscounted (gamma_c = 1) and that is not configurable -- it is what the algorithm is.
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64
+  dual_constraint: 0.1
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 8.0
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint, in TRUE episodic units
+  cost_limits: [25.0]
+  cost_horizon: 1000        # T, for reporting only -- no longer a scale factor
+  qc_thres: 25.0            # == cost_limit. Set explicitly so a future default change cannot
+                            # silently reintroduce a qc_scale conversion.
+  qc_thres_adapt: false
+
+  # -- THE single change from S1b.
+  cost_n_step: 64           # cost window length; must exceed runner.n_step (10) or it is a no-op
+  cost_critic_updates_per_step: 4   # extra cost-critic steps, each on a FRESH batch; actor/reward critic untouched
+  cost_td_lambda: 0.995     # FIXED across every arm of the critic-lag experiment (L=64).
+
+  # -- THE single change of this arm: per-state cost spread matching in the E-step exponent.
+  # qc_spread_probe measured std_a(rho_c) at 0.5-1% of the cost level, balance point above
+  # lambda_max at 23-46% of states, and lambda_max moving the E-step by TV < 0.05 at ~30%.
+  # With this flag the exponent uses qc * s_b, s_b = std_a(Q_r)/std_a(Q_c) capped at 10, so
+  # lambda = 1 means 'cost pulls as hard as reward' at EVERY state. Levels (eqc, homotopy,
+  # thresholds) stay in raw episodic units. Logged: estep_match_scale_median/p90/
+  # scale_capped_frac/scale_floored_frac, estep_match_ratio_median/ref_median, and
+  # estep_match_grip. NOTE under `reference`: scale_median reads ~1/dose, NOT 1 (that IS
+  # the correction), and ratio_median reads ~M_ref/dose. Neither is a bug -- read `grip`.
+  estep_cost_spread_match: true
+  estep_spread_match_max: 10.0
+  estep_match_normalizer: reference   # c4: THE change -- normalize s_b by the MEAN-readout
+                                      # median, so kappa reshapes the ranking without
+                                      # raising the dose. 'active' = c2/c3 behaviour.
+
+
+  # -- The finite-horizon distributional statistic
+  fh_risk_mode: cvar        # as c3: constrain the kappa-ramped CVaR statistic.
+  fh_alpha: 0.9             # constrain the worst 10% of the episodic-cost distribution
+  fh_kappa: 1.0             # ramp target: 1.0 = pure CVaR_0.9
+  fh_kappa_warmup: 5000     # E-step updates at kappa=0 while the cost critic levels out
+  fh_kappa_ramp: 15000      # then linear to fh_kappa over this many updates
+
+  # -- Lambda controller. RE-TUNED after the S1 arm over-constrained (2026-08-17).
+  #
+  # S1 with the inherited qrdmpo gains drove episodic cost from 56 to 0.7 against a budget of 25,
+  # and reward collapsed 9.25 -> 0.95 with goals 4.4 -> 1.2. lambda overshot to its 4.0 cap and sat
+  # there for 11-18% of updates before unwinding. That is the idle-policy failure, not a safety win.
+  #
+  # WHY the old gains are too strong here, with a size rather than a guess: they were tuned against a
+  # cost critic that under-read its level by 2.2x (codex/cvpo-cost-critic-investigation.md), so the
+  # arm's EFFECTIVE pressure was lambda_max/2.2 ~ 1.8. The finite-horizon critic reads the level
+  # correctly (measured ratio 1.20, codex/fh-dcmpo-math.md 7.2), so the same nominal lambda now bites
+  # ~2.2x harder. Dividing lambda_max by that factor preserves the old operating point.
+  #
+  # Ki is also halved: the overshoot came from the integral winding up while cost was ~100, then
+  # needing ~10k iterations to unwind. Kd is kept high for damping.
+  lambda_source: episodic   # delta from realized J_c, normalized by the limit
+  lambda_mode: grad         # eta from the dual solve; lambda from the controller
+  lambda_update: pid
+  lambda_kp: 0.12           # was 0.25
+  lambda_kd: 0.5
+  lambda_anti_windup: true
+  lambda_init: 0.0
+  lambda_episodic_warmup: 5
+  lambda_lr: 0.05           # = Ki. Was 0.1: halved to stop the integral winding up.
+  lambda_max: 1.8           # = old 4.0 / 2.2, the critic's old level error. See note above.
+
+policy:
+  class_name: SafeActorCritic
+  critic_type: quantile
+  # Quantile cost critic is REQUIRED, not a choice: the categorical head hard-clips its support
+  # at v_max (50.0 by default) and undiscounted episodic costs run well past that. FHDCMPO raises
+  # if this is anything else.
+  cost_critic_type: quantile
+  num_costs: 1
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: false
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+  cost_critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: true            # cost is non-negative; softplus makes a negative rho structurally
+                            # impossible rather than merely unlikely
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+
+env:
+  kwargs:
+    horizon_feature: true   # append u = (T - t)/T
+    budget_feature: false   # Sauté-style remaining budget; its own ablation, off by default
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 20000    # 20k is mid-transient (s2b: reward 14.0 @20k -> 26.1 @60k,
+                           # cost peaks ~30k, lambda still drifting). Checkpoints every
+                           # 5k, so the 20k comparison point comes free on the way.
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  # Deterministic evaluation panel (Eval/* in wandb): 8 greedy episodes on a dedicated
+  # 2-env eval twin every 2500 iterations (~35s, ~2% overhead at 1.5 it/s).
+  eval_interval: 2500
+  eval_episodes: 8
+  eval_num_envs: 2
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step. The cost window is summed UNDISCOUNTED
+                            # (ReplayStorage cost_gamma=1.0, set by the algorithm) -- with
+                            # gamma_c=1 there is no contraction, so value information has to
+                            # propagate from the u=0 boundary and n=10 is what makes that
+                            # tractable. n_step: 1 would work but propagate 10x slower.
+  experiment_name: safety_gymnasium_fhdcmpo_c4_cvar_refnorm
+  run_name: "c4_cvar_refnorm"
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

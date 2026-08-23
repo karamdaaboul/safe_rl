@@ -174,24 +174,6 @@ class TensorAverageMeterDict:
                 self.metrics[key] = self.metrics[key] + value
                 self.counts[key] += 1
 
-    def mean_and_clear(self) -> dict:
-        """Compute mean of accumulated metrics and clear the accumulator.
-
-        Returns:
-            Dictionary of metric names to averaged values
-        """
-        averaged = {}
-        for key in self.metrics:
-            averaged[key] = self.metrics[key] / self.counts[key]
-            if isinstance(averaged[key], torch.Tensor):
-                averaged[key] = averaged[key].item()
-
-        # Clear after computing means
-        self.metrics.clear()
-        self.counts.clear()
-
-        return averaged
-
     def clear(self):
         """Clear all accumulated metrics."""
         self.metrics.clear()

@@ -1,0 +1,39 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# PPO baseline on brax Ant (env_id: BraxAnt) via BraxVecEnv — budget-matched
+# to config/brax_ant_reppo.yaml (1024 envs x 128 steps x 400 iters ~ 52M).
+# Hyperparameters mirror the mjlab PPO baseline (rsl_rl-style adaptive-KL
+# schedule); raw brax rewards, standard V(s) regression critic.
+
+algorithm:
+  class_name: PPO
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  entropy_coef: 0.0
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.0005
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+
+policy:
+  class_name: ActorCritic
+  init_noise_std: 1.0
+  actor_hidden_dims: [512, 256, 128]
+  critic_hidden_dims: [512, 256, 128]
+  activation: elu
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 400
+  empirical_normalization: true
+  save_interval: 100
+  experiment_name: brax_ant_ppo
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

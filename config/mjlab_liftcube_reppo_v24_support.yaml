@@ -1,0 +1,145 @@
+# v24 applied to Mjlab-Lift-Cube-Yam (I2RT YAM arm, cube lifting), with the
+# value support recalibrated on MEASURED probe data. ONE lever vs
+# mjlab_liftcube_reppo_v24.yaml: v_min -20 -> -150 (and num_atoms 301 -> 501 to
+# hold the bin width). Everything else is byte-identical to that file, which is
+# itself byte-identical to mjlab_go2_reppo_v24.yaml in algorithm:/policy:.
+#
+# MEASURED (probe: 1024 envs x 128 steps x 100 iters = 13.1M env steps,
+# wandb run liftcube_v24_probe):
+#   returns_mean 19.6 / returns_max 27.1, frac_targets_clipped 0.0000 at it>=20,
+#   q_bias -0.008, entropy -3.59 (= target -0.5 * 7 actions, dual converged),
+#   Mean reward 20.16, episode length 1000 (pure time_out, zero ground contact).
+#
+# Why v_max STAYS at 150 even though steady-state returns are ~20-27.
+# frac_targets_clipped ran 0.99 at it~5 and 0.36 at it~10 before collapsing to
+# 0.0000 by it~20. That transient is NOT the reward: compute_returns folds the
+# entropy bonus into the reward at full weight after reward_scale
+# (safe_rl/algorithms/reppo.py:391,413), so while init_alpha_temp 1.0 decays the
+# alpha*H term dominates the return. The lambda fixed point R = 16.8*r' +
+# 0.832*Q reproduces the Ant v23/v24 and Go2 v24 histories exactly, so v_max is
+# set by that transient and is essentially task-independent. Narrowing it would
+# make lift-cube clip HARDER early and would break regime-identity with the
+# validated Ant/Go2 v24 arm.
+#
+# Why v_min MOVES. The reward floor, unlike the ceiling, is task-specific and
+# unbounded. Using the identity scaled_return ~= reward_scale * dt / (1-gamma) *
+# sum(value_i * weight_i) = 20 * sum(...) at dt 0.02 / gamma 0.99:
+#   * positive terms cap at 20 * (2 + 1) = +60;
+#   * joint_pos_limits (weight -10) caps near -235 at the 1.176 rad of total
+#     soft-limit travel across the 7 YAM joints;
+#   * joint_vel_hinge = sum((|v|-0.5)^2_+) is UNBOUNDED and the curriculum ramps
+#     its weight -0.01 -> -0.1 -> -1.0.
+# The probe measured Episode_Reward/joint_vel_hinge -0.0161 at weight -0.01; at
+# -1.0 that is 100x, i.e. about -32 scaled discounted even before the policy
+# fails to adapt. -20 would clip. -150 buys ~5x headroom for zero resolution
+# cost: 300/500 = 0.600 bin width, versus Ant v24's 170/300 = 0.567.
+# prior_scale 40.9 transfers unchanged — sigma is auto-derived as 0.75*bin, and
+# 0 lands exactly on center index 250 of linspace(-150, 150, 501).
+#
+# CURRICULUM TIMING (measured, not assumed). reward_weight fires on reset with a
+# strict `common_step_counter > stage`, and all 1024 envs reset in lockstep every
+# 1000 steps, so stages 12000/24000 actually land at steps 13000/25000 =
+# iterations ~102 and ~196 at 128 steps/env. The 100-iteration probe stopped one
+# iteration short of the first stage — hence this file's floor headroom is sized
+# from extrapolation, and iterations 102 and 196 are the ones to watch.
+#
+# The task metric is NOT reward: watch
+#   Mean episode Metrics/lift_height/episode_success
+# The probe held it at 0.0000 with object_height pinned at the 0.02 spawn height
+# over 13.1M steps — the arm had not learned to reach yet (position_error 0.35).
+# That is ~11% of the reference PPO per-env budget, so it is not yet a verdict;
+# it is precisely why the PPO baseline arm runs alongside.
+#
+# NOTE: pass --experiment_name explicitly. The YAML's experiment_name is popped
+# and discarded by load_safe_rl_yaml, so logs otherwise land under mjlab's
+# registered name (yam_lift_cube/).
+#
+# --- inherited v24 header below ---
+# REPPO v24 = v23 + value-support headroom (ONE lever).
+# v23 measured: returns_mean 46.3 / returns_max 51.6 against v_max 50, with 14%
+# of targets clamped at the edge and q_bias drifting +0.13 -> +0.64. A clamped
+# target makes CE push mass into the top bin, so Q saturates at the ceiling and
+# dQ/da -- the pathwise actor's entire signal -- goes flat. Support widened to
+# [-20, 150] with 301 atoms (bin width 0.57, was 0.40).
+#
+# v23 adopted the reference's architecture and optimizer wholesale:
+#   * critic_type: reference  -> ReferenceREPPOCritic, the encoder/head-split
+#     critic from their torch_models.Critic. The aux prediction head hangs off
+#     the SHARED ENCODER (two layers below the logits), not off the layer that
+#     feeds the value — with a single-trunk critic, aux_loss_mult 1.0 smooths
+#     dQ/da directly, which is the signal the pathwise actor consumes.
+#     Also brings their additive learnable zero prior (+40.9 * hl_gauss(0)).
+#   * RMSNorm throughout (theirs) instead of LayerNorm, swish activations.
+#   * single critic, unbounded exp(log_std) with no floor, plain Adam with no
+#     weight decay and one shared lr 3e-4, desired_kl 0.1 with the "clipped"
+#     gate, no alpha_kl_min floor, init_alpha_temp 1.0 (= their ent_start),
+#     init_alpha_kl 0.01 (= their kl_start).
+# ===========================================================================
+runner_class_name: OnPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL constraint
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  # -- learned dual variables
+  init_alpha_temp: 1.0            # reference ent_start
+  init_alpha_kl: 0.01             # reference kl_start
+  target_entropy: -0.5            # = reference ent_target_mult 0.5
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # inherited from Ant; see header
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: reference          # encoder/head-split critic (their Critic)
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.0                    # reference actor_min_std
+  squash: tanh
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims: [512, 512]       # reference: 3-layer FCNN @ 512 incl. output
+    activation: swish
+    use_layer_norm: true
+    norm_type: rmsnorm            # reference uses RMSNorm
+    log_std_squash: clamp         # reference: plain exp(log_std), unbounded
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 501                # [-150,150] at bin width 0.600 (Ant v24: 0.567)
+    v_min: -150.0                 # penalty-bound floor, see header
+    v_max: 150.0
+    hidden_dim: 512
+    encoder_layers: 2             # reference num_critic_encoder_layers
+    head_layers: 2                # reference num_critic_head_layers
+    pred_layers: 2                # reference num_critic_pred_layers
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9             # reference: logits + 40.9 * hl_gauss(0)
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 900             # 900*128 = 115.2k per-env steps ~= PPO ref 120k
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: mjlab_liftcube_reppo_v24_support
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

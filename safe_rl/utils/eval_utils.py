@@ -39,20 +39,23 @@ def make_q_argmax_policy(policy_module: Any, num_samples: int):
 
     def select(actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
         norm_actor_obs = policy_module.actor_obs_normalizer(actor_obs)
-        dist = policy_module._build_distribution(norm_actor_obs, target=False)
+        dist = policy_module._build_distribution(norm_actor_obs)
         batch = actor_obs.shape[0]
         num_actions = policy_module.num_actions
         # Candidates: the mode (so Q-argmax never scores worse than the mode) + N samples.
         samples = dist.sample((num_samples,))                             # [N, B, A]
         candidates = torch.cat([dist.mean.unsqueeze(0), samples], dim=0)  # [N+1, B, A]
         if getattr(policy_module, "squash", "none") == "tanh":
-            candidates = torch.tanh(candidates)
+            # action_scale is NOT optional here: the policy emits
+            # `action_scale * tanh(u)`, so squashing to +-1 alone would hand the
+            # critic and the env actions up to `action_scale` times too small --
+            # silently crippling Q-greedy on any widened-range policy.
+            candidates = getattr(policy_module, "action_scale", 1.0) * torch.tanh(candidates)
         num_cand = candidates.shape[0]
         # evaluate_q normalizes critic_obs internally; broadcast obs over candidates.
         flat_obs = critic_obs.unsqueeze(0).expand(num_cand, batch, -1).reshape(num_cand * batch, -1)
         flat_act = candidates.reshape(num_cand * batch, num_actions)
-        q1, q2 = policy_module.evaluate_q(flat_obs, flat_act)
-        q = torch.minimum(q1, q2).reshape(num_cand, batch)                # [N+1, B]
+        q = policy_module.evaluate_q(flat_obs, flat_act).reshape(num_cand, batch)   # [N+1, B]
         best = q.argmax(dim=0)                                            # [B]
         return candidates[best, torch.arange(batch, device=candidates.device)]
 

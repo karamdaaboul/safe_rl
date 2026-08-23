@@ -240,6 +240,15 @@ class SafeSACActorCritic(nn.Module):
         obs = self.actor_obs_normalizer(obs)
         return self.actor.sample(obs)
 
+    def action_log_prob(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Log density of GIVEN actions under the current policy, [batch, 1].
+
+        Diagnostic accessor (off-policy mismatch measurement): evaluates
+        ``log pi(a|s)`` for stored/replayed actions rather than fresh samples.
+        """
+        obs = self.actor_obs_normalizer(obs)
+        return self.actor.log_prob(obs, actions)
+
     def evaluate_q(
         self, obs: torch.Tensor, actions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:

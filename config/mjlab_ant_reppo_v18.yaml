@@ -1,0 +1,99 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO v11 — v10 + un-starve the gate: wandb PPO-vs-v10 comparison showed
+# sigma stuck at 0.9 (PPO: 0.09) because samples pinned at the KL bound get
+# loss alpha_kl*KL with alpha_kl~0.003 = no gradient at all. desired_kl 0.2
+# doubles the ungated budget; init_alpha_kl 0.5 (v4-proven) makes the gate
+# actually push gated samples back inside so the reward gradient resumes.
+# v9 failed: with a RAW Gaussian, the hard KL gate suspends the reward
+# gradient and sigma ratchets to its ceiling (dead tanh(log_std) grad, KL
+# pinned at the bound). The reference actor is tanh-SQUASHED with unbounded
+# exp std: sigma inflation is self-limiting there. v10 adopts it (squash:
+# tanh, MC-KL 16 samples, MC entropy) — the last structural deviation closed.
+# v7/v8 learned the gait (move ~0.4) but reward oscillated: KL rode the bound
+# and big minibatch steps kept swinging the policy. v9 adopts the reference
+# defaults from cvoelcker/reppo config/reppo.yaml (no guessed knobs):
+#   - actor_kl_clip_mode "clipped": per-sample hard gate — reward loss is
+#     REPLACED by alpha_kl*KL when that sample's KL exceeds the bound
+#   - num_steps 128, num_mini_batches 128 (many small steps: 512 grad
+#     steps/iter at minibatch 1024 vs v8's 32 steps at 8192)
+#   - max_grad_norm 0.5, kl_start 0.01, ent_target_mult 0.5 (=> target_entropy
+#     -0.5/dim in our convention)
+# Kept from v8: adaptive RewardNormalization (FastTD3/BRC practice), SimbaV2
+# actor+critic, single critic, online bootstrap, aux loss, zero-init prior.
+# ===========================================================================
+# REPPO v9 for mjlab Ant-Flat. v3 (reference-faithful + SimbaV2) failed with a
+# specific pathology: uniform-init distributional critic over [-20,100] gives
+# initial E[Q] ~ +40; the pathwise actor chases that optimism by maxing out
+# sigma, the tanh(log_std) saturates at the ceiling (dead gradient), and the
+# KL dual (init 0.01, lr 3e-4) never engages -> KL stuck ~1.08 >> 0.1,
+# reward regressing. v4 fixes the causes:
+#   - zero_init_prior: learnable logits prior (reference: +40.9*hl_gauss(0))
+#     -> initial E[Q] ~ 0, no optimism to chase
+#   - sigma ceiling lowered: log_std_max 0.7 -> 0.0 (std <= ~1.05)
+#   - responsive KL dual: init_alpha_kl 0.01 -> 0.5, alpha_lr 3e-4 -> 0.01
+# Everything else identical to v3.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL constraint
+  desired_kl: 0.2
+  # -- learned dual variables
+  init_alpha_temp: 0.001
+  init_alpha_kl: 0.5
+  target_entropy: -0.5     # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.001
+  alpha_lr: 0.01
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  kl_clip_mode: full
+  aux_loss_mult: 0.0   # AUDIT: our aux lacked the BYOL predictor head -> smoothed dQ/da; ablated
+  reward_scale: 10.0
+  
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic          # state-dependent std (reference REPPO)
+  critic_type: distributional
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.1
+  squash: tanh                   # additive floor: std = exp(log_std) + min_std
+  actor_kwargs:
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 128
+      num_blocks: 1
+    init_noise_std: 0.5
+    log_std_squash: sigmoid
+    log_std_min: -5.0             # std in [~0.15, ~1.05] incl. floor
+    log_std_max: 2.0   # unused in sigmoid mode
+  critic_kwargs:
+    num_atoms: 251
+    v_min: -10.0
+    v_max: 50.0
+    zero_init_prior: true         # reference REPPO: initial E[Q] ~ 0
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 512
+      num_blocks: 2
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 1500
+  empirical_normalization: false
+  save_interval: 250
+  experiment_name: mjlab_ant_reppo_v18
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

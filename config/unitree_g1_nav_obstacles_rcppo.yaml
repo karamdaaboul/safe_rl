@@ -1,0 +1,112 @@
+# RCPPO (reachability-constrained PPO) config for Unitree-G1-Nav-Obstacles-Safe-Collision
+#
+# Successor to the PPOL_PID run series (see unitree_g1_nav_obstacles_ppol_pid.yaml
+# for the full tuning history). PPOL_PID's documented failure modes there —
+# integral windup pinning lambda at the cap, the policy gaming the collision
+# constraint by face-planting, lambda_max hand-caps (5.0) to stay in the stable
+# band — are the advantage-scale/ratchet pathology characterised in
+# safe_rl/codex/rcppo-reachability-math-and-results.md. Two changes address it:
+#
+#   1. `scale_cost_advantage: true`: cost advantages are std-normalised (scale
+#      only, sign preserved), so lambda is dimensionless with operative scale ~1
+#      and the PID can EQUILIBRATE instead of ratcheting into a cap. Validated
+#      A/B on the velocity suite (cells F vs G / H vs H2). No lambda_max hack
+#      needed — cap stays at 100 as a safety net only.
+#   2. Constraint semantics change from episodic budgets to REACHABILITY: the
+#      cost critic learns V_h(s) = max future per-step violation (max-backup),
+#      and the PID holds E[V_h] <= epsilon per channel. "Do not fall" (budget 0)
+#      is exactly a reachability/viability constraint, which this formulation
+#      expresses natively — including a learned Q_h head usable as a runtime
+#      safety filter at deployment.
+#
+# cost_limits below are therefore epsilon-THRESHOLDS on E[V_h], NOT the cost
+# manager's episodic budgets ([0.0 fall, 0.5 collision, 2.0 velocity]); the YAML
+# value overrides the env injection on purpose. Channel order = cost-manager
+# dict order: [fall, collision, velocity].
+#   fall:      h = 1 on the falling step; V_h ~ discounted P(ever falling).
+#              eps 0.05 = "future fall probability must stay under ~5%".
+#   collision: h = hard (>10 N) leg-obstacle contact count; eps 0.1 tolerates
+#              grazing contact but demands collision-free routing (feasible:
+#              goals sit on clear flat patches).
+#   velocity:  h = 0.5 on out-of-range command steps (weight 0.5); eps 0.1 =
+#              occasional limit touch allowed, gross overspeed not.
+#
+# Run:
+#   python scripts/train/unitree_mjlab.py \
+#     --env_id Unitree-G1-Nav-Obstacles-Safe-Collision \
+#     --num_envs 4096 \
+#     --config config/unitree_g1_nav_obstacles_rcppo.yaml
+
+algorithm:
+  class_name: RCPPO
+
+  # -- shared params (carried over from the tuned PPOL_PID config) --
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.005
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.0003
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # -- reachability --
+  gamma_h: 0.99
+  cost_margin: 0.0
+  signed_margin: false
+  scale_cost_advantage: true
+  cost_limits: [0.05, 0.1, 0.1]   # eps on E[V_h]: [fall, collision, velocity]
+  train_reach_q: true
+  reach_q_lr: 0.001
+  reach_q_loss_coef: 1.0
+
+  # -- PID Lagrangian (dimensionless-lambda gains validated on the velocity suite) --
+  lagrangian_pid: [0.05, 0.5, 0.1]  # [Kp, Ki, Kd]
+  lambda_init: [0.001, 0.001, 0.001]
+  lambda_max: 100.0                 # safety net only; equilibrium expected ~1-5
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # Cost critic loss (value clipping is invalid for max-backup targets)
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+
+policy:
+  class_name: ActorCriticReachQ
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+  reach_critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+
+runner:
+  experiment_name: g1_navigation_obstacles_rcppo
+  max_iterations: 2000
+  num_steps_per_env: 8
+  save_interval: 50
+  empirical_normalization: false
+  logger: tensorboard
+  wandb_project: safe_rl
+  run_name: ""
+
+runner_class_name: OnPolicyRunner
+seed: 1

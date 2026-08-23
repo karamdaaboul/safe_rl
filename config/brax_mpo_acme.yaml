@@ -1,0 +1,92 @@
+# MPO on brax (env chosen via --env_id BraxAnt|BraxHumanoid|BraxHalfcheetah) — ACME-PARITY arm (arm B).
+#
+# Identical to config/mjlab_ant_mpo.yaml except for the four places our implementation
+# deviates from DeepMind Acme's reference MPO loss (acme/jax/losses/mpo.py):
+#
+#   1. per_dim_constraining  — Acme's default: one KL budget + one multiplier per action
+#      dimension, instead of one scalar budget for the summed KL.
+#   2. alpha_*_max           — Acme only floors its duals (log_alpha >= -18), never caps
+#      them, so a persistently violated KL keeps tightening. Raised 100x here rather than
+#      removed, because our multiplier is a plain integrator (Acme's is Adam in log-space)
+#      and an uncapped integrator can wind up.
+#   3. decoupled_mstep       — Acme splits the weighted MLE the same way it splits the KL,
+#      so the mean gradient is scaled by the OLD 1/sigma^2 rather than the shrinking new
+#      one. Note this doubles the MLE term's scale relative to the KL penalty, exactly as
+#      Acme's own summed weight sets do.
+#   4. estep_use_target_critic / estep_q_reduction — Acme scores the target-policy samples
+#      with the TARGET critic and uses its mean; we used the online critics and min().
+#
+# The per-dimension epsilons below are the baseline's summed budget divided by the 8 Ant
+# action dims, so the two arms get the same TOTAL trust region and the comparison isolates
+# the mechanism rather than the budget.
+
+runner_class_name: OffPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: MPO
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 4
+  max_grad_norm: 1.0
+
+  # -- MPO E-step
+  sample_action_num: 64
+  dual_constraint: 0.1
+  estep_use_target_critic: true    # (4)
+  estep_q_reduction: mean          # (4)
+
+  # -- MPO M-step
+  kl_mean_constraint: 0.00125      # = 0.01 / 8 action dims
+  kl_var_constraint: 0.0000125     # = 1e-4 / 8 action dims
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 10.0             # (2) 100x the baseline cap
+  alpha_var_max: 1000.0            # (2) 100x the baseline cap
+  mstep_iteration_num: 5
+  per_dim_constraining: true       # (1)
+  decoupled_mstep: true            # (3)
+
+policy:
+  class_name: SACActorCritic
+  actor_type: stochastic
+  critic_type: standard
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+
+runner:
+  num_steps_per_env: 1
+  max_iterations: 30000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 2500
+  empirical_normalization: false
+  experiment_name: brax_mpo_acme
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  log_interval: 100
+  load_run: -1
+  resume_path: null
+  checkpoint: -1

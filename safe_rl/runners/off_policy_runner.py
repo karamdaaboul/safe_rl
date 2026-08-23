@@ -1,15 +1,32 @@
 from __future__ import annotations
 
+import math
 import os
 import statistics
 import time
+from copy import deepcopy
 
 import torch
 
 from safe_rl.envs import VecEnv
 from safe_rl.modules import EmpiricalNormalization, RewardNormalization
 from safe_rl.utils import NStepReturnAggregator
+from safe_rl.utils.console import get_logger
 from safe_rl.utils.logger import Logger
+
+LOGGER = get_logger(__name__)
+
+
+def _resolve_class(module_name: str, class_name: str, kind: str) -> type:
+    """Resolve a config's ``class_name`` string to a class."""
+    import importlib
+
+    module = importlib.import_module(module_name)
+    try:
+        return getattr(module, class_name)
+    except AttributeError:
+        available = ", ".join(sorted(n for n in dir(module) if not n.startswith("_")))
+        raise ValueError(f"Unknown {kind} class_name {class_name!r}. {module_name} exports: {available}") from None
 
 
 class OffPolicyRunner:
@@ -21,6 +38,7 @@ class OffPolicyRunner:
         train_cfg: dict,
         log_dir: str | None = None,
         device: str = "cpu",
+        eval_env: VecEnv | None = None,
     ):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
@@ -44,24 +62,7 @@ class OffPolicyRunner:
 
         # Build actor-critic model
         policy_class_name = self.policy_cfg.pop("class_name", "SACActorCritic")
-
-        # Dynamic import based on policy class
-        if policy_class_name == "SACActorCritic":
-            from safe_rl.modules import SACActorCritic
-            policy_class = SACActorCritic
-        elif policy_class_name == "SafeSACActorCritic":
-            from safe_rl.modules import SafeSACActorCritic
-            policy_class = SafeSACActorCritic
-        elif policy_class_name == "TD3ActorCritic":
-            from safe_rl.modules import TD3ActorCritic
-            policy_class = TD3ActorCritic
-        else:
-            # Try to import from safe_rl.modules first, then fall back to eval
-            try:
-                import safe_rl.modules as modules
-                policy_class = getattr(modules, policy_class_name)
-            except AttributeError:
-                policy_class = eval(policy_class_name)
+        policy_class = _resolve_class("safe_rl.modules", policy_class_name, "policy")
 
         # TD3ActorCritic needs num_envs for its per-env exploration noise buffer.
         if policy_class_name == "TD3ActorCritic":
@@ -74,12 +75,14 @@ class OffPolicyRunner:
             **self.policy_cfg,
         ).to(self.device)
 
+        self._assert_critic_cfg_applied()
+
         # Initialize algorithm
         alg_class_name = self.alg_cfg.pop("class_name", "SAC")
 
         # Set cost_limits for safe RL algorithms
         # Prioritize cost_limits from config, fall back to environment
-        if alg_class_name == "SafeSAC":
+        if alg_class_name in ("SafeSAC", "CVPO", "CVPOPerState", "FHDCMPO", "FHDCMPODIME", "FHDCMPOPerState"):
             if "cost_limits" not in self.alg_cfg or self.alg_cfg["cost_limits"] is None:
                 if hasattr(self.env, "cost_limits") and self.env.cost_limits is not None:
                     self.alg_cfg["cost_limits"] = self.env.cost_limits
@@ -90,26 +93,7 @@ class OffPolicyRunner:
                         "pass --cost_limits argument to the training script."
                     )
 
-        # Dynamic import based on algorithm class
-        if alg_class_name == "SAC":
-            from safe_rl.algorithms import SAC
-            alg_class = SAC
-        elif alg_class_name == "FastSAC":
-            from safe_rl.algorithms import FastSAC
-            alg_class = FastSAC
-        elif alg_class_name == "FastTD3":
-            from safe_rl.algorithms import FastTD3
-            alg_class = FastTD3
-        elif alg_class_name == "SafeSAC":
-            from safe_rl.algorithms import SafeSAC
-            alg_class = SafeSAC
-        else:
-            # Try to import from safe_rl.algorithms first, then fall back to eval
-            try:
-                import safe_rl.algorithms as algorithms
-                alg_class = getattr(algorithms, alg_class_name)
-            except AttributeError:
-                alg_class = eval(alg_class_name)
+        alg_class = _resolve_class("safe_rl.algorithms", alg_class_name, "algorithm")
 
         # Forward n_step into the algorithm so it can set bellman_gamma = gamma ** n_step.
         self.n_step = int(self.runner_cfg.get("n_step", 1))
@@ -136,6 +120,30 @@ class OffPolicyRunner:
         self.log_interval = int(self.runner_cfg.get("log_interval", 20))
         self.start_random_steps = int(self.runner_cfg.get("start_random_steps", 10000))
         self.update_after = int(self.runner_cfg.get("update_after", 1000))
+        # Off-policy mismatch diagnostic (default off): stamp every stored transition with
+        # log pi_behavior(a|s) and the collection-time iteration, so TD(lambda) targets can be
+        # audited for behavior/current-policy drift. Requires the policy to expose
+        # `action_log_prob`; costs one extra actor forward per collection step when enabled.
+        self.store_behavior_logprob = bool(self.runner_cfg.get("store_behavior_logprob", False))
+        if self.store_behavior_logprob and not hasattr(self.actor_critic, "action_log_prob"):
+            raise ValueError(
+                "store_behavior_logprob=True requires the policy to implement action_log_prob(); "
+                f"{type(self.actor_critic).__name__} does not."
+            )
+        # Periodic deterministic evaluation (Eval/* section in wandb). Off by default: it needs a
+        # dedicated eval env (never the training env -- stepping that with deterministic actions
+        # would corrupt open episodes, the replay stream and the Episode/ statistics).
+        self.eval_env = eval_env
+        self.eval_interval = int(self.runner_cfg.get("eval_interval", 0))
+        self.eval_episodes = int(self.runner_cfg.get("eval_episodes", 8))
+        self._last_eval_metrics: dict[str, float] = {}
+        if self.eval_interval > 0 and eval_env is None:
+            LOGGER.warning(
+                "eval_interval=%d but no eval_env was passed to the runner; deterministic "
+                "evaluation is disabled. The training script builds one when the runner config "
+                "sets eval_interval > 0.",
+                self.eval_interval,
+            )
         self.gamma = float(self.alg_cfg.get("gamma", 0.99))
 
         # Whether the algorithm aggregates n-step returns inside its own storage
@@ -146,6 +154,10 @@ class OffPolicyRunner:
         # which case the runner stores truthful dones + a bootstrap flag instead
         # of the collapsed terminal signal.
         self.uses_bootstrap_channel = getattr(self.alg, "uses_bootstrap_channel", False)
+        # One-shot guards so a missing/unusable terminal observation is reported
+        # once per run rather than every step (see _terminal_observations).
+        self._final_obs_warned = False
+        self._final_obs_shape_warned = False
 
         # N-step return buffer (optional). When enabled, transitions are aggregated
         # into n-step returns before being written to the replay buffer. Skipped
@@ -160,11 +172,15 @@ class OffPolicyRunner:
         else:
             self.n_step_buffer = None
 
-        # Empirical normalization
+        # Empirical normalization. `obs_normalization_clip` bounds the normalized
+        # output; see EmpiricalNormalization (FCSRL's equivalent clips at 50).
         self.empirical_normalization = self.runner_cfg.get("empirical_normalization", False)
+        obs_clip = self.runner_cfg.get("obs_normalization_clip", None)
         if self.empirical_normalization:
-            self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8).to(self.device)
-            self.critic_obs_normalizer = EmpiricalNormalization(shape=[num_critic_obs], until=1.0e8).to(self.device)
+            self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8, clip=obs_clip).to(self.device)
+            self.critic_obs_normalizer = EmpiricalNormalization(shape=[num_critic_obs], until=1.0e8, clip=obs_clip).to(
+                self.device
+            )
         else:
             self.obs_normalizer = torch.nn.Identity().to(self.device)
             self.critic_obs_normalizer = torch.nn.Identity().to(self.device)
@@ -187,7 +203,7 @@ class OffPolicyRunner:
             self.reward_normalizer = torch.nn.Identity().to(self.device)
 
         # Safe RL detection
-        self.is_safe_rl = hasattr(self.alg, 'num_costs') and self.alg.num_costs > 0
+        self.is_safe_rl = hasattr(self.alg, "num_costs") and self.alg.num_costs > 0
         num_costs = self.alg.num_costs if self.is_safe_rl else 0
 
         if self.is_safe_rl and self.n_step_buffer is not None:
@@ -215,8 +231,7 @@ class OffPolicyRunner:
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         """Main training loop."""
-        print("Starting to learn with:")
-        print(str(self))
+        LOGGER.info("Starting to learn with:\n%s", self)
 
         # Randomize initial episode lengths (for exploration diversity)
         if init_at_random_ep_len:
@@ -224,16 +239,7 @@ class OffPolicyRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
 
-        # Get initial observations (store raw, normalize only for action selection)
-        obs, extras = self.env.get_observations()
-        obs = obs.to(self.device)
-        critic_obs = extras.get("observations", {}).get(self.privileged_obs_type, obs)
-        critic_obs = critic_obs.to(self.device) if isinstance(critic_obs, torch.Tensor) else obs
-        if self.empirical_normalization:
-            # Update normalizer stats but keep obs raw for buffer storage
-            self.obs_normalizer(obs)
-            self.critic_obs_normalizer(critic_obs)
-
+        obs, critic_obs = self._initial_observations()
         self.train_mode()
 
         # Training loop
@@ -247,6 +253,12 @@ class OffPolicyRunner:
         log_window_collect_time = 0.0
         log_window_learn_time = 0.0
         log_window_iters = 0
+        # Simulator steps in the window. Tracked here rather than recomputed by the
+        # Logger, whose num_steps_per_env * num_envs assumption is wrong under
+        # action repeat.
+        log_window_steps = 0
+        # Latest budget published by a cost-limit curriculum wrapper, if one is attached.
+        curriculum_cost_limit: float | None = None
 
         for it in range(start_iter, tot_iter):
             start = time.time()
@@ -257,26 +269,23 @@ class OffPolicyRunner:
                     # Select action (normalize obs for policy, but keep raw for buffer)
                     if global_step < self.start_random_steps:
                         action = self._sample_random_action()
+                        is_random = True
                     else:
-                        # Normalize for policy without updating stats (already updated when obs arrived as next_obs)
-                        if self.empirical_normalization:
-                            with torch.no_grad():
-                                obs_for_policy = (obs - self.obs_normalizer._mean) / (self.obs_normalizer._std + self.obs_normalizer.eps)
-                        else:
-                            obs_for_policy = obs
+                        obs_for_policy = self._obs_for_policy(obs)
                         # Use algorithm's act method if available (e.g., for shielding)
-                        if hasattr(self.alg, 'act'):
+                        if hasattr(self.alg, "act"):
                             action = self.alg.act(obs_for_policy, eval_mode=False)
                         else:
                             action = self.actor_critic.act_with_noise(obs_for_policy)
+                        is_random = False
+                    behavior_log_prob = self._behavior_log_prob(obs, action, is_random)
 
                     # Step environment
                     next_obs, rewards, dones, infos = self.env.step(action.to(self.env.device))
                     next_obs = next_obs.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
-                    next_critic_obs = infos.get("observations", {}).get(self.privileged_obs_type, next_obs)
-                    next_critic_obs = next_critic_obs.to(self.device) if isinstance(next_critic_obs, torch.Tensor) else next_obs
+                    next_critic_obs = self._privileged_obs(infos, next_obs)
 
                     # Update normalizer stats with raw data (don't transform for storage)
                     if self.empirical_normalization:
@@ -288,101 +297,45 @@ class OffPolicyRunner:
                         else:
                             self.reward_normalizer.update(rewards)
 
-                    # Handle truncation (timeout) - for off-policy, truncated episodes
-                    # should not be marked as terminal for proper bootstrapping
-                    if "time_outs" in infos:
-                        time_outs = infos["time_outs"].to(self.device).float()
-                        # Mask out truncated episodes from done signal
-                        # True terminal = done AND NOT truncated
-                        terminal = dones * (1.0 - time_outs)
-                    else:
-                        time_outs = torch.zeros_like(dones, dtype=torch.float32)
-                        terminal = dones
+                    time_outs, terminal, store_done, store_bootstrap = self._episode_boundaries(infos, dones)
 
-                    # Bootstrap channel: algorithms that read it get truthful dones +
-                    # a separate timeout flag; others get the collapsed terminal signal.
-                    if self.uses_bootstrap_channel:
-                        store_done = dones.float()
-                        store_bootstrap = time_outs
-                    else:
-                        store_done = terminal
-                        store_bootstrap = None
+                    # Substitute the true terminal observation on truncation. After an
+                    # auto-reset the env returns the *next* episode's first observation,
+                    # so bootstrapping from it values a transition that never happened.
+                    # Only the stored transition is patched: `next_obs` itself carries
+                    # forward as the next step's policy input and must stay post-reset.
+                    store_next_obs, store_next_critic_obs = self._terminal_observations(
+                        infos, time_outs, next_obs, next_critic_obs
+                    )
 
-                    # Preserve final observations for timeouts when the env provides them.
-                    final_obs = infos.get("observations", {}).get("final", {})
-                    if isinstance(final_obs, dict) and "time_outs" in infos:
-                        time_out_mask = infos["time_outs"].to(self.device).bool().unsqueeze(-1)
-                        final_actor_obs = final_obs.get("actor_obs")
-                        final_critic_obs = final_obs.get("critic_obs")
-                        if isinstance(final_actor_obs, torch.Tensor):
-                            final_actor_obs = final_actor_obs.to(self.device)
-                            next_obs = torch.where(time_out_mask, final_actor_obs, next_obs)
-                        if isinstance(final_critic_obs, torch.Tensor):
-                            final_critic_obs = final_critic_obs.to(self.device)
-                            next_critic_obs = torch.where(time_out_mask, final_critic_obs, next_critic_obs)
-
-                    # Get costs if available (for Safe RL)
-                    costs = None
-                    if self.is_safe_rl and "costs" in infos:
-                        costs = infos["costs"].to(self.device)
-                        # Ensure costs have proper shape [num_envs, num_costs]
-                        if costs.dim() == 1:
-                            costs = costs.unsqueeze(-1)
-                        if costs.shape[-1] != self.alg.num_costs:
-                            costs = costs.expand(-1, self.alg.num_costs)
-
-                    # Store transition in replay buffer (optionally aggregated via n-step buffer)
-                    if self.is_safe_rl and hasattr(self.alg, 'store_transition'):
-                        self.alg.store_transition(
-                            obs,
-                            action,
-                            rewards,
-                            store_done,
-                            next_obs,
-                            cost=costs,
-                            critic_obs=critic_obs,
-                            next_critic_obs=next_critic_obs,
-                            bootstrap=store_bootstrap,
-                        )
-                    elif self.n_step_buffer is not None:
-                        self.n_step_buffer.push(
-                            storage=self.alg.storage,
-                            obs=obs,
-                            action=action,
-                            reward=rewards,
-                            next_obs=next_obs,
-                            terminal=terminal,
-                            truncated=time_outs,
-                            critic_obs=critic_obs,
-                            next_critic_obs=next_critic_obs,
-                        )
-                    elif store_bootstrap is not None:
-                        # Algorithm reads the bootstrap channel (truthful dones + flag).
-                        self.alg.store_transition(
-                            obs,
-                            action,
-                            rewards,
-                            store_done,
-                            next_obs,
-                            critic_obs=critic_obs,
-                            next_critic_obs=next_critic_obs,
-                            bootstrap=store_bootstrap,
-                        )
-                    else:
-                        self.alg.store_transition(
-                            obs,
-                            action,
-                            rewards,
-                            store_done,  # collapsed terminal for algos without the bootstrap channel
-                            next_obs,
-                            critic_obs=critic_obs,
-                            next_critic_obs=next_critic_obs,
-                        )
+                    costs = self._costs(infos)
+                    self._store_transition(
+                        obs=obs,
+                        action=action,
+                        rewards=rewards,
+                        costs=costs,
+                        done=store_done,
+                        terminal=terminal,
+                        time_outs=time_outs,
+                        bootstrap=store_bootstrap,
+                        next_obs=store_next_obs,
+                        critic_obs=critic_obs,
+                        next_critic_obs=store_next_critic_obs,
+                        behavior_log_prob=behavior_log_prob,
+                        policy_version=None
+                        if behavior_log_prob is None
+                        else torch.full((obs.shape[0], 1), float(it), device=self.device),
+                    )
 
                     # Update current observation
                     obs = next_obs
                     critic_obs = next_critic_obs
-                    global_step += self.env.num_envs
+                    # Simulator steps, not decisions: action repeat makes these differ.
+                    if "cost_limit" in infos:
+                        curriculum_cost_limit = float(infos["cost_limit"])
+                    step_delta = int(infos.get("sim_steps", self.env.num_envs))
+                    global_step += step_delta
+                    log_window_steps += step_delta
 
                     # Update logger episode buffers
                     self.logger.process_env_step(rewards, dones, infos, costs=costs)
@@ -404,6 +357,8 @@ class OffPolicyRunner:
 
                 # For Safe RL, pass current episode costs for PID Lagrangian updates
                 if self.is_safe_rl:
+                    if curriculum_cost_limit is not None and hasattr(self.alg, "set_cost_limit"):
+                        self.alg.set_cost_limit(curriculum_cost_limit)
                     current_costs = [
                         statistics.mean(self.logger.costbuffers[i]) if len(self.logger.costbuffers[i]) > 0 else 0.0
                         for i in range(self.alg.num_costs)
@@ -429,18 +384,27 @@ class OffPolicyRunner:
                         if "alpha_loss" in update_result:
                             loss_dict["alpha_loss"] = update_result["alpha_loss"]
                         if self.is_safe_rl:
-                            loss_dict["cost_critic_loss"] = update_result.get("cost_critic", update_result.get("cost_critic_loss", 0.0))
+                            loss_dict["cost_critic_loss"] = update_result.get(
+                                "cost_critic", update_result.get("cost_critic_loss", 0.0)
+                            )
 
-                # Merge safe RL penalty info into loss_dict
-                if self.is_safe_rl:
-                    if hasattr(self.alg, 'get_penalty_info'):
-                        penalty_info = self.alg.get_penalty_info()
+                # Merge algorithm diagnostics into loss_dict. Unconstrained algorithms expose
+                # this too (MPO reports its E-step dual residual, ESS and KL ratios here), so
+                # the scalar keys are merged for every algorithm that provides them; only the
+                # multiplier/cost keys are safe-RL specific.
+                if hasattr(self.alg, "get_penalty_info"):
+                    penalty_info = self.alg.get_penalty_info()
+                    for key, value in penalty_info.items():
+                        if isinstance(value, (int, float)) and key not in loss_dict:
+                            loss_dict[key] = float(value)
+                    if self.is_safe_rl:
                         loss_dict["lambda_mean"] = penalty_info.get("lambda_mean", 0.0)
                         loss_dict["lambda_max"] = penalty_info.get("lambda_max", 0.0)
-                        if "alpha" in penalty_info:
-                            loss_dict["alpha"] = penalty_info["alpha"]
+                    if "alpha" in penalty_info:
+                        loss_dict["alpha"] = penalty_info["alpha"]
 
-                    if hasattr(self.alg, 'get_shield_stats'):
+                if self.is_safe_rl:
+                    if hasattr(self.alg, "get_shield_stats"):
                         shield_stats = self.alg.get_shield_stats()
                         loss_dict["shield_rejections"] = shield_stats.get("rejections", 0)
                         loss_dict["shield_total_samples"] = shield_stats.get("total_samples", 0)
@@ -448,9 +412,9 @@ class OffPolicyRunner:
 
             # Fill in noise_std if not set by update
             if "noise_std" not in loss_dict:
-                if hasattr(self.alg, 'get_actual_action_std'):
+                if hasattr(self.alg, "get_actual_action_std"):
                     loss_dict["noise_std"] = self.alg.get_actual_action_std()
-                elif hasattr(self.actor_critic, 'std'):
+                elif hasattr(self.actor_critic, "std"):
                     loss_dict["noise_std"] = self.actor_critic.std.mean().item()
 
             # Log the actor learning rate (rsl_rl_sac logs this each window).
@@ -472,6 +436,14 @@ class OffPolicyRunner:
             log_window_learn_time += learn_time
             log_window_iters += 1
 
+            # Periodic deterministic evaluation (Eval/* in wandb; eval_interval = 0 disables).
+            # Run BEFORE the log gate so a fresh panel is always attached to the next log point;
+            # between eval points the last panel is re-attached, keeping the wandb series dense.
+            if self.eval_env is not None and self.eval_interval > 0 and it > 0 and it % self.eval_interval == 0:
+                self._last_eval_metrics = self._run_deterministic_eval()
+            if self._last_eval_metrics:
+                loss_dict.update(self._last_eval_metrics)
+
             # Log only every `log_interval` iterations (and on the final iteration),
             # passing the windowed timing and the number of iterations it covers.
             should_log = (it % self.log_interval == 0) or (it == tot_iter - 1)
@@ -484,10 +456,12 @@ class OffPolicyRunner:
                     learn_time=log_window_learn_time,
                     loss_dict=loss_dict,
                     num_iters=log_window_iters,
+                    collection_size=log_window_steps,
                 )
                 log_window_collect_time = 0.0
                 log_window_learn_time = 0.0
                 log_window_iters = 0
+                log_window_steps = 0
 
             # Save model (skip iter 0: nothing has been learned yet)
             if self.log_dir is not None and it % self.save_interval == 0 and it != 0:
@@ -497,6 +471,56 @@ class OffPolicyRunner:
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
+    def _run_deterministic_eval(self) -> dict[str, float]:
+        """``eval_episodes`` deterministic episodes on the dedicated eval env -> ``eval_*`` panel.
+
+        Deterministic (``act_inference``) is the DEPLOYMENT distribution; the training-side
+        ``Episode/`` numbers remain the stochastic behavior distribution, so the two series
+        answer different questions and are logged side by side. The panel refreshes every
+        ``eval_interval`` iterations and is re-attached to intermediate log points unchanged.
+        """
+        start = time.time()
+        was_training = self.actor_critic.training
+        self.eval_mode()
+        n = self.eval_env.num_envs
+        limit = float(self.alg.cost_limits[0]) if getattr(self.alg, "num_costs", 0) else float("inf")
+
+        # Fresh episodes every panel: without the reset, the second eval would resume mid-episode
+        # where the previous one stopped and the first "episode" totals would be partial.
+        obs, _ = self.eval_env.reset()
+        run_rew = torch.zeros(n, device=self.device)
+        run_cost = torch.zeros(n, device=self.device)
+        ep_rews: list[float] = []
+        ep_costs: list[float] = []
+        with torch.inference_mode():
+            while len(ep_rews) < self.eval_episodes:
+                obs_n = (
+                    self.obs_normalizer(obs.to(self.device)) if self.empirical_normalization else obs.to(self.device)
+                )
+                actions = self.actor_critic.act_inference(obs_n)
+                obs, rewards, dones, infos = self.eval_env.step(actions.to(self.eval_env.device))
+                run_rew += rewards.to(self.device).reshape(-1)
+                if "costs" in infos:
+                    run_cost += infos["costs"].to(self.device).reshape(n, -1).sum(-1)
+                for e in (dones > 0).nonzero(as_tuple=False).reshape(-1).tolist():
+                    ep_rews.append(float(run_rew[e]))
+                    ep_costs.append(float(run_cost[e]))
+                    run_rew[e] = 0.0
+                    run_cost[e] = 0.0
+        if was_training:
+            self.train_mode()
+
+        costs_t = torch.tensor(ep_costs)
+        metrics = {
+            "eval_reward": float(torch.tensor(ep_rews).mean()),
+            "eval_cost": float(costs_t.mean()),
+            "eval_cost_p90": float(costs_t.quantile(0.9)) if len(ep_costs) > 1 else float(costs_t.max()),
+            "eval_violation_rate": float((costs_t > limit).float().mean()),
+            "eval_episodes_n": float(len(ep_rews)),
+            "eval_time_s": time.time() - start,
+        }
+        return metrics
+
     def save(self, path: str, infos: dict | None = None):
         """Save model checkpoint."""
         saved_dict = {
@@ -505,6 +529,12 @@ class OffPolicyRunner:
             "iter": self.current_learning_iteration,
             "tot_timesteps": self.tot_timesteps,
             "infos": infos,
+            # Architecture provenance. Evaluation rebuilds the critics from a YAML `policy:`
+            # block and then loads weights with strict=False, so a config that disagrees with
+            # the checkpoint (wrong n_quantiles, wrong num_atoms) silently yields a partially
+            # RANDOM critic. Recording what was actually built lets `load` say so out loud.
+            # Purely informational: nothing reads it to construct anything.
+            "policy_cfg": deepcopy(self.policy_cfg),
         }
 
         # Save critic optimizer if separate
@@ -521,7 +551,7 @@ class OffPolicyRunner:
             saved_dict["reward_norm_state_dict"] = self.reward_normalizer.state_dict()
 
         torch.save(saved_dict, path)
-        print(f"[Model Saved] -> {path}")
+        LOGGER.info("[Model Saved] -> %s", path)
 
         # Upload to external logger
         self.logger.save_model(path, self.current_learning_iteration)
@@ -530,10 +560,31 @@ class OffPolicyRunner:
         """Load model checkpoint."""
         loaded_dict = torch.load(path, weights_only=False, map_location=self.device)
 
+        # Architecture check BEFORE loading: strict=False means a critic built to a different
+        # shape than the checkpoint loads partially and silently, leaving randomly initialized
+        # tensors behind. Warn rather than raise, so checkpoints predating this key (which
+        # carry no `policy_cfg`) still load exactly as they did before.
+        self._warn_on_policy_cfg_mismatch(loaded_dict.get("policy_cfg"), path)
+
         # Load model
         self.actor_critic.load_state_dict(loaded_dict["model_state_dict"], strict=False)
 
-        # Load normalizers
+        # Load normalizers. A checkpoint trained with normalization is unusable
+        # without its statistics — the policy would see inputs on a scale it never
+        # saw in training — so a mismatch is reported rather than silently ignored.
+        if not self.empirical_normalization and "obs_norm_state_dict" in loaded_dict:
+            LOGGER.warning(
+                "checkpoint %s carries observation-normalizer statistics but this run has "
+                "empirical_normalization disabled; the policy will see unnormalized "
+                "observations it was never trained on.",
+                path,
+            )
+        if self.empirical_normalization and "obs_norm_state_dict" not in loaded_dict:
+            LOGGER.warning(
+                "empirical_normalization is enabled but checkpoint %s carries no "
+                "normalizer statistics; starting from empty statistics.",
+                path,
+            )
         if self.empirical_normalization and "obs_norm_state_dict" in loaded_dict:
             self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
         if self.empirical_normalization and "critic_obs_norm_state_dict" in loaded_dict:
@@ -615,16 +666,19 @@ class OffPolicyRunner:
             f"  Policy  ({ac.__class__.__name__})",
             f"    {'actor_type:':<28} {ac.actor_type}",
             f"    {'critic_type:':<28} {ac.critic_type}",
-            f"    {'num_critics:':<28} {ac.num_critics}",
+            f"    {'num_critics:':<28} {getattr(ac, 'num_critics', getattr(ac, 'num_reward_critics', '?'))}",
             f"    {'actor:':<28} {ac.actor}",
-            f"    {'critic:':<28} {ac.critics[0]}",
+            f"    {'critic:':<28} {(ac.critics if hasattr(ac, 'critics') else ac.reward_critics)[0]}",
             "",
             f"  Algorithm  ({alg.__class__.__name__})",
             f"    {'batch_size:':<28} {alg.batch_size:,}",
             f"    {'gamma / tau:':<28} {alg.gamma}  /  {alg.tau}",
             f"    {'num_updates_per_step:':<28} {alg.num_updates_per_step}",
             f"    {'policy_frequency:':<28} {alg.policy_frequency}",
-            f"    {'actor_lr / critic_lr:':<28} {alg.actor_optimizer.param_groups[0]['lr']}  /  {alg.critic_optimizer.param_groups[0]['lr']}",
+            (
+                f"    {'actor_lr / critic_lr:':<28} {alg.actor_optimizer.param_groups[0]['lr']}  / "
+                f" {alg.critic_optimizer.param_groups[0]['lr']}"
+            ),
         ]
 
         if hasattr(alg, "auto_entropy_tuning"):
@@ -643,8 +697,8 @@ class OffPolicyRunner:
                 f"    {'num_costs:':<28} {alg.num_costs}",
                 f"    {'cost_limits:':<28} {alg.cost_limits}",
             ]
-            if hasattr(alg, 'lambdas'):
-                lambda_str = ", ".join([f"{l:.4f}" for l in alg.lambdas])
+            if hasattr(alg, "lambdas"):
+                lambda_str = ", ".join(f"{value:.4f}" for value in alg.lambdas)
                 lines.append(f"    {'lambdas:':<28} [{lambda_str}]")
 
         # Storage
@@ -676,7 +730,70 @@ class OffPolicyRunner:
             input_names=onnx_model.input_names,
             output_names=onnx_model.output_names,
         )
-        print(f"[ONNX Exported] -> {save_path}")
+        LOGGER.info("[ONNX Exported] -> %s", save_path)
+
+    def _warn_on_policy_cfg_mismatch(self, saved_cfg: dict | None, path: str) -> None:
+        """Report keys where this run's `policy:` block disagrees with the checkpoint's."""
+        if not saved_cfg:
+            return
+        current = self.policy_cfg
+        mismatches = []
+        for key in sorted(set(saved_cfg) | set(current)):
+            was, now = saved_cfg.get(key, "<absent>"), current.get(key, "<absent>")
+            if was != now:
+                mismatches.append(f"{key}: checkpoint={was!r} vs this run={now!r}")
+        if mismatches:
+            LOGGER.warning(
+                "checkpoint %s was trained with a different policy config; weights are loaded "
+                "with strict=False, so any layer whose shape disagrees stays RANDOMLY "
+                "INITIALIZED. Differences:\n  %s",
+                path,
+                "\n  ".join(mismatches),
+            )
+
+    def _assert_critic_cfg_applied(self) -> None:
+        """Print the RESOLVED critic config and assert it matches the YAML.
+
+        This exists because of a real, repeated failure mode in this repo: a config key that
+        never reaches the constructor leaves the model silently at its default (see the
+        `n_step` note in config/safety_gymnasium_dmpo_costprobe.yaml). A run that reports
+        `n_quantiles=64` because the YAML said so is indistinguishable from one that got 64
+        by default -- unless something checks. Permanent by design; it costs one block of
+        output per run and turns a silent misconfiguration into a startup failure.
+        """
+        critic_type = self.policy_cfg.get("critic_type")
+        cost_critic_type = self.policy_cfg.get("cost_critic_type")
+        if critic_type is None and cost_critic_type is None:
+            return
+
+        def _describe(critics, cfg_key: str, label: str) -> str:
+            cfg = self.policy_cfg.get(cfg_key) or {}
+            critic = critics[0]
+            resolved = []
+            for key in ("num_atoms", "v_min", "v_max", "n_quantiles", "kappa", "nonneg", "tqc_drop"):
+                if not hasattr(critic, key):
+                    continue
+                actual = getattr(critic, key)
+                resolved.append(f"{key}={actual}")
+                if key in cfg and cfg[key] != actual:
+                    raise AssertionError(
+                        f"{label}: config asked for {key}={cfg[key]!r} but the built critic has "
+                        f"{key}={actual!r} -- the key did not reach the constructor."
+                    )
+            return f"{label}: " + ", ".join(resolved)
+
+        lines = []
+        if critic_type is not None and getattr(self.actor_critic, "reward_critics", None):
+            lines.append(
+                f"critic_type={critic_type} | " + _describe(self.actor_critic.reward_critics, "critic_kwargs", "reward")
+            )
+        if cost_critic_type is not None and getattr(self.actor_critic, "cost_critics", None):
+            lines.append(
+                f"cost_critic_type={cost_critic_type} | "
+                + _describe(self.actor_critic.cost_critics, "cost_critic_kwargs", "cost")
+            )
+        if lines:
+            print("[INFO] Resolved critic config:\n    " + "\n    ".join(lines))
 
     def _sample_random_action(self) -> torch.Tensor:
         """Sample random actions for initial exploration."""
@@ -684,3 +801,183 @@ class OffPolicyRunner:
             return self.actor_critic.sample_random_action(self.env.num_envs)
         # Default: uniform random in [-1, 1]
         return torch.rand(self.env.num_envs, self.env.num_actions, device=self.device) * 2 - 1
+
+    def _behavior_log_prob(self, obs: torch.Tensor, action: torch.Tensor, is_random: bool) -> torch.Tensor | None:
+        """Exact ``log pi_behavior(a|s)`` of the just-taken action, or None when the
+        ``store_behavior_logprob`` flag is off (off-policy mismatch diagnostic).
+
+        Warmup actions are uniform over the per-joint action box [b - c, b + c]
+        (see :meth:`SACActorCritic.sample_random_action`), so their density is the
+        constant ``prod_j 1/(2 c_j)`` — with unscaled actions, -A*log(2). Policy actions
+        are evaluated through :meth:`action_log_prob`, i.e. the same atanh-inversion path
+        any later mismatch measurement uses, so tanh saturation cancels exactly.
+        """
+        if not self.store_behavior_logprob:
+            return None
+        if not is_random:
+            return self.actor_critic.action_log_prob(self._obs_for_policy(obs), action)
+        log_p = -action.shape[-1] * math.log(2.0)
+        actor = getattr(self.actor_critic, "actor", None)
+        if actor is not None and getattr(actor, "scaled_actions", False):
+            log_p += float(actor.neg_log_action_scale)
+        return torch.full((action.shape[0], 1), log_p, device=self.device)
+
+    def _privileged_obs(self, source: dict, obs: torch.Tensor) -> torch.Tensor:
+        """Critic observation from an extras/infos dict, or ``obs`` itself (same object,
+        which :meth:`_terminal_observations` uses to detect a symmetric setup)."""
+        if self.privileged_obs_type is None:
+            return obs
+        candidate = source.get("observations", {}).get(self.privileged_obs_type)
+        return candidate.to(self.device) if isinstance(candidate, torch.Tensor) else obs
+
+    def _initial_observations(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """First observations of a run, kept raw: the buffer outlives normalizer updates,
+        so statistics are applied at sample time, not baked in here."""
+        obs, extras = self.env.get_observations()
+        obs = obs.to(self.device)
+        critic_obs = self._privileged_obs(extras, obs)
+        if self.empirical_normalization:
+            self.obs_normalizer(obs)
+            self.critic_obs_normalizer(critic_obs)
+        return obs, critic_obs
+
+    def _obs_for_policy(self, obs: torch.Tensor) -> torch.Tensor:
+        """Normalize for action selection; stats already absorbed this obs as ``next_obs``."""
+        if not self.empirical_normalization:
+            return obs
+        with torch.no_grad():
+            return self.obs_normalizer.normalize(obs)
+
+    def _episode_boundaries(
+        self, infos: dict, dones: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Resolve the three kinds of episode boundary into storage flags.
+
+        Termination cuts the bootstrap; truncation keeps it (the episode would have
+        continued); pseudo-termination cuts it without ending the episode. Algorithms
+        rebuild the mask as ``bootstrap + (1 - done)``, so a pseudo-terminal is encoded
+        as done-without-bootstrap.
+        """
+        if "time_outs" in infos:
+            time_outs = infos["time_outs"].to(self.device).float()
+        else:
+            time_outs = torch.zeros_like(dones, dtype=torch.float32)
+
+        pseudo = infos.get("pseudo_terminated")
+        pseudo = torch.zeros_like(dones, dtype=torch.float32) if pseudo is None else pseudo.to(self.device).float()
+
+        terminal = torch.clamp(dones * (1.0 - time_outs) + pseudo, max=1.0)
+        if not self.uses_bootstrap_channel:
+            return time_outs, terminal, terminal, None
+        # Truncation bootstraps unless a pseudo-terminal landed on the same step.
+        return time_outs, terminal, torch.clamp(dones.float() + pseudo, max=1.0), time_outs * (1.0 - pseudo)
+
+    def _costs(self, infos: dict) -> torch.Tensor | None:
+        """Per-env cost vector shaped ``[num_envs, num_costs]``, or None."""
+        if not self.is_safe_rl or "costs" not in infos:
+            return None
+        costs = infos["costs"].to(self.device)
+        if costs.dim() == 1:
+            costs = costs.unsqueeze(-1)
+        if costs.shape[-1] != self.alg.num_costs:
+            costs = costs.expand(-1, self.alg.num_costs)
+        return costs
+
+    def _store_transition(
+        self,
+        *,
+        obs: torch.Tensor,
+        action: torch.Tensor,
+        rewards: torch.Tensor,
+        costs: torch.Tensor | None,
+        done: torch.Tensor,
+        terminal: torch.Tensor,
+        time_outs: torch.Tensor,
+        bootstrap: torch.Tensor | None,
+        next_obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        behavior_log_prob: torch.Tensor | None = None,
+        policy_version: torch.Tensor | None = None,
+    ) -> None:
+        """Write one transition to the replay buffer.
+
+        Two storage paths, mutually exclusive by construction (``__init__`` rejects
+        safe RL combined with runner-level n-step):
+
+        - the n-step aggregator, which needs the raw ``terminal``/``truncated``
+          split to know where to stop accumulating a return;
+        - the algorithm's own ``store_transition``, which takes the already-resolved
+          ``done`` plus, for algorithms that read the bootstrap channel, a separate
+          timeout flag.
+        """
+        if self.n_step_buffer is not None:
+            self.n_step_buffer.push(
+                storage=self.alg.storage,
+                obs=obs,
+                action=action,
+                reward=rewards,
+                next_obs=next_obs,
+                terminal=terminal,
+                truncated=time_outs,
+                critic_obs=critic_obs,
+                next_critic_obs=next_critic_obs,
+            )
+            return
+
+        kwargs: dict = {"critic_obs": critic_obs, "next_critic_obs": next_critic_obs}
+        if self.is_safe_rl:
+            kwargs["cost"] = costs
+        if self.is_safe_rl or bootstrap is not None:
+            kwargs["bootstrap"] = bootstrap
+        if behavior_log_prob is not None:
+            kwargs["behavior_log_prob"] = behavior_log_prob
+        if policy_version is not None:
+            kwargs["policy_version"] = policy_version
+        self.alg.store_transition(obs, action, rewards, done, next_obs, **kwargs)
+
+    def _terminal_observations(
+        self,
+        infos: dict,
+        time_outs: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Observations to *store*, with truncations repaired.
+
+        Vectorized envs auto-reset, so the obs returned with ``truncated=True`` belongs to
+        the next episode; envs that can recover the real one publish
+        ``infos["final_observation"]``. For storage only — the caller keeps the post-reset
+        ``next_obs`` as the next step's policy input.
+        """
+        final_obs = infos.get("final_observation")
+        if final_obs is None or not time_outs.any():
+            if final_obs is None and time_outs.any() and not self._final_obs_warned:
+                LOGGER.warning(
+                    "the env truncated episodes but did not provide "
+                    "infos['final_observation']. Q-bootstrap on truncation will use the "
+                    "post-auto-reset observation, which belongs to the next episode. "
+                    "Add final_observation forwarding to the env wrapper."
+                )
+                self._final_obs_warned = True
+            return next_obs, next_critic_obs
+
+        final_obs = final_obs.to(self.device)
+        if final_obs.shape != next_obs.shape:
+            # Vision runs publish the privileged state here, not an actor observation.
+            if not self._final_obs_shape_warned:
+                LOGGER.warning(
+                    "infos['final_observation'] has shape %s but the actor observation "
+                    "has shape %s; ignoring it and bootstrapping truncations from the "
+                    "post-auto-reset observation.",
+                    tuple(final_obs.shape),
+                    tuple(next_obs.shape),
+                )
+                self._final_obs_shape_warned = True
+            return next_obs, next_critic_obs
+
+        mask = time_outs.bool().unsqueeze(-1)
+        store_next_obs = torch.where(mask, final_obs, next_obs)
+        # Only reusable when the critic obs IS the actor obs.
+        store_next_critic_obs = store_next_obs if next_critic_obs is next_obs else next_critic_obs
+        return store_next_obs, store_next_critic_obs

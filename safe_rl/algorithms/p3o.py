@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from typing import List, Optional, Dict, Any, Tuple
 
 from safe_rl.algorithms.ppo import PPO
-from safe_rl.modules import ActorCritic
+from safe_rl.modules import ActorCriticCost
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -26,11 +26,11 @@ class P3O(PPO):
     Based on the paper: "Penalized Proximal Policy Optimization for Safe Reinforcement Learning"
     https://arxiv.org/pdf/2205.11814.pdf
     """
-    policy: ActorCritic
+    policy: ActorCriticCost
 
     def __init__(
         self,
-        policy: ActorCritic,
+        policy: ActorCriticCost,
         num_learning_epochs: int = 1,
         num_mini_batches: int = 1,
         clip_param: float = 0.2,
@@ -701,9 +701,9 @@ class P3O(PPO):
         Validate that the cost critic outputs the correct number of cost values.
         If not, recreate the cost critic with the correct output dimension.
         """
-        # Check if the policy has a cost_critic attribute
-        if not hasattr(self.policy, 'cost_critic'):
-            raise ValueError("ActorCritic must have a cost_critic attribute for P3O algorithm")
+        # Check if the policy has a cost_critic
+        if getattr(self.policy, "cost_critic", None) is None:
+            raise ValueError("P3O requires a policy with a cost_critic; use ActorCriticCost")
 
         # Distributional heads (HL-Gauss / categorical) output num_costs * num_bins; skip the
         # linear-layer heuristic that assumes a scalar-per-cost head.
@@ -724,5 +724,5 @@ class P3O(PPO):
         
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but P3O expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
-            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with the num_costs parameter.")
+            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")

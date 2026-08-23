@@ -1,0 +1,42 @@
+{
+  "AcrobotSwingupSparse": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "CartpoleSwingupSparse": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "CheetahRun": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "FingerTurnHard": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "HopperHop": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "HumanoidRun": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "WalkerRun": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  },
+  "WalkerWalk": {
+    "gamma": 0.99,
+    "max_episode_steps": 1000,
+    "source": "mujoco_playground.registry.get_default_config(task).episode_length"
+  }
+}

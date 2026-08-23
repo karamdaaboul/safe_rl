@@ -1,0 +1,73 @@
+algorithm:
+  class_name: PPOL_PID
+  # training parameters
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.02
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 40.0
+  learning_rate: 0.0003
+  num_learning_epochs: 40
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # PPOL-PID specific parameters (aligned with OmniSafe CPPOPID)
+  lagrangian_pid: [0.1, 0.01, 0.01]  # [Kp, Ki, Kd]
+  lambda_init: [0.001]
+  lambda_max: 100.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # Cost critic loss — HL-Gauss uses cross-entropy; clipped value loss is meaningless on logits
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+
+  # Disable extra features by default
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCriticCost
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    loss_type: hlgauss
+    num_bins: 101
+    v_min: 0.0
+    v_max: 60.0
+    sigma: null                  # null -> 0.75 * bin_width
+    hidden_dims: [512, 512, 512]
+    activation: elu
+    layer_norm: true
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 500
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: overnight_ppol_pid_hlgauss
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1

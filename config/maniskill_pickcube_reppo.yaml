@@ -1,0 +1,84 @@
+# Gaussian REPPO on ManiSkill PickCube-v1 — companion to the DIME control.
+# Same task, budget, and critic support; only the actor differs. Answers whether a
+# grasping failure is DIME-specific or REPPO-family-wide. Gaussian-scale duals
+# (init_alpha_temp 1.0, target_entropy -0.5) since the DIME values are ELBO-scale.
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: REPPO
+  # gamma is DERIVED from the episode length, as the reference does
+  # (trudi/src/torchrl/envs.py: gamma = 1 - 10/max_episode_steps).
+  # PickCube episodes are 50 steps -> 0.8. Using 0.99 here gives a ~100-step
+  # effective horizon on a 50-step task and was one of three bugs that made
+  # our first PickCube runs flatline at success_rate ~0.005.
+  gamma: 0.8
+  lam: 0.95
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  # 0.01 = their reppo_maniskill.yaml ent_start (NOT the Gaussian-mjlab 1.0).
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -0.5
+  dual_optim_mode: actor
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas:
+  - 0.9
+  - 0.999
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  aux_loss_mult: 1.0
+  reward_scale: 1.0
+  # log our metrics ALSO under the reference's key names (actor/kl, critic/qf_mean, ...)
+  # so our run and theirs overlay on the same wandb charts in dime_benchmark_rerun
+  trudi_wandb_schema: true
+  num_learning_epochs: 4
+  num_mini_batches: 64
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: reference
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.0
+  squash: tanh
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims:
+    - 512
+    - 512
+    activation: swish
+    use_layer_norm: true
+    norm_type: rmsnorm
+    log_std_squash: clamp
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -15.0
+    v_max: 15.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+runner:
+  num_steps_per_env: 128
+  # x-axis in ENV STEPS, matching the reference wandb _step
+  log_env_steps: true
+  # periodic ODE+SDE eval -> eval/success_ode_100 (the reference headline metric)
+  eval_interval: 20
+  eval_episodes: 100
+  max_iterations: 381
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: maniskill_pickcube_reppo
+  run_name: "reppo_torch_PickCube-v1"
+  wandb_tags: ['reppo', 'PickCube-v1', 'maniskill', 'experimental']
+  logger: wandb
+  # same project as the reference so the two runs overlay in one wandb view
+  wandb_project: dime_benchmark_rerun

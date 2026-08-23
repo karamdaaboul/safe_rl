@@ -1,3 +1,6 @@
+# NOTE (twin-critic removal): this config originally used twin critics with a
+# min-reduction. REPPO is now single-critic, matching the reference, so this
+# arm's twin-min pessimism is NO LONGER REPRODUCIBLE from this file.
 runner_class_name: OnPolicyRunner
 seed: 1
 
@@ -59,26 +62,21 @@ algorithm:
   # -- returns
   gamma: 0.99
   lam: 0.95
-  normalize_advantage_per_mini_batch: false
   # -- KL constraint
   desired_kl: 0.2
   # -- learned dual variables
   init_alpha_temp: 0.001
   init_alpha_kl: 0.5
-  alpha_kl_min: 0.1
   target_entropy: -0.5     # per action-dim; multiplied by num_actions internally
   # -- optimizers
   learning_rate: 0.001
   alpha_lr: 0.01
   max_grad_norm: 0.5
   # -- reference-faithful REPPO components
-  use_target_networks: false
-  actor_q_reduction: min
   kl_clip_mode: full
   aux_loss_mult: 1.0   # reference default, re-enabled now that the predictor head exists
   reward_scale: 10.0
   
-  tau: 0.005              # unused while use_target_networks is false
   # -- training
   num_learning_epochs: 4
   num_mini_batches: 128
@@ -87,7 +85,6 @@ policy:
   class_name: REPPOActorCritic
   actor_type: stochastic          # state-dependent std (reference REPPO)
   critic_type: distributional
-  num_critics: 2                  # reference: single critic
   actor_obs_normalization: true
   critic_obs_normalization: true
   min_std: 0.1

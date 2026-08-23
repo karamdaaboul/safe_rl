@@ -1,0 +1,184 @@
+# PER-STATE LAMBDA + CVaR, ASK FOR THE REAL BUDGET DIRECTLY (dstate_mode: static).
+#
+# a7 (rho=0.25) and a8 (rho=0.6) walk the per-state target DOWN toward the limit. This arm hands
+# the solver d_b = qc_thres = 25 at every state, immediately. It is the documented FAILURE arm of
+# codex/cvpo-per-state-lambda.md, kept because the negative result is the point: a state whose K
+# sampled actions cannot reach 25 within the KL ball has dg/dlambda_b < 0 for every lambda, so
+# lambda_b -> lambda_max is genuinely optimal there, and with a SHARED eta those saturated states
+# drag the batch-mean KL up and push every other state's multiplier with them.
+#
+# Run it anyway, because it is the only configuration that puts the feasibility question on the
+# record. Read `frac_at_cap`: near 1 means CVaR_0.9 <= 25 is unreachable for this policy class at
+# this eps, and no homotopy speed can fix that. Well below 1, with cost descending, means the
+# reachable-ask schedule was simply too slow and rho is the knob.
+#
+# Same cost target as the critic-lag arms (L=64, lambda=0.995) and the same env/actor/replay, so
+# this is one factor off a1_lag_base: the GLOBAL lambda from the PID controller is replaced by
+# lambda_b solved per state (shared eta, vectorised bisection -- safe_rl/common/per_state_dual.py).
+#
+# Why: the shared-lambda arms enforce the constraint with a nearly state-independent penalty. The
+# FH critic's across-action spread of Q_c at a fixed state is 0.03-0.16 against a level of ~16
+# (measured), so one scalar lambda can only shift cost pressure uniformly. Per-state lambda_b is
+# the documented next question (codex/cvpo-per-state-lambda.md, "implemented, exercised, NOT YET
+# EVALUATED" -- no arm on either critic has reached an operating point).
+#
+# WATCH ess_per_state. lambda_b is fitted from that state's N=64 samples alone, so if the weights
+# collapse onto one or two actions the M-step target is noise and reverting to shared lambda is
+# the honest call (CLAUDE.md M5 gate), not a failure to tune away.
+#
+# The PID controller is GONE, not retuned: CVPOPerState rejects lambda_source/lambda_update/
+# lambda_kp/lambda_kd/lambda_lr/lambda_init outright (CLAUDE.md rule 1 -- the dual is solved, so
+# there is nothing to control). Removing them here is required for the config to construct.
+algorithm:
+  class_name: FHDCMPOPerState
+
+  # -- Discount and target update. gamma is the REWARD discount; the cost channel is
+  # undiscounted (gamma_c = 1) and that is not configurable -- it is what the algorithm is.
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64
+  dual_constraint: 0.1
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 8.0
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint, in TRUE episodic units
+  cost_limits: [25.0]
+  cost_horizon: 1000        # T, for reporting only -- no longer a scale factor
+  qc_thres: 25.0            # == cost_limit. Set explicitly so a future default change cannot
+                            # silently reintroduce a qc_scale conversion.
+  qc_thres_adapt: false
+
+  # -- THE single change from S1b.
+
+  # -- Per-state dual (replaces the scalar lambda controller entirely).
+  lambda_mode: per_state
+  dual_sweeps: 1            # eta is warm-started, so one block-coordinate sweep suffices
+  lambda_bisect_iters: 30
+  eta_bisect_iters: 30
+  eta_min: 1.0e-3           # FIXED bracket; a data-dependent one reintroduces a host sync
+  eta_max: 1.0e4
+  solver_dtype: float32     # float64 is for the unit tests
+  per_state_eta: false      # shared eta = tier 5.3-A. Per-state eta is a separate ablation.
+  lambda_max: 1.8           # SAME cap as the global-lambda FH arms, so the comparison is fair
+  lambda_max_mode: fixed
+  dstate_mode: static       # THE single change from a7: d_b = qc_thres = 25 at every state
+  dstate_beta_mode: reachable
+  dstate_reachable_rho: 0.25
+  lambda_gate_mode: none    # no dispersion gate yet: measure the unaided per-state solve first
+  lambda_head_mode: "off"   # no amortized lambda_psi(s) in this arm
+
+  cost_n_step: 64           # cost window length; must exceed runner.n_step (10) or it is a no-op
+  cost_td_lambda: 0.995     # FIXED across every arm of the critic-lag experiment (L=64).
+
+  # -- The finite-horizon distributional statistic
+  fh_risk_mode: cvar        # THE change vs a6. Every prior arm ran `mean`, i.e. kappa == 0, so the
+                            # E-step constrained E[Z_c] and NOTHING optimised the tail. Measured
+                            # consequence at 60k (a1_base): the mean constraint binds, the episodic
+                            # cost median lands exactly on the limit (25.0) and ~50% of episodes are
+                            # over budget BY ARITHMETIC. Constraining CVaR_0.9 is the objective that
+                            # matches the metric we have been reporting.
+  fh_alpha: 0.9             # constrain the worst 10% of the episodic-cost distribution
+  fh_kappa: 1.0             # ramp target: 1.0 = pure CVaR_0.9 (reached at E-step update 20000
+                            # = iteration 10000, since num_updates_per_step = 2)
+  fh_kappa_warmup: 5000     # E-step updates at kappa=0 while the cost critic levels out
+  fh_kappa_ramp: 15000      # then linear to fh_kappa over this many updates
+
+  # -- Lambda controller. RE-TUNED after the S1 arm over-constrained (2026-08-17).
+  #
+  # S1 with the inherited qrdmpo gains drove episodic cost from 56 to 0.7 against a budget of 25,
+  # and reward collapsed 9.25 -> 0.95 with goals 4.4 -> 1.2. lambda overshot to its 4.0 cap and sat
+  # there for 11-18% of updates before unwinding. That is the idle-policy failure, not a safety win.
+  #
+  # WHY the old gains are too strong here, with a size rather than a guess: they were tuned against a
+  # cost critic that under-read its level by 2.2x (codex/cvpo-cost-critic-investigation.md), so the
+  # arm's EFFECTIVE pressure was lambda_max/2.2 ~ 1.8. The finite-horizon critic reads the level
+  # correctly (measured ratio 1.20, codex/fh-dcmpo-math.md 7.2), so the same nominal lambda now bites
+  # ~2.2x harder. Dividing lambda_max by that factor preserves the old operating point.
+  #
+  # Ki is also halved: the overshoot came from the integral winding up while cost was ~100, then
+  # needing ~10k iterations to unwind. Kd is kept high for damping.
+
+policy:
+  class_name: SafeActorCritic
+  critic_type: quantile
+  # Quantile cost critic is REQUIRED, not a choice: the categorical head hard-clips its support
+  # at v_max (50.0 by default) and undiscounted episodic costs run well past that. FHDCMPO raises
+  # if this is anything else.
+  cost_critic_type: quantile
+  num_costs: 1
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: false
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+  cost_critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: true            # cost is non-negative; softplus makes a negative rho structurally
+                            # impossible rather than merely unlikely
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+
+env:
+  kwargs:
+    horizon_feature: true   # append u = (T - t)/T
+    budget_feature: false   # Sauté-style remaining budget; its own ablation, off by default
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 30000     # 20k is mid-transient: a1_base went 28% -> 50% violations and
+                            # 14.1 -> 26.4 reward between 20k and 60k. Checkpoints every 5k,
+                            # so the 20k comparison point arrives on the way.
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step. The cost window is summed UNDISCOUNTED
+                            # (ReplayStorage cost_gamma=1.0, set by the algorithm) -- with
+                            # gamma_c=1 there is no contraction, so value information has to
+                            # propagate from the u=0 boundary and n=10 is what makes that
+                            # tractable. n_step: 1 would work but propagate 10x slower.
+  experiment_name: safety_gymnasium_fhdcmpo_a9_perstate_cvar_static25
+  run_name: "a9_perstate_cvar_static25_L64_lam0995_seed2"
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

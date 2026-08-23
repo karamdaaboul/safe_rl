@@ -1,0 +1,67 @@
+# NOTE (twin-critic removal): this config originally used twin critics with a
+# min-reduction. REPPO is now single-critic, matching the reference, so this
+# arm's twin-min pessimism is NO LONGER REPRODUCIBLE from this file.
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO on brax Ant via the new BraxVecEnv wrapper (env_id: BraxAnt).
+# Scale matched to the REPPO reference's brax config: reward x0.1 (done
+# algorithm-side via reward_scale) and value support [0, 150] — brax-ant
+# discounted returns land ~60-90 at solved under that scaling.
+# Stack = our best-validated variant (v19/v20 lineage): tanh-squashed
+# state-dependent sigmoid-std actor, twin-min distributional critics, online
+# bootstrap, clipped-KL-free soft penalty, alpha_kl floor.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.2
+  init_alpha_temp: 0.001
+  init_alpha_kl: 0.5
+  target_entropy: -0.5
+  learning_rate: 0.001
+  alpha_lr: 0.01
+  max_grad_norm: 0.5
+  kl_clip_mode: full
+  aux_loss_mult: 0.0
+  reward_scale: 0.1
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: distributional
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.1
+  squash: tanh
+  actor_kwargs:
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 128
+      num_blocks: 1
+    init_noise_std: 0.5
+    log_std_squash: sigmoid
+  critic_kwargs:
+    num_atoms: 151
+    v_min: 0.0
+    v_max: 150.0
+    zero_init_prior: true
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 512
+      num_blocks: 2
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 400
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: brax_ant_reppo
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

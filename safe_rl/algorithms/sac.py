@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from safe_rl.modules.critic import quantile_huber_loss
 from safe_rl.modules.reward_normalization import RewardNormalization
 from safe_rl.modules.sac_actor_critic import SACActorCritic
 from safe_rl.storage.replay_storage import ReplayStorage
@@ -65,6 +65,8 @@ class SAC:
         max_grad_norm: float = 1.0,
         # N-step returns (in-buffer aggregation at sample time)
         n_step: int = 1,
+        # Hazard-stratified replay (consumed by the SafeSAC lineage's cost critic only)
+        hazard_fraction: float = 0.0,
         # Device
         device: str = "cpu",
         # Multi-GPU (for compatibility, not fully implemented for SAC)
@@ -93,6 +95,11 @@ class SAC:
             num_updates_per_step: Number of gradient updates per environment step.
             policy_frequency: Frequency of actor/alpha updates relative to critic updates.
             max_grad_norm: Maximum gradient norm for clipping.
+            hazard_fraction: Target fraction of cost-bearing transitions in the batch
+                the cost critic trains on. ``0.0`` (default) disables it and every code
+                path is plain uniform replay. Only algorithms with a cost critic
+                (the SafeSAC lineage) consume it; plain SAC stores no costs, so a
+                non-zero value there is inert and warns.
             device: Device to run on.
             multi_gpu_cfg: Multi-GPU configuration (for compatibility).
         """
@@ -112,6 +119,7 @@ class SAC:
         self.update_step = 0
         self.max_grad_norm = max_grad_norm
         self.n_step = max(1, int(n_step))
+        self.hazard_fraction = float(hazard_fraction)
 
         # Entropy coefficient (alpha)
         self.auto_entropy_tuning = auto_entropy_tuning
@@ -188,6 +196,14 @@ class SAC:
             device=self.device,
             n_step=self.n_step,
             gamma=self.gamma,
+            # None everywhere except FH-DCMPO, where the cost channel is undiscounted. Read via
+            # getattr so no subclass is obliged to define it.
+            cost_gamma=getattr(self, "cost_gamma", None),
+            # Longer window for a TD(lambda) cost target; None everywhere but FH-DCMPO.
+            cost_n_step=getattr(self, "cost_n_step", None),
+            hazard_fraction=self.hazard_fraction,
+            # Off-policy mismatch diagnostic (FH-DCMPO `offpolicy_diag`); default off.
+            cost_window_extras=getattr(self, "offpolicy_diag", False),
         )
 
     def store_transition(
@@ -200,6 +216,8 @@ class SAC:
         critic_obs: torch.Tensor | None = None,
         next_critic_obs: torch.Tensor | None = None,
         bootstrap: torch.Tensor | None = None,
+        behavior_log_prob: torch.Tensor | None = None,
+        policy_version: torch.Tensor | None = None,
     ) -> None:
         """Store a transition in the replay buffer.
 
@@ -212,6 +230,10 @@ class SAC:
             critic_obs: Optional critic observations.
             next_critic_obs: Optional next critic observations.
             bootstrap: Optional timeout flag (1 = truncation) for the bootstrap channel.
+            behavior_log_prob: Optional ``log pi_behavior(a|s)`` of the stored action at
+                collection time (off-policy mismatch diagnostic; runner flag
+                ``store_behavior_logprob``).
+            policy_version: Optional collection-time policy stamp (learning iteration).
         """
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
@@ -222,6 +244,10 @@ class SAC:
             extras["next_critic_observations"] = next_critic_obs
         if bootstrap is not None:
             extras["bootstrap"] = bootstrap.view(-1, 1) if bootstrap.dim() == 1 else bootstrap
+        if behavior_log_prob is not None:
+            extras["behavior_log_prob"] = behavior_log_prob.view(-1, 1)
+        if policy_version is not None:
+            extras["policy_version"] = policy_version.view(-1, 1)
         self.storage.add(obs, action, reward, done, next_obs, **extras)
 
     def update(self, obs_normalizer=None, critic_obs_normalizer=None, reward_normalizer=None) -> dict[str, float]:
@@ -261,16 +287,14 @@ class SAC:
             # in-buffer n-step horizon. Absent for plain 1-step buffers (back-compat).
             bootstrap = batch.get("bootstrap")
             effective_n_steps = batch.get("effective_n_steps")
+            # Present only when the storage is doing survival shaping (SDH); None otherwise, in
+            # which case the discount path below is exactly gamma ** effective_n_steps as before.
+            survival_discount = batch.get("survival_discount")
 
             # Normalize at sample time (FastSAC-style, eval mode to avoid updating stats)
-            if obs_normalizer is not None:
-                with torch.no_grad():
-                    obs = (obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
-                    next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
-            if critic_obs_normalizer is not None:
-                with torch.no_grad():
-                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
-                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+            obs, critic_obs, next_obs, next_critic_obs = self._normalize_obs_tensors(
+                obs, critic_obs, next_obs, next_critic_obs, obs_normalizer, critic_obs_normalizer
+            )
             # Normalize rewards by running std (don't shift mean). "return" mode uses
             # a RewardNormalization module (normalize via forward); "empirical" mode
             # uses EmpiricalNormalization (divide by running std).
@@ -283,15 +307,32 @@ class SAC:
 
             # Update critic
             critic_loss = self._update_critic(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
+                survival_discount=survival_discount,
             )
             total_critic_loss += critic_loss
 
             # Update any additional critics (e.g. SafeSAC's cost critics)
             for key, value in self._update_extra_critics(
-                batch, obs, critic_obs, actions, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                batch,
+                obs,
+                critic_obs,
+                actions,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
+                obs_normalizer=obs_normalizer,
+                critic_obs_normalizer=critic_obs_normalizer,
             ).items():
                 extra_totals[key] += value
 
@@ -319,6 +360,35 @@ class SAC:
         result.update({key: value / num_updates for key, value in extra_totals.items()})
         return result
 
+    def _normalize_obs_tensors(
+        self,
+        obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        obs_normalizer=None,
+        critic_obs_normalizer=None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the sample-time observation normalization (eval mode, no stat update).
+
+        Factored out of :meth:`update` so a separately-sampled batch (e.g. SafeSAC's
+        hazard-stratified cost batch) receives exactly the same treatment. Rewards are
+        deliberately not handled here -- they are normalized only on the reward path.
+        """
+        if obs_normalizer is not None:
+            with torch.no_grad():
+                obs = (obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
+                next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
+        if critic_obs_normalizer is not None:
+            with torch.no_grad():
+                critic_obs = (critic_obs - critic_obs_normalizer._mean) / (
+                    critic_obs_normalizer._std + critic_obs_normalizer.eps
+                )
+                next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (
+                    critic_obs_normalizer._std + critic_obs_normalizer.eps
+                )
+        return obs, critic_obs, next_obs, next_critic_obs
+
     def _update_extra_critics(
         self,
         batch: dict[str, torch.Tensor],
@@ -330,13 +400,16 @@ class SAC:
         next_critic_obs: torch.Tensor,
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
+        obs_normalizer=None,
+        critic_obs_normalizer=None,
     ) -> dict[str, float]:
         """Hook for subclasses with additional critics (e.g. SafeSAC's cost critics).
 
         Called once per gradient update, after the reward-critic update, with the
         already-normalized batch tensors. ``batch`` carries any extra stored fields
-        (e.g. ``costs``). Returns a dict of loss values keyed by
-        ``_extra_critic_keys``; base SAC has none.
+        (e.g. ``costs``). The normalizers are passed through so an implementation that
+        draws its own batch can normalize it identically. Returns a dict of loss values
+        keyed by ``_extra_critic_keys``; base SAC has none.
         """
         return {}
 
@@ -351,6 +424,7 @@ class SAC:
         next_critic_obs: torch.Tensor,
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
+        survival_discount: torch.Tensor | None = None,
     ) -> float:
         """Update Q-networks.
 
@@ -371,15 +445,44 @@ class SAC:
         Returns:
             Critic loss value.
         """
-        if self.policy.is_distributional_critic:
+        if getattr(self.policy, "is_quantile_critic", False):
+            critic_loss = self._update_critic_quantile(
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
+                survival_discount=survival_discount,
+            )
+        elif self.policy.is_distributional_critic:
             critic_loss = self._update_critic_distributional(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
+                survival_discount=survival_discount,
             )
         else:
             critic_loss = self._update_critic_standard(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
+                survival_discount=survival_discount,
             )
 
         return critic_loss
@@ -391,9 +494,18 @@ class SAC:
             return 1.0 - dones
         return bootstrap + (1.0 - dones)
 
-    def _bootstrap_discount(self, effective_n_steps: torch.Tensor | None) -> torch.Tensor | float:
+    def _bootstrap_discount(
+        self,
+        effective_n_steps: torch.Tensor | None,
+        survival_discount: torch.Tensor | None = None,
+    ) -> torch.Tensor | float:
         """Discount applied at the bootstrap step: ``gamma ** effective_n_steps``
         for in-buffer n-step targets, else scalar ``gamma`` (1-step)."""
+        if survival_discount is not None:
+            # Stochastic decision horizons: the buffer already accumulated
+            # prod_{j<n_eff} gamma * alpha(s_j, a_j) over the window, so it REPLACES gamma**n
+            # rather than multiplying it -- the gamma factors are already inside.
+            return survival_discount
         if effective_n_steps is None:
             return self.gamma
         return self.gamma ** effective_n_steps.to(torch.float32)
@@ -409,6 +521,7 @@ class SAC:
         next_critic_obs: torch.Tensor,
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
+        survival_discount: torch.Tensor | None = None,
     ) -> float:
         """Update Q-networks with standard MSE loss.
 
@@ -437,7 +550,7 @@ class SAC:
             # Soft Bellman backup
             # Q_target = r + γ^n * mask * (min Q_target - α * log π)
             mask = self._bootstrap_mask(dones, bootstrap)
-            discount = self._bootstrap_discount(effective_n_steps)
+            discount = self._bootstrap_discount(effective_n_steps, survival_discount)
             target_q = rewards + discount * mask * (q_target - self.alpha.detach() * next_log_prob)
 
         # Compute current Q-values (critic-space obs)
@@ -468,6 +581,7 @@ class SAC:
         next_critic_obs: torch.Tensor,
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
+        survival_discount: torch.Tensor | None = None,
     ) -> float:
         """Update Q-networks with distributional (C51) cross-entropy loss.
 
@@ -480,9 +594,9 @@ class SAC:
             next_obs: Next actor observations.
             next_critic_obs: Next critic observations.
             bootstrap: Optional timeout flag for the bootstrap mask.
-            effective_n_steps: Optional per-sample n-step horizon. The categorical
-                projection uses the scalar ``gamma`` support, so the n-step discount
-                is not threaded here; only the bootstrap mask is applied.
+            effective_n_steps: Optional per-sample n-step horizon; the projection
+                then bootstraps with ``gamma ** effective_n_steps`` per sample,
+                matching the scalar-critic path.
 
         Returns:
             Critic loss value.
@@ -490,14 +604,17 @@ class SAC:
         # Squeeze to 1D for distributional critic: [batch, 1] -> [batch]
         rewards = rewards.squeeze(-1)
         bootstrap_mask = self._bootstrap_mask(dones, bootstrap).squeeze(-1)
+        discount = self._bootstrap_discount(effective_n_steps, survival_discount)  # float, or [batch] for n-step
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1)
 
         with torch.no_grad():
             # Sample next actions and compute log probs (actor-space obs)
             next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
             next_log_prob = next_log_prob.squeeze(-1)  # [batch, 1] -> [batch]
 
-            # Modify rewards to include entropy bonus: r - γ * α * log π(a'|s')
-            entropy_adjusted_rewards = rewards - self.gamma * bootstrap_mask * self.alpha.detach() * next_log_prob
+            # Modify rewards to include entropy bonus: r - γ^n * α * log π(a'|s')
+            entropy_adjusted_rewards = rewards - discount * bootstrap_mask * self.alpha.detach() * next_log_prob
 
             # Normalize next critic obs once (avoid redundant normalizer updates)
             next_obs_norm = self.policy.critic_obs_normalizer(next_critic_obs)
@@ -519,7 +636,7 @@ class SAC:
                 next_dist=min_dist,
                 rewards=entropy_adjusted_rewards,
                 bootstrap=bootstrap_mask,
-                discount=self.gamma,
+                discount=discount,
             )
 
         # Get current logits (critic-space obs)
@@ -546,9 +663,79 @@ class SAC:
 
         return critic_loss.item()
 
-    def _update_actor_and_alpha(
-        self, obs: torch.Tensor, critic_obs: torch.Tensor | None = None
-    ) -> tuple[float, float]:
+    def _update_critic_quantile(
+        self,
+        obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
+        effective_n_steps: torch.Tensor | None = None,
+        survival_discount: torch.Tensor | None = None,
+    ) -> float:
+        """Update Q-networks with the quantile Huber loss (QR-DQN).
+
+        Structurally identical to :meth:`_update_critic_distributional` -- same entropy
+        adjustment, same double-Q *distribution* selection, same n-step bootstrap discount --
+        with the categorical projection replaced by the fact that a quantile target needs no
+        projection at all: shifting and scaling the sampled locations IS the Bellman backup.
+        """
+        rewards = rewards.squeeze(-1)
+        bootstrap_mask = self._bootstrap_mask(dones, bootstrap).squeeze(-1)
+        discount = self._bootstrap_discount(effective_n_steps, survival_discount)  # float, or [batch] for n-step
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1)
+
+        with torch.no_grad():
+            next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
+            next_log_prob = next_log_prob.squeeze(-1)
+
+            entropy_adjusted_rewards = rewards - discount * bootstrap_mask * self.alpha.detach() * next_log_prob
+
+            next_obs_norm = self.policy.critic_obs_normalizer(next_critic_obs)
+
+            theta_t1 = self.policy.critic_1_target(next_obs_norm, next_actions)
+            theta_t2 = self.policy.critic_2_target(next_obs_norm, next_actions)
+
+            # Double-Q trick, matching the C51 path: select the whole distribution from the
+            # more pessimistic critic rather than taking a per-quantile min (which would
+            # mix two distributions into one that neither critic represents).
+            q1_val = self.policy.critic_1_target.get_value(theta_t1)
+            q2_val = self.policy.critic_2_target.get_value(theta_t2)
+            use_q1 = (q1_val < q2_val).unsqueeze(-1)
+            min_theta = torch.where(use_q1, theta_t1, theta_t2)
+
+            # Bellman backup on the quantile locations. `discount` is [batch] under n-step,
+            # so unsqueeze to broadcast across the quantile axis.
+            disc = discount.unsqueeze(-1) if isinstance(discount, torch.Tensor) else discount
+            target_theta = entropy_adjusted_rewards.unsqueeze(-1) + disc * bootstrap_mask.unsqueeze(-1) * min_theta
+
+        obs_normalized = self.policy.critic_obs_normalizer(critic_obs)
+        theta_1 = self.policy.critic_1(obs_normalized, actions)
+        theta_2 = self.policy.critic_2(obs_normalized, actions)
+
+        critic_loss_1 = quantile_huber_loss(
+            theta_1, target_theta, self.policy.critic_1.tau_hat, self.policy.critic_1.kappa
+        ).mean()
+        critic_loss_2 = quantile_huber_loss(
+            theta_2, target_theta, self.policy.critic_2.tau_hat, self.policy.critic_2.kappa
+        ).mean()
+        critic_loss = critic_loss_1 + critic_loss_2
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        nn.utils.clip_grad_norm_(
+            list(self.policy.critic_1.parameters()) + list(self.policy.critic_2.parameters()),
+            self.max_grad_norm,
+        )
+        self.critic_optimizer.step()
+
+        return critic_loss.item()
+
+    def _update_actor_and_alpha(self, obs: torch.Tensor, critic_obs: torch.Tensor | None = None) -> tuple[float, float]:
         """Update actor and entropy coefficient.
 
         Args:

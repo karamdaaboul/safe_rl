@@ -45,14 +45,12 @@ algorithm:
   # -- returns
   gamma: 0.99
   lam: 0.95
-  normalize_advantage_per_mini_batch: false
   # -- KL constraint
   desired_kl: 0.1
   kl_clip_mode: clipped
   # -- learned dual variables
   init_alpha_temp: 1.0            # reference ent_start
   init_alpha_kl: 0.01             # reference kl_start
-  alpha_kl_min: 0.0               # reference has no floor
   target_entropy: -0.5            # = reference ent_target_mult 0.5
   # -- optimizers (reference: plain Adam, one lr, no weight decay)
   optimizer_class: adam
@@ -62,11 +60,8 @@ algorithm:
   alpha_lr: 0.0003
   max_grad_norm: 0.5
   # -- reference-faithful REPPO components
-  use_target_networks: false
-  actor_q_reduction: q1           # single critic
   aux_loss_mult: 1.0
   reward_scale: 10.0              # mjlab dt-scaled rewards (see header)
-  tau: 0.005                      # unused while use_target_networks is false
   # -- training
   num_learning_epochs: 4
   num_mini_batches: 128
@@ -75,7 +70,6 @@ policy:
   class_name: REPPOActorCritic
   actor_type: stochastic
   critic_type: distributional
-  num_critics: 1                  # reference: ONE critic
   actor_obs_normalization: true
   critic_obs_normalization: true
   min_std: 0.0                    # reference actor_min_std

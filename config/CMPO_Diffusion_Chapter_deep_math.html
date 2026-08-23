@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Constrained Policy Optimization as Inference — MPO, CVPO &amp; Diffusion Policies</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+
+<style>
+:root{
+  --paper:#fafbfc;
+  --paper-tint:#f1f4f7;
+  --ink:#15181e;
+  --ink-soft:#2b3038;
+  --slate:#59616e;
+  --slate-2:#828b98;
+  --hair:#dde3ea;
+  --hair-2:#eaeef3;
+  --reward:#1f6f88;      /* optimistic / harmless — calm teal-blue */
+  --reward-tint:#e8f1f4;
+  --cost:#b0531e;        /* cost / danger — amber-rust */
+  --cost-tint:#f8ece2;
+  --danger:#9a2c1c;
+  --safe:#2f7a5b;
+  --navy:#0f2432;
+  --max-w:52rem;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"STIX Two Text",Georgia,serif;
+  font-size:19px;
+  line-height:1.62;
+  font-feature-settings:"onum" 1,"pnum" 1;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem 6rem}
+
+/* ---------- utility type ---------- */
+.eyebrow{
+  font-family:"Space Grotesk",sans-serif;
+  font-weight:600;
+  font-size:.72rem;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:var(--slate);
+}
+.mono{font-family:"IBM Plex Mono",monospace}
+
+/* ---------- masthead ---------- */
+.masthead{
+  border-bottom:2px solid var(--ink);
+  padding:4.5rem 0 2rem;
+  margin-bottom:2.5rem;
+}
+.masthead .kicker{
+  display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap;
+  margin-bottom:1.4rem;
+}
+.masthead .kicker .num{
+  font-family:"Space Grotesk",sans-serif;font-weight:700;
+  color:var(--cost);font-size:.72rem;letter-spacing:.16em;
+}
+.chapter-title{
+  font-family:"Space Grotesk",sans-serif;
+  font-weight:700;
+  font-size:clamp(2.1rem,6vw,3.35rem);
+  line-height:1.03;
+  letter-spacing:-.02em;
+  margin:0 0 .6rem;
+  color:var(--ink);
+}
+.chapter-sub{
+  font-size:1.16rem;color:var(--ink-soft);font-style:italic;
+  max-width:42rem;margin:.2rem 0 1.6rem;
+}
+.byline{
+  font-family:"Space Grotesk",sans-serif;font-size:.8rem;
+  color:var(--slate-2);letter-spacing:.02em;
+  display:flex;flex-wrap:wrap;gap:.35rem 1.2rem;
+}
+.byline b{color:var(--slate);font-weight:600}
+
+/* ---------- sections ---------- */
+.section{margin-top:3.6rem;scroll-margin-top:1rem}
+.section-head{
+  display:flex;align-items:baseline;gap:.9rem;
+  border-top:1px solid var(--hair);
+  padding-top:1.1rem;margin-bottom:1.1rem;
+}
+.section-head .sn{
+  font-family:"Space Grotesk",sans-serif;font-weight:700;
+  font-size:.95rem;color:var(--cost);
+  min-width:2.2rem;letter-spacing:.02em;
+}
+.section-head h2{
+  font-family:"Space Grotesk",sans-serif;font-weight:600;
+  font-size:1.5rem;letter-spacing:-.01em;margin:0;color:var(--ink);
+}
+h3{
+  font-family:"Space Grotesk",sans-serif;font-weight:600;
+  font-size:1.1rem;letter-spacing:-.005em;
+  margin:2.2rem 0 .5rem;color:var(--ink);
+}
+h4{
+  font-family:"Space Grotesk",sans-serif;font-weight:600;
+  font-size:.95rem;margin:1.6rem 0 .4rem;color:var(--ink-soft);
+}
+p{margin:0 0 1.05rem}
+.lead{font-size:1.09rem;color:var(--ink-soft)}
+a{color:var(--reward);text-decoration:none;border-bottom:1px solid var(--hair)}
+a:hover{border-color:var(--reward)}
+strong{font-weight:600}
+em .k,.term{font-style:normal;font-weight:600;color:var(--ink)}
+
+/* ---------- the asymmetry ledger (signature) ---------- */
+.ledger{
+  display:grid;grid-template-columns:1fr 1fr;gap:0;
+  border:1px solid var(--hair);border-radius:3px;overflow:hidden;
+  margin:2rem 0;
+}
+.ledger>div{padding:1.25rem 1.35rem}
+.ledger-reward{background:var(--reward-tint);border-right:1px solid var(--hair)}
+.ledger-cost{background:var(--cost-tint)}
+.ledger h5{
+  font-family:"Space Grotesk",sans-serif;font-weight:700;
+  font-size:.82rem;letter-spacing:.04em;margin:0 0 .5rem;
+  display:flex;align-items:center;gap:.5rem;
+}
+.ledger-reward h5{color:var(--reward)}
+.ledger-cost h5{color:var(--danger)}
+.ledger p{font-size:.94rem;margin:0;color:var(--ink-soft);line-height:1.5}
+.ledger .dot{width:.6rem;height:.6rem;border-radius:50%;display:inline-block}
+.ledger-reward .dot{background:var(--reward)}
+.ledger-cost .dot{background:var(--danger)}
+.ledger-cap{
+  grid-column:1/-1;border-top:1px solid var(--hair);
+  background:var(--paper);padding:.6rem 1.35rem;
+  font-family:"Space Grotesk",sans-serif;font-size:.72rem;
+  letter-spacing:.03em;color:var(--slate-2);text-transform:uppercase;
+}
+
+/* ---------- callout: central idea ---------- */
+.callout{
+  background:var(--navy);color:#eaf1f4;border-radius:4px;
+  padding:1.6rem 1.7rem;margin:2rem 0;
+}
+.callout .eyebrow{color:#7fb4c6}
+.callout h4{color:#fff;margin:.4rem 0 .5rem;font-size:1.05rem}
+.callout p{color:#cfdde3;margin:0;font-size:1rem;line-height:1.55}
+.callout strong{color:#fff}
+
+/* ---------- three requirements grid ---------- */
+.req-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin:1.6rem 0}
+.req{border:1px solid var(--hair);border-top:3px solid var(--reward);border-radius:3px;padding:1rem 1.1rem;background:#fff}
+.req:nth-child(2){border-top-color:var(--cost)}
+.req:nth-child(3){border-top-color:var(--safe)}
+.req h5{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:.9rem;margin:0 0 .35rem}
+.req p{font-size:.88rem;color:var(--slate);margin:0;line-height:1.45}
+.req-cap{font-family:"Space Grotesk",sans-serif;text-align:center;font-size:.72rem;letter-spacing:.04em;color:var(--slate-2);text-transform:uppercase;margin:-.4rem 0 0}
+
+/* ---------- theorem-like boxes ---------- */
+.box{
+  border:1px solid var(--hair);border-left:4px solid var(--reward);
+  border-radius:3px;background:#fff;
+  padding:1.15rem 1.35rem;margin:1.7rem 0;
+  page-break-inside:avoid;
+}
+.box.defn{border-left-color:var(--slate)}
+.box.lem{border-left-color:var(--reward)}
+.box.thm{border-left-color:var(--reward);background:var(--reward-tint)}
+.box.cor,.box.prop{border-left-color:var(--cost);background:var(--cost-tint)}
+.box .tag{
+  font-family:"Space Grotesk",sans-serif;font-weight:700;
+  font-size:.8rem;letter-spacing:.03em;display:block;margin-bottom:.5rem;
+}
+.box.thm .tag,.box.lem .tag{color:var(--reward)}
+.box.defn .tag{color:var(--slate)}
+.box.cor .tag,.box.prop .tag{color:var(--danger)}
+.box p:last-child{margin-bottom:0}
+.box .name{font-style:italic;font-weight:400;color:var(--ink-soft)}
+
+.proof{
+  margin:1rem 0 1.5rem;padding:0 0 0 1.1rem;
+  border-left:2px solid var(--hair);
+  font-size:.96rem;color:var(--ink-soft);
+}
+.proof .qed{font-family:"Space Grotesk",sans-serif;font-weight:600;color:var(--slate);font-style:normal}
+.proof .ph{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:.78rem;letter-spacing:.03em;text-transform:uppercase;color:var(--slate-2);display:block;margin:.3rem 0 .1rem}
+
+/* ---------- math spacing ---------- */
+.katex-display{margin:1.1rem 0;overflow-x:auto;overflow-y:hidden;padding:.15rem 0}
+.katex{font-size:1.02em}
+
+/* ---------- figures ---------- */
+figure{margin:2rem 0;padding:0}
+figure svg{display:block;width:100%;height:auto;background:#fff;border:1px solid var(--hair);border-radius:3px}
+figcaption{
+  font-family:"Space Grotesk",sans-serif;font-size:.8rem;color:var(--slate);
+  line-height:1.5;margin-top:.6rem;padding-left:.1rem;
+}
+figcaption b{color:var(--ink-soft);font-weight:600}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;margin:1.6rem 0}
+table{border-collapse:collapse;width:100%;font-size:.92rem}
+caption{caption-side:top;text-align:left;font-family:"Space Grotesk",sans-serif;font-size:.78rem;letter-spacing:.03em;text-transform:uppercase;color:var(--slate-2);padding-bottom:.5rem}
+th,td{padding:.5rem .7rem;text-align:left;border-bottom:1px solid var(--hair-2)}
+thead th{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:.78rem;letter-spacing:.02em;text-transform:uppercase;color:var(--slate);border-bottom:1.5px solid var(--hair)}
+td.num,th.num{text-align:right;font-family:"IBM Plex Mono",monospace;font-size:.86rem;font-variant-numeric:tabular-nums}
+tbody tr:hover{background:var(--paper-tint)}
+.win{color:var(--safe);font-weight:600}
+
+/* ---------- algorithm block ---------- */
+.algo{
+  border:1px solid var(--ink);border-radius:3px;background:#fff;
+  margin:1.8rem 0;overflow:hidden;page-break-inside:avoid;
+}
+.algo-head{
+  background:var(--ink);color:#fff;padding:.6rem 1rem;
+  font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:.9rem;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.algo-head .pill{font-size:.68rem;letter-spacing:.04em;text-transform:uppercase;background:var(--reward);padding:.15rem .5rem;border-radius:2px}
+.algo-body{font-family:"IBM Plex Mono",monospace;font-size:.82rem;line-height:1.75;padding:.9rem 1.1rem;color:var(--ink-soft)}
+.algo-body .ln{display:block;white-space:pre-wrap}
+.algo-body .kw{color:var(--reward);font-weight:600}
+.algo-body .cm{color:var(--slate-2)}
+.algo-body .step{color:var(--cost);font-weight:600}
+
+/* ---------- audit / positioning distinctive treatment ---------- */
+.audit-band{
+  border-top:2px solid var(--cost);
+  margin-top:4.5rem;padding-top:.4rem;
+}
+.audit-band .section-head{border-top:none}
+.audit-band .section-head .sn{color:var(--cost)}
+.crit{
+  border:1px solid var(--cost-tint);border-left:4px solid var(--cost);
+  background:linear-gradient(180deg,var(--cost-tint),#fff 60%);
+  border-radius:3px;padding:1.1rem 1.3rem;margin:1.5rem 0;page-break-inside:avoid;
+}
+.crit .tag{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:.8rem;color:var(--danger);letter-spacing:.03em;display:block;margin-bottom:.4rem}
+.crit p:last-child{margin-bottom:0}
+.verdict{font-family:"Space Grotesk",sans-serif;font-size:.9rem;font-weight:600;color:var(--danger);margin-top:.5rem}
+
+/* ---------- provenance pills (v1/v2 merge) ---------- */
+.prov{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:.6rem;letter-spacing:.05em;text-transform:uppercase;border-radius:2px;padding:.05rem .32rem;margin-left:.35rem;vertical-align:.08em;white-space:nowrap}
+.prov.v1{color:var(--slate);border:1px solid var(--slate-2)}
+.prov.v2r{color:var(--cost);border:1px solid var(--cost)}
+.prov.v2n{color:var(--reward);border:1px solid var(--reward)}
+.merge-legend{display:flex;flex-wrap:wrap;gap:.4rem 1.1rem;font-family:"Space Grotesk",sans-serif;font-size:.78rem;color:var(--slate);margin:.4rem 0 1.4rem}
+.merge-legend span b{color:var(--ink-soft)}
+
+.defense-table td:first-child{width:46%}
+.defense-table .att{color:var(--danger);font-weight:500}
+.defense-table .def{color:var(--ink-soft)}
+
+/* ---------- misc ---------- */
+.note{
+  font-size:.9rem;color:var(--slate);border-left:2px solid var(--hair);
+  padding-left:1rem;margin:1.3rem 0;font-style:italic;
+}
+.tocwrap{background:var(--paper-tint);border:1px solid var(--hair);border-radius:4px;padding:1.1rem 1.4rem;margin:2rem 0;column-count:2;column-gap:2rem}
+.tocwrap a{display:block;font-family:"Space Grotesk",sans-serif;font-size:.86rem;color:var(--ink-soft);border:none;padding:.16rem 0;break-inside:avoid}
+.tocwrap a:hover{color:var(--reward)}
+.tocwrap a .tn{color:var(--cost);font-weight:600;margin-right:.5rem}
+hr.soft{border:none;border-top:1px solid var(--hair);margin:2.5rem 0}
+
+.exlist{counter-reset:ex;list-style:none;padding:0}
+.exlist li{counter-increment:ex;position:relative;padding-left:2.4rem;margin-bottom:1rem;font-size:.96rem;color:var(--ink-soft)}
+.exlist li::before{content:counter(ex);position:absolute;left:0;top:.05rem;font-family:"Space Grotesk",sans-serif;font-weight:700;color:var(--reward);border:1.5px solid var(--reward);border-radius:50%;width:1.55rem;height:1.55rem;display:flex;align-items:center;justify-content:center;font-size:.8rem}
+
+.refs{list-style:none;counter-reset:ref;padding:0;font-size:.9rem;color:var(--ink-soft)}
+.refs li{counter-increment:ref;position:relative;padding-left:2.2rem;margin-bottom:.55rem;line-height:1.45}
+.refs li::before{content:"["counter(ref)"]";position:absolute;left:0;font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--cost)}
+.refs .venue{color:var(--slate)}
+.refs .verified{font-family:"Space Grotesk",sans-serif;font-size:.66rem;letter-spacing:.04em;text-transform:uppercase;color:var(--safe);border:1px solid var(--safe);border-radius:2px;padding:0 .3rem;margin-left:.3rem}
+
+.footer{margin-top:5rem;border-top:2px solid var(--ink);padding-top:1rem;font-family:"Space Grotesk",sans-serif;font-size:.78rem;color:var(--slate-2);display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem}
+
+/* ---------- responsive ---------- */
+@media (max-width:680px){
+  body{font-size:18px}
+  .ledger,.req-grid{grid-template-columns:1fr}
+  .ledger-reward{border-right:none;border-bottom:1px solid var(--hair)}
+  .tocwrap{column-count:1}
+  .defense-table td:first-child{width:auto}
+}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+
+/* ---------- print ---------- */
+@media print{
+  body{background:#fff;font-size:11pt}
+  .wrap{max-width:none;padding:0}
+  a{color:var(--ink);border:none}
+  .box,.algo,figure,.crit,.callout,table{page-break-inside:avoid}
+  .section{page-break-before:auto}
+  .callout{background:#fff;color:var(--ink);border:1.5px solid var(--ink)}
+  .callout p,.callout h4,.callout .eyebrow{color:var(--ink)}
+  .masthead{padding-top:0}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ===================== MASTHEAD ===================== -->
+<header class="masthead">
+  <div class="kicker">
+    <span class="num">CHAPTER 10 · SAFE REINFORCEMENT LEARNING</span>
+  </div>
+  <h1 class="chapter-title">Constrained Policy Optimization as Inference</h1>
+  <p class="chapter-sub">From weighted maximum likelihood to safety: MPO, the constrained E-step, and diffusion policies — a complete derivation of the alternative to Lagrangian backpropagation, ending in the C-TruDi algorithm.</p>
+  <div class="byline">
+    <span><b>Draft:</b> July 2026 · deep-math edition</span>
+    <span><b>Primary sources:</b> Abdolmaleki et al. 2018 (MPO); Liu et al., ICML 2022 (CVPO)</span>
+    <span><b>Companion to:</b> reachability-constrained diffusion policies (Ch. 9)</span>
+  </div>
+</header>
+
+<!-- ===================== TOC ===================== -->
+<nav class="tocwrap" aria-label="Contents">
+  <a href="#s1"><span class="tn">1</span>Motivation: the multiplier that never settles</a>
+  <a href="#s2"><span class="tn">2</span>Background I — convex duality in three lemmas</a>
+  <a href="#s3"><span class="tn">3</span>Background II — policy iteration as EM: MPO</a>
+  <a href="#s4"><span class="tn">4</span>The constrained E-step — full derivation</a>
+  <a href="#s5"><span class="tn">5</span>State-dependent multipliers λ(s)</a>
+  <a href="#s6"><span class="tn">6</span>Infeasibility, recession &amp; improvement budgets</a>
+  <a href="#s7"><span class="tn">7</span>Background III — diffusion policies &amp; the weighted M-step</a>
+  <a href="#s8"><span class="tn">8</span>Trust regions in path space</a>
+  <a href="#s9"><span class="tn">9</span>Assembly: the C-TruDi algorithm</a>
+  <a href="#s10"><span class="tn">10</span>Critical audit — the three risks</a>
+  <a href="#s11"><span class="tn">11</span>Reconciliation: advisor’s v1 note &amp; this chapter</a>
+  <a href="#s12"><span class="tn">12</span>Positioning: lineage &amp; the open gap</a>
+  <a href="#s13"><span class="tn">13</span>Validation plan</a>
+  <a href="#ex"><span class="tn">·</span>Exercises &amp; references</a>
+</nav>
+
+<!-- ===================== SECTION 1 ===================== -->
+<section class="section" id="s1">
+  <div class="section-head"><span class="sn">1</span><h2>Motivation: the multiplier that never settles</h2></div>
+
+  <p class="lead">Every Lagrangian safe-RL method — SAC-Lag, PPO-Lag, FOCOPS, and the reachability-constrained policy gradient of Chapter 9 — shares one structural weakness: the dual variable is <em>learned</em>, by gradient ascent, at the same time as the policy. Neither ever sees the other at optimality.</p>
+
+  <p>Write the constrained MDP problem in its saddle-point form,</p>
+  \[
+  \max_\theta \min_{\lambda \ge 0}\; J_r(\pi_\theta) \;-\; \lambda\,\big(J_c(\pi_\theta) - d\big),
+  \]
+  <p>and the standard recipe is a <em>simultaneous</em> stochastic ascent–descent: one noisy gradient step on \(\theta\), one noisy gradient step on \(\lambda\), repeat. The multiplier chases a moving policy; the policy chases a moving penalty. The resulting dynamics are those of a damped oscillator at best, and of a limit cycle at worst: cost overshoots the budget, \(\lambda\) winds up, the policy over-corrects into conservatism, \(\lambda\) collapses, and the cycle repeats. For <em>state-wise</em> constraints the situation is worse still — when \(\lambda\) becomes a multiplier <em>network</em> \(\lambda_\phi(s)\) trained by dual ascent, local overshoots propagate to neighbouring states through the function approximator and amplify the oscillation (ALaM documents exactly this failure mode).</p>
+
+  <p>There is a second, quieter weakness. In the Lagrangian-backprop approach of Chapter 9 the safety critic \(Q_c\) enters the policy update <em>through the chain rule</em>: \(\nabla_\theta\, \lambda\, Q_c(s, \pi_\theta(s))\), differentiated through the whole denoising chain of the diffusion policy. The gradient is only as good as \(\nabla_a Q_c\) — a quantity the critic was never trained to get right — and for a \(K\)-step diffusion policy it is propagated through \(K\) compositions before it touches \(\theta\).</p>
+
+  <div class="ledger">
+    <div class="ledger-reward">
+      <h5><span class="dot"></span>What Lagrangian methods do</h5>
+      <p>One inexact gradient step on \(\lambda\) per iteration. The multiplier is a <em>state</em> of the optimizer, with its own learning rate, its own momentum, its own failure modes. The constraint is enforced only in the limit — if the dynamics converge at all.</p>
+    </div>
+    <div class="ledger-cost">
+      <h5><span class="dot"></span>What this chapter does instead</h5>
+      <p>Solve the constrained policy-improvement step <em>exactly</em>, in closed form, per iteration — over a nonparametric distribution where the problem is convex. The multiplier is not learned; it is <em>computed</em>, fresh, each iteration, by a two-dimensional convex program.</p>
+    </div>
+    <div class="ledger-cap">↑ the design choice this chapter develops — exact dual solves instead of dual dynamics</div>
+  </div>
+
+  <p>The idea is not exotic. It is the natural marriage of two observations. First, <span class="term">MPO</span> (Abdolmaleki et al., 2018) already solves its policy-improvement step exactly over a nonparametric distribution: for each state it reweights sampled actions by \(\exp(Q/\eta)\), where the temperature \(\eta\) is the exact solution of a one-dimensional convex dual. Second, an expected-cost constraint is <em>linear</em> in that nonparametric distribution — so adding it to the E-step keeps the problem convex, keeps the closed form, and merely upgrades the dual from one dimension to two. The reweighting becomes</p>
+  \[
+  q^*(a\mid s)\;\propto\;\pi_{\text{old}}(a\mid s)\,
+  \exp\!\Big(\tfrac{Q_r(s,a)-\lambda\,Q_c(s,a)}{\eta}\Big),
+  \]
+  <p>with \((\eta,\lambda)\) the exact minimizer of a jointly convex dual. This is <span class="term">CVPO</span> (Liu et al., ICML 2022) — and §4 derives it line by line. The remainder of the chapter then does what CVPO did not: replaces the Gaussian policy class with a diffusion policy (§7), replaces the intractable action-space KL with the path-space trust region of BDPO/DIME/TruDi (§8), allows the multiplier to become state-dependent (§5), makes the budget <em>relative</em> to the current policy's cost so that the problem is always feasible (§6), and assembles the result into a concrete algorithm (§9).</p>
+
+  <div class="callout">
+    <span class="eyebrow">The central idea</span>
+    <h4>The constraint lives where the problem is convex</h4>
+    <p>Policy improvement is split into two phases. In the <strong>E-step</strong> the policy is a free measure \(q(\cdot\mid s)\): expected reward is linear in \(q\), expected cost is linear in \(q\), the KL trust region is convex in \(q\) — so the safety-constrained improvement is a <strong>convex program with a closed-form solution and an exactly solvable two-dimensional dual</strong>. In the <strong>M-step</strong> the network only has to imitate \(q^*\) by weighted maximum likelihood — supervised learning, where deep networks are at their most reliable. The constraint never meets a policy gradient.</p>
+  </div>
+
+  <p class="note">Provenance. The proposal analysed in this chapter is the E-step-constrained scheme suggested in discussion by G. Neumann (July 2026): apply the safety constraint inside MPO's weighted-maximum-likelihood machinery — "the constraint is linear in the sample weighting, so it can be solved rather than penalized" — with state-dependent multipliers and inference-time guidance as extensions. The chapter's contribution is to make every step of that sketch precise, to locate it in the literature (it recovers CVPO almost exactly), and to identify what remains genuinely open.</p>
+</section>
+
+<!-- ===================== SECTION 2 ===================== -->
+<section class="section" id="s2">
+  <div class="section-head"><span class="sn">2</span><h2>Background I — convex duality in three lemmas</h2></div>
+
+  <p class="lead">Everything in this chapter reduces to three pieces of convex analysis: the solution of a linear objective under a KL constraint, the convexity of the resulting dual, and the behaviour of that dual when the primal is infeasible. We state them once, in full, and reuse them everywhere.</p>
+
+  <h3>2.1 The Gibbs variational principle</h3>
+
+  <div class="box lem">
+    <span class="tag">Lemma 2.1 <span class="name">— Donsker–Varadhan / Gibbs</span></span>
+    <p>Let \(\mu\) be a probability measure on \(\mathcal A\) and \(f:\mathcal A\to\mathbb R\) measurable with \(\mathbb E_\mu[e^{f}]<\infty\). Then over probability measures \(q \ll \mu\),</p>
+    \[
+    \sup_{q}\;\Big\{\,\mathbb E_q[f] \;-\; \mathrm{KL}(q\,\|\,\mu)\,\Big\}
+    \;=\; \log \mathbb E_{\mu}\big[e^{f}\big],
+    \]
+    <p>and the supremum is attained uniquely at the <em>Gibbs measure</em> \(q^*(a) \propto \mu(a)\,e^{f(a)}\).</p>
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof</span>
+    <p>Write \(Z=\mathbb E_\mu[e^f]\) and let \(g(a)=\mu(a)e^{f(a)}/Z\). For any \(q\ll\mu\),</p>
+    \[
+    \mathbb E_q[f]-\mathrm{KL}(q\|\mu)
+    = \mathbb E_q\!\Big[\log\tfrac{\mu e^{f}}{q}\Big]
+    = \log Z - \mathrm{KL}(q\,\|\,g)\;\le\;\log Z,
+    \]
+    <p>with equality iff \(q=g\), since \(\mathrm{KL}\ge 0\) with equality iff the arguments agree. <span class="qed">∎</span></p>
+  </div>
+
+  <p>Lemma 2.1 is the engine of every "exponentiated-advantage" formula in this chapter: whenever a linear functional of \(q\) is maximized against a KL penalty to a reference \(\mu\), the optimum tilts \(\mu\) exponentially by the integrand. The KL-<em>constrained</em> version follows by Lagrangian duality and inherits a temperature.</p>
+
+  <h3>2.2 The temperature dual and its convexity</h3>
+
+  <div class="box lem">
+    <span class="tag">Lemma 2.2 <span class="name">— perspective of log-sum-exp</span></span>
+    <p>For fixed \(f\), the function</p>
+    \[
+    h(\eta)\;=\;\eta\,\log \mathbb E_{\mu}\!\big[e^{f/\eta}\big],\qquad \eta>0,
+    \]
+    <p>is convex in \(\eta\); it is the <em>perspective</em> of the convex function \(t\mapsto\log\mathbb E_\mu[e^{tf}]\big|_{t=1}\) evaluated at \((\eta,1)\). More generally, for \(f_\lambda(a)=Q_r(a)-\lambda\,Q_c(a)\) affine in \(\lambda\), the map</p>
+    \[
+    (\eta,\lambda)\;\longmapsto\;\eta\,\log \mathbb E_{\mu}\!\big[e^{(Q_r-\lambda Q_c)/\eta}\big]
+    \]
+    <p>is <strong>jointly convex</strong> on \(\{\eta>0,\ \lambda\in\mathbb R\}\).</p>
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof</span>
+    <p><em>Step 1.</em> \(\Phi(g)=\log\mathbb E_\mu[e^{g}]\) is convex in the function \(g\) (Hölder's inequality: \(\Phi(\alpha g_1+(1-\alpha)g_2)\le\alpha\Phi(g_1)+(1-\alpha)\Phi(g_2)\)).</p>
+    <p><em>Step 2.</em> \(g_\lambda = Q_r-\lambda Q_c\) is affine in \(\lambda\), so \(\lambda\mapsto\Phi(g_\lambda)\) is convex (convex ∘ affine).</p>
+    <p><em>Step 3.</em> The perspective operation \((\eta,\lambda)\mapsto \eta\,\Phi(g_\lambda/\eta)\cdot 1 = \eta\,\log\mathbb E_\mu[e^{(Q_r-\lambda Q_c)/\eta}]\) preserves convexity: if \(\psi(\lambda)\) is convex then \((\eta,\lambda)\mapsto\eta\,\psi(\lambda/\eta)\) is jointly convex for \(\eta>0\) (Boyd &amp; Vandenberghe, §3.2.6). Here the joint argument is \((\eta,\lambda)\) through the scaled exponent. <span class="qed">∎</span></p>
+  </div>
+
+  <p>The practical content: the dual problems of §3 and §4 are convex in <em>all</em> their dual variables jointly. They can be solved to machine precision each iteration by a handful of Newton or SLSQP steps on a Monte-Carlo estimate. There is no saddle-point dance.</p>
+
+  <h3>2.3 Duality gap and the smell of infeasibility</h3>
+
+  <div class="box lem">
+    <span class="tag">Lemma 2.3 <span class="name">— unbounded dual ⇔ empty primal</span></span>
+    <p>Consider \(\max_q \mathbb E_q[Q_r]\) subject to \(\mathbb E_q[Q_c]\le d\), \(\mathrm{KL}(q\|\mu)\le\varepsilon\), over probability measures \(q\ll\mu\). If \(\operatorname*{ess\,inf}_{a\sim\mu} Q_c(a) > d\), the primal is infeasible, and the dual objective satisfies</p>
+    \[
+    g(\eta,\lambda)\;\xrightarrow[\lambda\to\infty]{}\;-\infty
+    \quad\text{along the recession direction } (\eta \text{ fixed},\,\lambda\uparrow),
+    \]
+    <p>i.e. the dual is unbounded below. Conversely, if some \(q\) in the KL ball satisfies the cost budget strictly (Slater's condition), strong duality holds and the dual attains a finite minimizer \((\eta^*,\lambda^*)\).</p>
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof sketch</span>
+    <p>With \(g(\eta,\lambda)=\lambda d+\eta\varepsilon+\eta\log\mathbb E_\mu[e^{(Q_r-\lambda Q_c)/\eta}]\) (derived in §4), the log-partition term behaves for large \(\lambda\) as \(-\lambda\operatorname*{ess\,inf}Q_c + O(1)\) (Laplace principle: the expectation concentrates on the minimizers of \(Q_c\)). Hence \(g \sim \lambda\,(d-\operatorname*{ess\,inf}Q_c)\to-\infty\) precisely when \(d<\operatorname*{ess\,inf}Q_c\). Slater ⇒ strong duality is standard for convex programs over probability measures with a KL ball of positive radius. <span class="qed">∎</span></p>
+  </div>
+
+  <p>Lemma 2.3 is not a pathology to be feared — it is a <em>feature</em>. A diverging \(\lambda\) in the per-state dual is a certificate, available at essentially zero cost, that the state is infeasible at the current budget: no reweighting of the current policy's actions can satisfy the constraint there. Section 6 turns this certificate into a switching rule.</p>
+</section>
+
+<!-- ===================== SECTION 3 ===================== -->
+<section class="section" id="s3">
+  <div class="section-head"><span class="sn">3</span><h2>Background II — policy iteration as EM: MPO</h2></div>
+
+  <p class="lead">MPO recasts policy improvement as inference: posit a "success" event whose likelihood grows with \(Q\), infer the posterior over actions given success, then fit the network to that posterior. The E-step is the inference; the M-step is weighted maximum likelihood. Everything downstream of this chapter is a modification of one of these two steps.</p>
+
+  <h3>3.1 Control as inference, minimally</h3>
+
+  <p>Introduce a binary optimality variable \(O\) with \(p(O=1\mid s,a)\propto\exp\!\big(Q^{\pi_{\text{old}}}(s,a)/\eta\big)\). Conditioning the old policy on \(O=1\) and applying Bayes gives the posterior</p>
+  \[
+  p(a\mid s, O=1)\;\propto\;\pi_{\text{old}}(a\mid s)\,
+  \exp\!\big(Q^{\pi_{\text{old}}}(s,a)/\eta\big)
+  \]
+  <p>— exactly the Gibbs tilt of Lemma 2.1 with \(\mu=\pi_{\text{old}}\), \(f=Q/\eta\). MPO's insight is to treat the temperature \(\eta\) not as a hyperparameter but as the Lagrange multiplier of an explicit trust-region constraint, which the following program makes precise.</p>
+
+  <h3>3.2 The E-step as a constrained program</h3>
+
+  <div class="box defn">
+    <span class="tag">Definition 3.1 <span class="name">— nonparametric E-step (MPO)</span></span>
+    <p>Given a state distribution \(\rho\) (in practice: states sampled from replay), the old policy \(\pi_{\text{old}}\), and a critic \(Q_r \approx Q^{\pi_{\text{old}}}_r\), solve over per-state probability densities \(q(\cdot\mid s)\):</p>
+    \[
+    \max_{q}\;\; \mathbb E_{s\sim\rho}\,\mathbb E_{a\sim q(\cdot\mid s)}\big[Q_r(s,a)\big]
+    \quad\text{s.t.}\quad
+    \mathbb E_{s\sim\rho}\big[\mathrm{KL}\big(q(\cdot\mid s)\,\|\,\pi_{\text{old}}(\cdot\mid s)\big)\big]\le\varepsilon,
+    \qquad \textstyle\int q(a\mid s)\,da = 1 \;\;\forall s.
+    \]
+  </div>
+
+  <p>The objective is <em>linear</em> in \(q\); the KL constraint is convex in \(q\); the normalization is affine. This is a convex program over an infinite-dimensional simplex — and it has a closed-form solution.</p>
+
+  <div class="box thm">
+    <span class="tag">Theorem 3.2 <span class="name">— MPO E-step, closed form and dual</span></span>
+    <p>The unique solution of Definition 3.1 is</p>
+    \[
+    q^*(a\mid s)\;=\;\frac{\pi_{\text{old}}(a\mid s)\,\exp\!\big(Q_r(s,a)/\eta^*\big)}{Z_{\eta^*}(s)},
+    \qquad
+    Z_\eta(s)=\int \pi_{\text{old}}(a\mid s)\,e^{Q_r(s,a)/\eta}\,da,
+    \]
+    <p>where \(\eta^*>0\) minimizes the convex dual</p>
+    \[
+    g(\eta)\;=\;\eta\,\varepsilon\;+\;\eta\;\mathbb E_{s\sim\rho}\Big[\log Z_\eta(s)\Big].
+    \]
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof</span>
+    <p>Form the Lagrangian with multipliers \(\eta\ge 0\) (KL) and \(\kappa(s)\) (normalization):</p>
+    \[
+    L(q,\eta,\kappa)=\mathbb E_\rho\!\int\! q\,Q_r
+    +\eta\Big(\varepsilon-\mathbb E_\rho\!\int\! q\log\tfrac{q}{\pi_{\text{old}}}\Big)
+    +\int\!\kappa(s)\Big(1-\!\int\! q\Big).
+    \]
+    <p>Pointwise stationarity in \(q(a\mid s)\): \(Q_r-\eta\log\frac{q}{\pi_{\text{old}}}-\eta-\kappa(s)=0\), i.e. \(q\propto\pi_{\text{old}}\,e^{Q_r/\eta}\); the normalizer absorbs \(\kappa\). Substituting back and using \(\mathbb E_{q^*}[Q_r]-\eta\,\mathrm{KL}(q^*\|\pi_{\text{old}})=\eta\log Z_\eta(s)\) (Lemma 2.1 with \(f=Q_r/\eta\), scaled) yields \(g(\eta)=\eta\varepsilon+\eta\,\mathbb E_\rho[\log Z_\eta]\). Convexity of \(g\) is Lemma 2.2 with \(\lambda\) frozen. Strong duality holds because the KL ball has nonempty interior (\(q=\pi_{\text{old}}\) is Slater). <span class="qed">∎</span></p>
+  </div>
+
+  <p>Two remarks that matter later. First, the dual is a <em>one-dimensional</em> convex problem, estimated by sampling \(L\) states from replay and \(M\) actions per state from \(\pi_{\text{old}}\), replacing \(Z_\eta(s)\) by \(\frac1M\sum_j e^{Q_r(s,a_j)/\eta}\) — a log-sum-exp over the action samples, numerically stabilized by subtracting the max. Second, the gradient of the dual has KKT meaning:</p>
+  \[
+  g'(\eta)\;=\;\varepsilon\;-\;\mathbb E_\rho\big[\mathrm{KL}(q^*_\eta\,\|\,\pi_{\text{old}})\big],
+  \]
+  <p>so the exact minimizer \(\eta^*\) is precisely the temperature at which the reweighted distribution uses up its KL budget. The multiplier is <em>computed to make the constraint tight</em> — the geometric picture worth holding on to before we add safety.</p>
+
+  <h3>3.3 The M-step: weighted maximum likelihood</h3>
+
+  <p>The E-step's \(q^*\) is nonparametric — it exists only as weights on sampled actions. The M-step projects it back onto the policy class by minimizing the forward KL,</p>
+  \[
+  \theta_{\text{new}}
+  =\arg\min_\theta\;\mathbb E_{s\sim\rho}\Big[\mathrm{KL}\big(q^*(\cdot\mid s)\,\|\,\pi_\theta(\cdot\mid s)\big)\Big]
+  =\arg\max_\theta\;\mathbb E_{s\sim\rho}\,\mathbb E_{a\sim\pi_{\text{old}}}\Big[\underbrace{w(s,a)}_{q^*/\pi_{\text{old}}}\,\log\pi_\theta(a\mid s)\Big],
+  \]
+  <p>i.e. <span class="term">weighted maximum likelihood</span> with importance weights \(w(s,a)=e^{Q_r(s,a)/\eta^*}/Z(s)\) on actions already sampled from the old policy. MPO additionally bounds \(\mathrm{KL}(\pi_{\text{old}}\|\pi_\theta)\le\beta\) in the M-step to keep the parametric projection itself inside a trust region. For a Gaussian policy, \(\log\pi_\theta\) is exact and this is textbook supervised learning. For a diffusion policy it is not — that is the business of §7.</p>
+
+  <div class="note">The EM analogy is exact: the E-step computes a variational posterior (here: the optimal reweighting under the trust region), the M-step maximizes the expected log-likelihood under it. As in EM, monotonic improvement holds when both steps are solved exactly — and degrades gracefully to "approximate improvement" when the M-step is a bounded surrogate. Keep this in mind: it is where the diffusion policy will tax us.</div>
+
+  <h3>3.4 Cousins: MO-MPO, V-MPO, AWR</h3>
+
+  <p>Three variants matter for orientation. <span class="term">MO-MPO</span> (Abdolmaleki et al., ICML 2020) runs one E-step <em>per objective</em>, each with its own KL budget \(\varepsilon_k\) — preferences are encoded as "how much influence may objective \(k\) exert", not as hard budgets \(d_k\); safety-as-preference is expressible but never <em>guaranteed</em>. <span class="term">V-MPO</span> (Song et al., 2019) is the on-policy variant using a state-value function and top-half advantages. <span class="term">AWR/AWAC</span> drop the exact dual and fix \(\eta\) as a hyperparameter — cheaper, but they surrender exactly the property this chapter is built on: that multipliers are computed, not tuned. The hard-constraint member of the family is CVPO, next.</p>
+</section>
+
+<!-- ===================== SECTION 4 ===================== -->
+<section class="section" id="s4">
+  <div class="section-head"><span class="sn">4</span><h2>The constrained E-step — full derivation</h2></div>
+
+  <p class="lead">Add one line to Definition 3.1 — an expected-cost budget — and re-derive. Because the new constraint is linear in \(q\), the program stays convex, the Gibbs form survives with a tilted exponent, and the dual grows from one dimension to two. This section is the mathematical heart of the chapter.</p>
+
+  <div class="box defn">
+    <span class="tag">Definition 4.1 <span class="name">— constrained E-step (CVPO)</span></span>
+    <p>Given reward and cost critics \(Q_r, Q_c\) for \(\pi_{\text{old}}\), a cost budget \(d\), and KL radius \(\varepsilon\):</p>
+    \[
+    \begin{aligned}
+    \max_{q}\;\; & \mathbb E_{s\sim\rho}\,\mathbb E_{a\sim q}\big[Q_r(s,a)\big]\\[2pt]
+    \text{s.t.}\;\;
+    & \mathbb E_{s\sim\rho}\,\mathbb E_{a\sim q}\big[Q_c(s,a)\big]\;\le\; d,\\
+    & \mathbb E_{s\sim\rho}\big[\mathrm{KL}(q\,\|\,\pi_{\text{old}})\big]\;\le\;\varepsilon,
+    \qquad \textstyle\int q(a\mid s)\,da=1\;\;\forall s.
+    \end{aligned}
+    \]
+  </div>
+
+  <div class="box thm">
+    <span class="tag">Theorem 4.2 <span class="name">— closed form and two-dimensional dual</span></span>
+    <p>Assume Slater's condition (some \(q\) in the KL ball satisfies the budget strictly). The unique solution of Definition 4.1 is</p>
+    \[
+    q^*(a\mid s)\;=\;\frac{\pi_{\text{old}}(a\mid s)\,
+    \exp\!\Big(\dfrac{Q_r(s,a)-\lambda^* Q_c(s,a)}{\eta^*}\Big)}{Z_{\eta^*,\lambda^*}(s)},
+    \qquad
+    Z_{\eta,\lambda}(s)=\int\!\pi_{\text{old}}(a\mid s)\,e^{(Q_r-\lambda Q_c)/\eta}\,da,
+    \]
+    <p>where \((\eta^*,\lambda^*)\in\mathbb R_{>0}\times\mathbb R_{\ge 0}\) is the unique minimizer of the <strong>jointly convex</strong> dual</p>
+    \[
+    g(\eta,\lambda)\;=\;\lambda\,d\;+\;\eta\,\varepsilon\;+\;\eta\;
+    \mathbb E_{s\sim\rho}\Big[\log Z_{\eta,\lambda}(s)\Big].
+    \]
+    <p>Moreover the partial derivatives recover the KKT residuals:</p>
+    \[
+    \frac{\partial g}{\partial\lambda}
+    = d-\mathbb E_\rho\,\mathbb E_{q^*_{\eta,\lambda}}\!\big[Q_c\big],
+    \qquad
+    \frac{\partial g}{\partial\eta}
+    = \varepsilon-\mathbb E_\rho\big[\mathrm{KL}(q^*_{\eta,\lambda}\,\|\,\pi_{\text{old}})\big].
+    \]
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof</span>
+    <p><em>Stationarity.</em> Lagrangian with \(\lambda\ge0\) (cost), \(\eta\ge0\) (KL), \(\kappa(s)\) (normalization):</p>
+    \[
+    L=\mathbb E_\rho\!\int\! q\,Q_r
+    -\lambda\Big(\mathbb E_\rho\!\int\! q\,Q_c - d\Big)
+    +\eta\Big(\varepsilon-\mathbb E_\rho\!\int\! q\log\tfrac{q}{\pi_{\text{old}}}\Big)
+    +\int\!\kappa(s)\Big(1-\!\int\! q\Big).
+    \]
+    <p>\(\partial L/\partial q(a\mid s)=0\) gives \(Q_r-\lambda Q_c-\eta\log\frac{q}{\pi_{\text{old}}}-\eta-\kappa(s)=0\), hence the Gibbs form with exponent \((Q_r-\lambda Q_c)/\eta\).</p>
+    <p><em>Dual.</em> Substituting \(q^*_{\eta,\lambda}\) back into \(L\) and applying Lemma 2.1 with \(f=(Q_r-\lambda Q_c)/\eta\):</p>
+    \[
+    \mathbb E_{q^*}[Q_r-\lambda Q_c]-\eta\,\mathrm{KL}(q^*\|\pi_{\text{old}})
+    =\eta\log Z_{\eta,\lambda}(s)
+    \;\Longrightarrow\;
+    g(\eta,\lambda)=\lambda d+\eta\varepsilon+\eta\,\mathbb E_\rho[\log Z_{\eta,\lambda}].
+    \]
+    <p><em>Convexity.</em> Joint convexity in \((\eta,\lambda)\) is Lemma 2.2 (perspective of log-sum-exp of an exponent affine in \(\lambda\)); the linear terms \(\lambda d+\eta\varepsilon\) preserve it. Under Slater, strong duality and dual attainment are standard; uniqueness follows from strict convexity of the log-partition term whenever \(Q_c\) is not \(\pi_{\text{old}}\)-a.s. constant per state (non-degeneracy).</p>
+    <p><em>Derivatives.</em> Differentiate \(\eta\log Z_{\eta,\lambda}\) under the integral: \(\partial_\lambda\big[\eta\log Z\big]=-\mathbb E_{q^*}[Q_c]\), and \(\partial_\eta\big[\eta\log Z\big]=\log Z-\tfrac1\eta\mathbb E_{q^*}[Q_r-\lambda Q_c]=-\mathrm{KL}(q^*\|\pi_{\text{old}})\) after one line of algebra using the Gibbs identity. <span class="qed">∎</span></p>
+  </div>
+
+  <p>Read the KKT derivatives as an <em>interpretable thermostat</em>. At the optimum, either \(\lambda^*=0\) and the reweighted policy already respects the budget (constraint inactive), or \(\lambda^*>0\) and \(\mathbb E_\rho\mathbb E_{q^*}[Q_c]=d\) <em>exactly</em> — complementary slackness holds not asymptotically, not in expectation over training, but at every single iteration. This is the precise sense in which the E-step approach eliminates multiplier dynamics: the inner problem that Lagrangian methods solve by a slow outer loop of dual ascent is here solved to optimality, per iteration, in a 2-D convex program that costs a few Newton steps.</p>
+
+  <h3>4.1 Monte-Carlo estimation of the dual</h3>
+
+  <p>Sample \(L\) states \(s_i\sim\mathcal D\) and \(M\) actions \(a_{ij}\sim\pi_{\text{old}}(\cdot\mid s_i)\); evaluate both critics once per pair. The empirical dual is</p>
+  \[
+  \hat g(\eta,\lambda)
+  =\lambda d+\eta\varepsilon
+  +\frac{\eta}{L}\sum_{i=1}^L
+  \log\!\Big(\frac1M\sum_{j=1}^M
+  \exp\!\Big(\tfrac{Q_r(s_i,a_{ij})-\lambda Q_c(s_i,a_{ij})}{\eta}\Big)\Big),
+  \]
+  <p>minimized over \(\{\eta\ge\eta_{\min},\ \lambda\in[0,\lambda_{\max}]\}\) by SLSQP or projected Newton — CVPO uses an off-the-shelf convex solver here. Numerics: always subtract \(\max_j(Q_r-\lambda Q_c)/\eta\) inside the log-sum-exp; cap \(\lambda_{\max}\) to detect the divergence of Lemma 2.3 rather than chase it. The resulting per-sample weights,</p>
+  \[
+  w_{ij}\;=\;\frac{\exp\big((Q_r(s_i,a_{ij})-\lambda^* Q_c(s_i,a_{ij}))/\eta^*\big)}
+  {\sum_{j'}\exp\big((Q_r(s_i,a_{ij'})-\lambda^* Q_c(s_i,a_{ij'}))/\eta^*\big)},
+  \]
+  <p>are all the M-step ever sees. Note what did <em>not</em> happen: no gradient of \(Q_c\) with respect to actions, no backprop through a sampler, no multiplier network. The critics are consulted only through their <em>values</em> at sampled actions — which is also why the scheme is natively off-policy: replay actions are fine as long as importance-consistent \(\pi_{\text{old}}\)-samples (or a correction) are used.</p>
+
+  <div class="crit">
+    <span class="tag">Honest accounting — where CVPO pays</span>
+    <p>The exactness is bought with compute. The E-step requires \(M\) fresh action samples and \(2LM\) critic evaluations per update, plus a convex solve; the SDAC paper's timing table reports CVPO as by far the slowest safe-RL baseline in wall-clock (≈47 h vs ≈2.6 h for CPO on Safety-Gym PointGoal at 5M steps, their Table 5). For a Gaussian policy the sampling is trivial and the cost is the solver; for a \(K\)-step diffusion policy each of the \(M\) samples costs \(K\) network passes. §7.4 and §9 treat this as a first-order design constraint, not a footnote.</p>
+    <p class="verdict">Verdict: exact duals are cheap in dimensions, expensive in samples. Budget for it.</p>
+  </div>
+</section>
+
+<!-- ===================== SECTION 5 ===================== -->
+<section class="section" id="s5">
+  <div class="section-head"><span class="sn">5</span><h2>State-dependent multipliers λ(s)</h2></div>
+
+  <p class="lead">A single scalar \(\lambda\) enforces the budget <em>on average over states</em> — a dangerous averaging when safety is local. The E-step decouples across states, so the constraint can be made state-wise and each state can solve its own tiny dual. The question is not whether this is possible (it is, trivially) but whether it is statistically affordable.</p>
+
+  <h3>5.1 The per-state program</h3>
+
+  <p>Replace the aggregated constraints by per-state ones — budget \(d(s)\) and KL radius \(\varepsilon(s)\):</p>
+  \[
+  \text{for each } s:\qquad
+  \max_{q(\cdot\mid s)}\;\mathbb E_q[Q_r]
+  \quad\text{s.t.}\quad
+  \mathbb E_q[Q_c]\le d(s),\;\;
+  \mathrm{KL}(q\,\|\,\pi_{\text{old}})\le\varepsilon(s).
+  \]
+  <p>Because nothing couples the states, Theorem 4.2 applies verbatim per state, giving <em>state-dependent</em> optimal duals \(\big(\eta^*(s),\lambda^*(s)\big)\) and per-state weights with exponent \(\big(Q_r-\lambda^*(s)\,Q_c\big)/\eta^*(s)\). CVPO itself derives this "batch-size-one" dual \(\bar g\) in its appendix — and then deliberately avoids it, on the grounds that per-state duals are computationally expensive and <em>sensitive to critic error</em>. Both objections are quantifiable.</p>
+
+  <h3>5.2 The statistics of a per-state dual</h3>
+
+  <p>Each per-state dual is estimated from only \(M\) action samples. The gradient component that determines \(\lambda^*(s)\) is \(d(s)-\mathbb E_{q^*}[Q_c]\), a self-normalized importance-weighted mean over \(M\) samples. Its variance scales as</p>
+  \[
+  \operatorname{Var}\big[\widehat{\mathbb E}_{q^*}[Q_c]\big]
+  \;\approx\;\frac{\operatorname{Var}_{q^*}[Q_c]}{M_{\text{eff}}},
+  \qquad
+  M_{\text{eff}}=\frac{\big(\sum_j w_j\big)^2}{\sum_j w_j^2}\;\le\;M,
+  \]
+  <p>and \(M_{\text{eff}}\) collapses exactly when the tilt is aggressive — low temperature \(\eta\), large \(\lambda\), i.e. near-critical states, which is where you most need the multiplier to be right. Add critic error: a bias \(b(s,a)\) in \(Q_c\) shifts the constraint surface itself, and the per-state \(\lambda^*(s)\) — unlike the batch \(\lambda^*\), which averages \(b\) over \(L\) states — inherits it at full strength. The batch dual trades locality for an \(O(\sqrt{L})\) variance reduction. That is the entire trade.</p>
+
+  <h3>5.3 Three implementable compromises</h3>
+
+  <div class="req-grid">
+    <div class="req">
+      <h5>A · Shared η, per-state λ(s)</h5>
+      <p>Temperature is a global exploration knob; safety is local. Solve one 1-D dual for \(\eta\) at fixed \(\lambda(\cdot)\), then \(L\) independent 1-D duals for \(\lambda(s_i)\). Each 1-D solve is monotone root-finding on \(\partial g/\partial\lambda\) — bisection suffices.</p>
+    </div>
+    <div class="req">
+      <h5>B · Amortized λ<sub>φ</sub>(s) by regression</h5>
+      <p>Fit a network to the per-state KKT targets \(\lambda^*(s_i)\) computed by convex solve. Crucially this is <em>regression to an exactly computed target</em>, not dual ascent — the pathology ALaM documents (multiplier-network oscillation) comes from the ascent dynamics, not from parameterizing λ.</p>
+    </div>
+    <div class="req">
+      <h5>C · Bucketed λ by safety level</h5>
+      <p>Partition states by a cheap statistic (e.g. \(\min_j Q_c(s,a_{ij})\) or the HJ value \(V_h(s)\) of Ch. 9) into \(B\) buckets; one λ per bucket. Interpolates the variance/locality trade with \(B\) as the dial. \(B=1\) is CVPO; \(B=L\) is fully state-wise.</p>
+    </div>
+  </div>
+  <p class="req-cap">↑ default to A; escalate to B only if per-state specs demand smooth λ(s); use C when the HJ value function already exists</p>
+
+  <p>The conceptual link to Chapter 9: state-dependent multipliers are the E-step analogue of the state-wise Lagrangian in Feasible Actor-Critic and Reachability-Constrained RL, where \(\lambda(s)\) is a function to be learned. Here it is a function to be <em>evaluated</em> — the per-state KKT system is solved fresh each iteration, so there is no multiplier lag and no propagation of overshoot through a function approximator, at the price of estimation variance that must be respected.</p>
+</section>
+
+<!-- ===================== SECTION 6 ===================== -->
+<section class="section" id="s6">
+  <div class="section-head"><span class="sn">6</span><h2>Infeasibility, recession, and improvement budgets</h2></div>
+
+  <p class="lead">Two failure surfaces remain in the E-step itself: states where <em>no</em> reweighting satisfies the budget, and the global choice of budget when the initial policy is far from safe. Both have clean fixes, and one of them — the relative budget — was the professor's own suggestion.</p>
+
+  <h3>6.1 Infeasible states: detect, then switch objectives</h3>
+
+  <p>By Lemma 2.3, if \(\min_j Q_c(s_i,a_{ij}) > d(s_i)\) the per-state primal is empty and the per-state dual diverges: \(\lambda(s_i)\uparrow\lambda_{\max}\) with residual \(d - \mathbb E_{q}[Q_c]\) still negative. The cap \(\lambda_{\max}\) is therefore a <em>detector</em>. Upon detection, do not fight the geometry — change the objective for that state:</p>
+
+  \[
+  \text{infeasible } s:\qquad
+  \max_{q}\;\mathbb E_q\big[-Q_c(s,a)\big]
+  \quad\text{s.t.}\quad \mathrm{KL}(q\|\pi_{\text{old}})\le\varepsilon
+  \;\;\Longrightarrow\;\;
+  q^*\propto \pi_{\text{old}}\,e^{-Q_c/\eta},
+  \]
+
+  <p>i.e. pure cost descent inside the trust region — recover toward feasibility as fast as the KL ball allows, reward be damned. This is precisely the rectification logic of CRPO (alternate reward improvement with constraint correction, no dual at all) and the feasibility split of FISOR (optimize reward in the feasible region; minimize the safety value in the infeasible region, where FISOR's regions come from HJ reachability). The E-step version costs one branch in the weight computation. The alternative — relaxing \(d(s)\) up to \(\min_j \hat Q_c + \text{slack}\) — is gentler but hides the infeasibility rather than repairing it; prefer the switch.</p>
+
+  <h3>6.2 Relative budgets: "the cost is 5.1 — just require 4.8"</h3>
+
+  <p>An absolute budget \(d_{\text{target}}\) imposed from iteration 0 is typically <em>globally</em> infeasible early in training: the initial policy's cost \(J_c(\pi_0)\) may sit far above it, and the E-step would immediately enter the recession regime almost everywhere. The professor's suggestion is the natural repair — constrain <em>improvement</em>, not level:</p>
+
+  <div class="box prop">
+    <span class="tag">Proposition 6.1 <span class="name">— monotone-improvement budget schedule</span></span>
+    <p>Set, at iteration \(k\),</p>
+    \[
+    d_k\;=\;\max\Big(d_{\text{target}},\;\hat J_c(\pi_k)-\delta_k\Big),
+    \qquad \delta_k>0.
+    \]
+    <p>Then (i) the E-step at iteration \(k\) is feasible whenever \(\delta_k\) is small relative to the cost-decrease achievable inside the KL ball — in particular \(q=\pi_{\text{old}}\) violates \(d_k\) by at most \(\delta_k\), so a Slater point exists for \(\delta_k\) below the trust-region cost margin; (ii) if each E/M cycle realizes its constraint (up to M-step projection error \(\zeta_k\)), the cost sequence satisfies \(J_c(\pi_{k+1})\le J_c(\pi_k)-\delta_k+\zeta_k\), a monotone descent toward \(d_{\text{target}}\) at rate \(\sum_k(\delta_k-\zeta_k)\).</p>
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof sketch</span>
+    <p>(i) Feasibility: the reference \(q=\pi_{\text{old}}\) has \(\mathbb E_\rho\mathbb E_{\pi_{\text{old}}}[Q_c]=\hat J_c(\pi_k)\) (advantage identity at zero KL), which exceeds \(d_k\) by at most \(\delta_k\); continuity of \(\mathbb E_q[Q_c]\) in \(q\) inside the KL ball plus a nonzero descent direction (exists unless \(\pi_{\text{old}}\) is already cost-minimal per state) yields a strictly feasible point for small \(\delta_k\). (ii) Chain the E-step's exact constraint \(\mathbb E_{q^*}[Q_c]\le d_k\) with the M-step's projection guarantee \(|J_c(\pi_{\theta_{k+1}})-\mathbb E_{q^*}[Q_c]|\le\zeta_k\) (bounded by the M-step KL radius β via the usual performance-difference/TV argument, cf. Ch. 3 §4). <span class="qed">∎</span></p>
+  </div>
+
+  <p>The schedule has the flavour of CPO's guarantee ("each update is at least as safe as the last, minus a slack") but obtained by <em>construction of the budget</em> rather than by a trust-region surrogate bound — and it composes with the absolute target: once \(\hat J_c\) crosses \(d_{\text{target}}\), the max switches over and the constraint becomes absolute. Practical rule for \(\delta_k\): couple it to the observed feasible fraction — shrink \(\delta\) when the infeasibility detector of §6.1 fires on more than a few percent of states, grow it when \(\lambda^*\approx 0\) (constraint slack, free progress available).</p>
+
+  <div class="note">One caution: \(\hat J_c(\pi_k)\) is itself an estimate; setting the budget relative to a noisy level injects that noise into the constraint. Use a slow-moving (EMA) estimate of \(J_c\), and never let \(d_k\) increase between iterations — clip to the running minimum.</div>
+</section>
+
+<!-- ===================== SECTION 7 ===================== -->
+<section class="section" id="s7">
+  <div class="section-head"><span class="sn">7</span><h2>Background III — diffusion policies and the weighted M-step</h2></div>
+
+  <p class="lead">Everything so far was policy-class-agnostic: the E-step sees only samples and critic values. The policy class enters exactly once — in the M-step, which must maximize a <em>weighted log-likelihood</em>. For a diffusion policy the log-likelihood is intractable, and the honest question is what replacing it by the ELBO does to the projection.</p>
+
+  <h3>7.1 Diffusion policies in five equations</h3>
+
+  <p>A (DDPM-style) diffusion policy generates an action by reversing a fixed noising chain. Forward process on actions, conditioned on nothing:</p>
+  \[
+  q(a^t\mid a^{t-1})=\mathcal N\big(\sqrt{1-\beta_t}\,a^{t-1},\,\beta_t I\big),
+  \qquad
+  q(a^t\mid a^0)=\mathcal N\big(\sqrt{\bar\alpha_t}\,a^0,\,(1-\bar\alpha_t)I\big),
+  \]
+  <p>with \(\bar\alpha_t=\prod_{u\le t}(1-\beta_u)\). The policy is the learned reverse chain, conditioned on the state:</p>
+  \[
+  \pi_\theta(a^{0:T}\mid s)=p(a^T)\prod_{t=1}^{T}p_\theta(a^{t-1}\mid a^t,s),
+  \qquad
+  p_\theta(a^{t-1}\mid a^t,s)=\mathcal N\big(\mu_\theta(a^t,s,t),\,\sigma_t^2 I\big),
+  \]
+  <p>and the <em>action marginal</em> \(\pi_\theta(a^0\mid s)=\int\pi_\theta(a^{0:T}\mid s)\,da^{1:T}\) is the object the E-step reasons about — intractable, but bounded below by the ELBO:</p>
+  \[
+  \log\pi_\theta(a^0\mid s)\;\ge\;
+  \mathcal L_{\text{ELBO}}(a^0,s;\theta)
+  \;=\;-\sum_{t}\mathbb E_{q}\Big[\mathrm{KL}\big(q(a^{t-1}\mid a^t,a^0)\,\|\,p_\theta(a^{t-1}\mid a^t,s)\big)\Big]+\text{const},
+  \]
+  <p>which, in the standard \(\epsilon\)-parameterization, collapses to denoising score matching:</p>
+  \[
+  -\mathcal L_{\text{ELBO}}(a^0,s;\theta)\;\overset{c}{=}\;
+  \mathbb E_{t\sim\mathcal U,\;\epsilon\sim\mathcal N}
+  \Big[\gamma_t\,\big\|\epsilon_\theta\big(\sqrt{\bar\alpha_t}\,a^0+\sqrt{1-\bar\alpha_t}\,\epsilon,\;s,\;t\big)-\epsilon\big\|^2\Big].
+  \]
+
+  <h3>7.2 The weighted denoising M-step</h3>
+
+  <div class="box defn">
+    <span class="tag">Definition 7.1 <span class="name">— weighted-ELBO projection</span></span>
+    <p>Given E-step weights \(w_{ij}\) on actions \(a_{ij}\sim\pi_{\text{old}}(\cdot\mid s_i)\), the diffusion M-step minimizes</p>
+    \[
+    \mathcal L_M(\theta)\;=\;
+    \frac1L\sum_{i}\sum_{j} w_{ij}\;
+    \mathbb E_{t,\epsilon}\Big[\gamma_t\big\|\epsilon_\theta\big(\sqrt{\bar\alpha_t}\,a_{ij}+\sqrt{1-\bar\alpha_t}\,\epsilon,\;s_i,\;t\big)-\epsilon\big\|^2\Big].
+    \]
+  </div>
+
+  <p>This is exactly the mechanism that online diffusion-RL methods already use for the <em>unconstrained</em> tilt: DPMD/SDAC realize policy mirror descent by reweighted score matching toward \(q^{\text{MD}}\propto\pi_{\text{old}}\,e^{Q/\eta}\); QVPO's Q-weighted variational objective is the same weighted VLO with weights from the reward critic alone. The constrained E-step changes <em>only the weights</em> — the exponent acquires \(-\lambda Q_c\). Machinery-wise, C-TruDi's M-step is a one-line diff on DPMD.</p>
+
+  <h3>7.3 What the ELBO does to the projection — the bias, precisely</h3>
+
+  <div class="box prop">
+    <span class="tag">Proposition 7.2 <span class="name">— weighted-ELBO bias</span></span>
+    <p>Let \(G(\theta)=\mathbb E_{s}\mathbb E_{a\sim q^*}[\log\pi_\theta(a\mid s)]\) be the true M-step objective and \(\tilde G(\theta)=\mathbb E_s\mathbb E_{a\sim q^*}[\mathcal L_{\text{ELBO}}(a,s;\theta)]\) the weighted-ELBO surrogate. Then</p>
+    \[
+    G(\theta)-\tilde G(\theta)
+    \;=\;\mathbb E_{s}\,\mathbb E_{a^0\sim q^*}\Big[
+    \mathrm{KL}\big(q(a^{1:T}\mid a^0)\,\big\|\,p_\theta(a^{1:T}\mid a^0,s)\big)\Big]\;\ge\;0,
+    \]
+    <p>i.e. the surrogate under-estimates the log-likelihood by the posterior mismatch of the diffusion chain, <em>averaged under the E-step weights</em>. Maximizing \(\tilde G\) therefore solves a projection with an additive, \(\theta\)-dependent, state-and-action-dependent slack — and the slack is largest exactly where the reverse chain fits worst, which the weights \(w\propto e^{(Q_r-\lambda Q_c)/\eta}\) may systematically up-weight (high-reward, low-cost tails).</p>
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof</span>
+    <p>Standard ELBO identity per sample: \(\log\pi_\theta(a^0\mid s)=\mathcal L_{\text{ELBO}}+\mathrm{KL}(q(a^{1:T}\mid a^0)\,\|\,p_\theta(a^{1:T}\mid a^0,s))\). Take \(\mathbb E_{q^*}\) of both sides. <span class="qed">∎</span></p>
+  </div>
+
+  <p>Consequences, stated without cosmetics. (i) Exact MPO's monotone-improvement argument needs the M-step to be a genuine I-projection; with the ELBO it becomes an approximate projection with gap \(\zeta\) equal to the weighted posterior mismatch, so the guarantee degrades to improvement-up-to-\(\zeta\) — the same currency in which DIME's convergence statement is denominated (a lower bound on the MaxEnt objective, not the objective itself). (ii) The <em>cost</em> side inherits the same slack: the realized \(J_c(\pi_{\theta_{\text{new}}})\) can exceed \(\mathbb E_{q^*}[Q_c]=d\) by an amount controlled by \(\zeta\) through the performance-difference lemma — this is the \(\zeta_k\) of Proposition 6.1, and the reason §9 keeps a deployment-time guard. (iii) QVPO's tightness analysis (conditions under which the Q-weighted VLO is a tight bound) is the right tool to import if the slack proves material; monitoring realized-vs-targeted cost is the cheap empirical proxy.</p>
+
+  <h3>7.4 The sampling bill, and how to shrink it</h3>
+
+  <p>The E-step wants \(M\) actions per state <em>from the current policy</em>; a \(K\)-step diffusion policy makes each one \(K\) network passes, so the per-iteration sampling bill is \(L\times M\times K\) forward passes before any training happens. Three mitigations, in increasing order of commitment: (a) few-step deterministic samplers (DDIM) for E-step sampling only, keeping the full chain for the M-step loss; (b) <strong>consistency distillation</strong> — CPQL reports ≈15×/45× train/inference speedups over Diffusion-QL at equal or better performance with a one-step consistency policy; (c) one-step flow policies — FPMD matches diffusion baselines with ~20× fewer inference steps. The structural point that makes all three admissible: <em>the E-step needs samples and critic values, never gradients through the sampler</em> — so a cheap distilled sampler for the E-step is exact-in-distribution up to distillation error, while the M-step continues to train the full-fidelity chain.</p>
+</section>
+
+<!-- ===================== SECTION 8 ===================== -->
+<section class="section" id="s8">
+  <div class="section-head"><span class="sn">8</span><h2>Trust regions in path space</h2></div>
+
+  <p class="lead">MPO's M-step bounds \(\mathrm{KL}(\pi_{\text{old}}\,\|\,\pi_\theta)\) between action marginals. For diffusion policies that KL is between two intractable integrals — but the KL between the <em>generation processes</em> is a sum of Gaussian terms. This is the trust-region object of BDPO, DIME and TruDi, and it slots into the M-step unchanged.</p>
+
+  <h3>8.1 Marginal KL vs path KL</h3>
+
+  <div class="box lem">
+    <span class="tag">Lemma 8.1 <span class="name">— data-processing bound &amp; decomposition</span></span>
+    <p>Let \(p_\theta(a^{0:T}\mid s)\) and \(p_{\text{old}}(a^{0:T}\mid s)\) be two reverse chains with the same prior \(p(a^T)\). Then</p>
+    \[
+    \mathrm{KL}\big(\pi_\theta(a^0\mid s)\,\|\,\pi_{\text{old}}(a^0\mid s)\big)
+    \;\le\;
+    \mathrm{KL}_{\text{path}}
+    \;=\;\sum_{t=1}^{T}\;\mathbb E_{p_\theta}\Big[\mathrm{KL}\big(p_\theta(a^{t-1}\mid a^t,s)\,\|\,p_{\text{old}}(a^{t-1}\mid a^t,s)\big)\Big],
+    \]
+    <p>and each summand is a closed-form Gaussian KL, \(\tfrac{1}{2\sigma_t^2}\|\mu_\theta-\mu_{\text{old}}\|^2\) for shared variances. Bounding \(\mathrm{KL}_{\text{path}}\le\beta\) therefore bounds the marginal KL by \(\beta\).</p>
+  </div>
+
+  <div class="proof">
+    <span class="ph">Proof</span>
+    <p>Marginalization is a Markov map applied to the path measure; KL is non-increasing under Markov maps (data-processing inequality). The chain-rule decomposition of the path KL into per-step conditional KLs is exact for Markov chains sharing the prior. <span class="qed">∎</span></p>
+  </div>
+
+  <p>This is the tractability trade of the whole diffusion-trust-region literature: the path KL is an <em>upper bound</em>, generally strict (two different chains can induce the same marginal), so the trust region in path space is conservative in marginal space. BDPO proves the corresponding equivalence for its behavior-regularized objective and evaluates the accumulated discrepancy across denoising steps; TruDi enforces exactly such a trajectory-KL upper bound over the entire diffusion trajectory for on-policy trust-region updates; DIME's MaxEnt lower bound is denominated in the same path-space currency. For C-TruDi the M-step constraint is</p>
+  \[
+  \min_\theta\;\mathcal L_M(\theta)
+  \quad\text{s.t.}\quad
+  \mathbb E_{s\sim\rho}\big[\mathrm{KL}_{\text{path}}(\pi_\theta\,\|\,\pi_{\text{old}})(s)\big]\;\le\;\beta,
+  \]
+  <p>enforced exactly as in TruDi (trajectory-KL bound with a Lagrangian on β) — reuse of in-house machinery, no new derivation needed.</p>
+
+  <h3>8.2 Inference-time guidance: the constraint re-enters at sampling</h3>
+
+  <p>The E-step constraint is in <em>expectation under \(q^*\)</em>; individual sampled actions can still land in the costly tail, and the M-step slack \(\zeta\) (Prop. 7.2) widens that tail. Two mechanisms re-impose the constraint at generation time, both compatible with a trained C-TruDi policy:</p>
+
+  <p><strong>Soft guidance.</strong> Shift each denoising mean by the cost gradient, \(\mu_\theta \mapsto \mu_\theta - \sigma_t^2\,\lambda_{\text{guide}}\nabla_a Q_c\) — classifier guidance with the cost critic as classifier. FISOR's refinement is relevant here: it deliberately uses <em>time-independent</em> guidance (built on the clean-action critic) because classifiers evaluated on noisy intermediate actions are unreliable; the Decoupled-Guidance line documents that cost signals on noisy latents correlate poorly and unstably with true cumulative cost. Guidance strength is a deployment knob, not a training-time correctness claim.</p>
+
+  <p><strong>Hard shielding.</strong> Project the final sample (or every denoising iterate) onto the feasible set certified by a safety value function: HJ-reachability projection \(a\mapsto\arg\min_{a'\in\{V_h(s,a')\le 0\}}\|a-a'\|\), or SafeDiffuser's CBF-invariance embedded into the denoising dynamics. This is where Chapter 9's reachability apparatus composes cleanly with this chapter: the HJ layer needs only the executed action and \(V_h\) — it is agnostic to how the policy was trained, and it converts the E-step's soft, expected-cost safety into a hard, per-step, persistent guarantee. The known caveat carries over: HJ values certify <em>remaining</em> in the feasible set, not <em>reaching</em> it from outside — keep the cumulative-cost signal (and §6.1's recovery objective) for the infeasible region.</p>
+
+  <div class="callout">
+    <span class="eyebrow">Division of labour</span>
+    <h4>Three layers, three failure modes covered</h4>
+    <p><strong>E-step (training):</strong> optimal, non-myopic, expected-cost safety — exact per iteration. <strong>M-step slack:</strong> monitored, bounded by β and Prop. 7.2. <strong>Inference guard (deployment):</strong> hard, myopic, per-step safety via HJ/CBF — catches the tail the expectation misses. None of the three substitutes for the others; the composition is the method.</p>
+  </div>
+</section>
+
+<!-- ===================== SECTION 9 ===================== -->
+<section class="section" id="s9">
+  <div class="section-head"><span class="sn">9</span><h2>Assembly: the C-TruDi algorithm</h2></div>
+
+  <p class="lead">All pieces exist. The assembly below is, deliberately, a minimal composition: CVPO's exact constrained E-step, DPMD's weighted denoising M-step, TruDi's path-space trust region, §6's improvement budget and feasibility switch, and an optional HJ guard at deployment.</p>
+
+  <div class="algo">
+    <div class="algo-head"><span>Algorithm 1 · C-TruDi — Constrained Trust-Region Diffusion Policy Optimization</span><span class="pill">exact duals + diffusion</span></div>
+    <div class="algo-body">
+<span class="ln"><span class="cm">input:</span> target budget d_tgt; improvement step δ; KL radii ε (E-step), β (M-step);</span>
+<span class="ln"><span class="cm">      </span> samples per state M; states per batch L; λ_max (infeasibility cap); replay 𝒟</span>
+<span class="ln"><span class="kw">for</span> each iteration k <span class="kw">do</span></span>
+<span class="ln">  <span class="step">1</span>  collect env steps with π_old (+ optional HJ guard); add to 𝒟</span>
+<span class="ln">  <span class="step">2</span>  update critics Q_r, Q_c by off-policy TD; update Ĵ_c (EMA)     <span class="cm">▹ values only</span></span>
+<span class="ln">  <span class="step">3</span>  d_k ← min(d_{k-1}, max(d_tgt, Ĵ_c − δ))                        <span class="cm">▹ §6.2, Prop. 6.1</span></span>
+<span class="ln">  <span class="step">4</span>  sample s_i ∼ 𝒟 (i=1..L); a_ij ∼ π_old(·|s_i) (j=1..M)          <span class="cm">▹ distilled sampler, §7.4</span></span>
+<span class="ln">  <span class="step">5</span>  solve (η*, λ*) = argmin ĝ(η,λ) by SLSQP                        <span class="cm">▹ Thm 4.2; per-state λ(s): §5.3</span></span>
+<span class="ln">  <span class="step">6</span>  <span class="kw">if</span> λ*(s_i) hits λ_max: switch state i to cost-descent weights   <span class="cm">▹ §6.1, Lemma 2.3</span></span>
+<span class="ln">  <span class="step">7</span>  w_ij ← softmax_j((Q_r − λ*Q_c)/η*)                              <span class="cm">▹ normalized per state</span></span>
+<span class="ln">  <span class="step">8</span>  θ ← argmin Σ w_ij · ‖ε_θ(√ᾱ_t a_ij + √(1−ᾱ_t)ε, s_i, t) − ε‖²   <span class="cm">▹ Def. 7.1</span></span>
+<span class="ln">  <span class="step">9</span>       s.t. E[KL_path(π_θ ‖ π_old)] ≤ β                            <span class="cm">▹ §8.1, TruDi machinery</span></span>
+<span class="ln">  <span class="step">10</span> distill π_θ → one-step consistency sampler for step 4          <span class="cm">▹ optional, CPQL/FPMD</span></span>
+<span class="ln"><span class="kw">end for</span></span>
+<span class="ln"><span class="cm">deploy:</span> sample π_θ with time-independent cost guidance and/or HJ projection  <span class="cm">▹ §8.2</span></span>
+    </div>
+  </div>
+
+  <p>Design notes, in the order people trip over them. <strong>Step 2:</strong> the critics never provide action-gradients; their only interface to the policy is values at sampled actions — the entire Chapter-9 concern about \(\nabla_a Q_c\) through the denoising chain is dissolved, not solved. <strong>Step 5:</strong> the dual is 2-dimensional (shared) or \(1{+}L\)-dimensional (per-state λ); either way convex, warm-started from iteration \(k{-}1\), a few Newton steps. <strong>Step 8–9:</strong> a one-line diff on DPMD (weights) plus TruDi's existing trust-region enforcement — this is deliberately the point of maximal code reuse for the group. <strong>Step 10:</strong> optional but, given CVPO's wall-clock record (§4.1), the difference between a paper and a demo.</p>
+</section>
+
+<!-- ===================== SECTION 10 (audit) ===================== -->
+<section class="section audit-band" id="s10">
+  <div class="section-head"><span class="sn">10</span><h2>Critical audit — the three risks</h2></div>
+
+  <p class="lead">The method is sound; it is not free. Three risks are structural rather than incidental, and each has a measurement that decides it.</p>
+
+  <div class="crit">
+    <span class="tag">Risk 1 — the projection is not a projection (weighted-ELBO bias)</span>
+    <p>Prop. 7.2: the M-step optimizes a lower bound whose gap is the posterior mismatch of the diffusion chain, weighted by the E-step tilt. Exact CVPO's per-iteration constraint satisfaction becomes satisfaction-up-to-\(\zeta\), and \(\zeta\) is invisible unless measured. <em>Decision measurement:</em> realized \(J_c(\pi_{\theta_{new}})\) vs the E-step target \(d_k\), tracked every iteration; if the gap is systematic, import QVPO's tight-bound weighting or increase T locally. This risk has no Gaussian analogue — it is the price of the policy class.</p>
+    <p class="verdict">Severity: the guarantee-relevant risk. Mitigable, not removable.</p>
+  </div>
+
+  <div class="crit">
+    <span class="tag">Risk 2 — per-state duals amplify critic error</span>
+    <p>§5.2: \(\lambda^*(s)\) is a function of an \(M\)-sample self-normalized estimate whose effective sample size collapses under aggressive tilts, and it inherits \(Q_c\)-bias at full strength where the batch dual averages it away. CVPO's authors avoided per-state duals for exactly this reason. <em>Decision measurement:</em> shared-λ vs per-state-λ ablation at matched compute; keep λ(s) only if state-wise violation improves without inflating dual variance. Default remains shared λ — i.e. plain CVPO — until the data argues otherwise.</p>
+    <p class="verdict">Severity: moderate; bounded by the discipline of defaulting to A (§5.3).</p>
+  </div>
+
+  <div class="crit">
+    <span class="tag">Risk 3 — the compute wall</span>
+    <p>CVPO is already the slowest safe-RL baseline on record (≈18× CPO's wall-clock in SDAC's Table 5); a K-step diffusion sampler multiplies the E-step's sampling bill by K. Without distillation the method may be correct and unusable. <em>Decision measurement:</em> wall-clock to a fixed (reward, cost) operating point vs SAC-Lag; the distilled-sampler variant (steps 4/10) must land within small-integer multiples of the Gaussian baseline or the massively-parallel-sim setting (TruDi's home turf) must absorb the difference.</p>
+    <p class="verdict">Severity: practical show-stopper if ignored; engineering, not mathematics.</p>
+  </div>
+
+  <h3>10.1 The comparison that motivated the chapter, settled</h3>
+
+  <div class="tbl-wrap">
+  <table>
+    <caption>E-step constraint vs Lagrangian backprop vs safety filter</caption>
+    <thead><tr><th>Property</th><th>Lagrangian backprop (Ch. 9 style)</th><th>Constrained E-step (this chapter)</th><th>Safety filter / shield</th></tr></thead>
+    <tbody>
+      <tr><td>Multiplier</td><td class="att">learned by dual ascent — lags, oscillates</td><td class="win">computed exactly per iteration (2-D convex)</td><td>none (hard projection)</td></tr>
+      <tr><td>Constraint semantics</td><td>expected cost, asymptotic</td><td class="win">expected cost, exact per E-step</td><td class="win">per-step, hard</td></tr>
+      <tr><td>Uses ∇<sub>a</sub>Q<sub>c</sub></td><td class="att">yes — through K denoising steps</td><td class="win">no — values only</td><td>sometimes (QP)</td></tr>
+      <tr><td>Myopia</td><td>non-myopic</td><td>non-myopic</td><td class="att">myopic, can be conservative</td></tr>
+      <tr><td>Off-policy reuse</td><td>delicate</td><td class="win">native</td><td>n/a</td></tr>
+      <tr><td>Per-iteration cost</td><td class="win">cheap</td><td class="att">M samples + critic evals + convex solve</td><td>cheap–moderate</td></tr>
+      <tr><td>Composable with HJ guarantees</td><td>yes (Ch. 9)</td><td class="win">yes — filter is training-agnostic</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The honest summary of the professor's instinct: correct on the mechanism (the constraint <em>is</em> linear in the sample weighting; the dual <em>is</em> exactly solvable; the multiplier dynamics <em>are</em> the disease), correct that inference-time guidance is a complementary layer rather than an alternative, and pre-empted on the base construction by CVPO — which is good news, since it means the risky part of the idea ships with an ICML paper's worth of theory and code already attached.</p>
+</section>
+
+<!-- ===================== SECTION 11 ===================== -->
+<!-- ===================== SECTION 11 · v1/v2 RECONCILIATION ===================== -->
+<section class="section" id="s11">
+  <div class="section-head"><span class="sn">11</span><h2>Reconciliation: the advisor's v1 note and this chapter</h2></div>
+
+  <p class="lead">This chapter and G. Neumann's independently written working note (<span class="mono">constrained_mpo.docx</span>, v1, July 2026) describe almost the same algorithm — both reconstruct CVPO from first principles. This section records, honestly and line by line, what v1 proposed, where this chapter changed it, and where it went further. The tags are used only here.</p>
+
+  <div class="merge-legend">
+    <span><span class="prov v1">v1 · GN</span> <b>from the advisor's note, unchanged</b></span>
+    <span><span class="prov v2r">v2 · revised</span> <b>same idea, mechanism changed</b></span>
+    <span><span class="prov v2n">v2 · new</span> <b>added by this chapter</b></span>
+  </div>
+
+  <p>The two documents agree on the entire skeleton: the constrained E-step, the safety-weighted Boltzmann posterior \(q^*\propto\pi_{\text{old}}\,e^{(Q-\sum_i\lambda_i Q_{c_i})/\eta}\), the convex dual, the weighted-MLE M-step, the expectation-vs-per-state split, the infeasibility mode \(\lambda\to\infty\), and even the adaptive budget \(d_i\leftarrow\max(d_i^\infty,\alpha\hat J_{c_i})\) <span class="prov v1">v1 · GN</span>. Structurally, both are CVPO. Neither is wrong. The differences are three, and they are the reason the chapter exists.</p>
+
+  <h3>11.1 What v1 has that this chapter adopted</h3>
+
+  <p>Three things in the advisor's note were sharper than the chapter's first draft and are folded in:</p>
+  <ul class="exlist" style="counter-reset:ex">
+    <li><b>Multiple constraints from the outset</b> <span class="prov v1">v1 · GN</span>. v1 carries \(i=1,\dots,m\) cost critics and the scalarized exponent \(Q-\sum_i\lambda_i Q_{c_i}\) throughout; the chapter derived the single-constraint case and reached the multi-constraint dual only in Exercise 1. For excavators and humanoids with simultaneous torque, distance, and region limits, the \(m\)-constraint framing is the correct default and is now the reference form.</li>
+    <li><b>The discount-mismatch limitation</b> <span class="prov v1">v1 · GN</span>. Budgets are specified undiscounted per episode; critics are discounted; the map between \(d_i\) and the discounted threshold is horizon-dependent and approximate. The chapter omitted this entirely. It is a real deployment hazard and belongs in the limitations.</li>
+    <li><b>PID-Lagrangian as a named stabilizer</b> <span class="prov v1">v1 · GN</span> (Stooke et al. 2020) — retained, but demoted: see §11.2.</li>
+  </ul>
+
+  <h3>11.2 What v1 proposed that this chapter changed</h3>
+
+  <div class="crit">
+    <span class="tag">Revision 1 — the multiplier is computed, not learned <span class="prov v2r" style="color:var(--cost)">v2 · revised</span></span>
+    <p>v1 solves the dual by "a few steps of projected gradient descent" and describes \(\lambda_i\) as growing while violated and shrinking when satisfied — "the standard Lagrangian mechanism … inside the exponential weights." That phrasing quietly reintroduces the very object this whole approach exists to remove: multiplier <em>dynamics</em>, with a learning rate, lag, and windup. The chapter's §4 shows the dual \(g(\eta,\lambda)\) is <em>jointly convex</em> and is solved to the global optimum each iteration by warm-started SLSQP/Newton, at negligible cost beside the critic updates. Complementary slackness then holds <em>exactly, per iteration</em> — not asymptotically. <span class="prov v2n" style="color:var(--reward)">v2 · new</span></p>
+    <p class="verdict">Consequence: v1's PID-Lagrangian remedy is demoted to a fallback for the amortized \(\lambda_\phi\) variant only. For the scalar and bucketed cases there is nothing to oscillate — so nothing to damp.</p>
+  </div>
+
+  <div class="crit">
+    <span class="tag">Revision 2 — per-state λ(s) by regression, not dual ascent <span class="prov v2r" style="color:var(--cost)">v2 · revised</span></span>
+    <p>v1's Variant B trains a multiplier network by \(\nabla_\phi\,\mathbb E_s\sum_i\lambda_{\phi,i}(s)\,(d_i-\mathbb E_q[Q_{c_i}])\) — gradient ascent on the per-state violation. This is exactly the mechanism ALaM (2026) documents as oscillatory: local overshoot propagates through the approximator to neighbouring states. §5.3 replaces it with the three-tier scheme — shared-\(\eta\) exact per-state solve (A), amortized \(\lambda_\phi\) fit by <em>regression to solved KKT targets</em> (B), or bucketed \(\lambda\) (C) — keeping v1's clever \(\lambda_i(s)=\bar\lambda_i\cdot\text{softplus}(f_{\phi,i}(s))\) correction form as the inductive bias for the regression. <span class="prov v2n" style="color:var(--reward)">v2 · new</span></p>
+    <p class="verdict">v1's own caution ("λ_φ noise may dominate") is upheld and quantified in §5.2: effective sample size collapses under aggressive tilts, and per-state λ inherits critic bias at full strength. CVPO's appendix pre-ran this analysis and declined the per-state dual for the same reasons — so Variant B is a hypothesis to test (§12), not a default.</p>
+  </div>
+
+  <div class="crit">
+    <span class="tag">Revision 3 — improvement budget as the default schedule <span class="prov v2r" style="color:var(--cost)">v2 · revised</span></span>
+    <p>v1 lists a geometric anneal, a linear anneal, and the adaptive rule as alternatives. §6.2 promotes the adaptive rule to the default and formalizes it as the monotone cost-improvement budget \(d_{i,k}=\min(d_{i,k-1},\max(d_i^\infty,\hat J_{c_i}-\delta))\), with the feasibility and monotone-descent statements of Proposition 6.1. This also disposes of v1's open question "do the schedule and the \(\lambda\) dynamics fight?" — after Revision 1 there are no \(\lambda\) dynamics to fight with. <span class="prov v2n" style="color:var(--reward)">v2 · new</span></p>
+  </div>
+
+  <h3>11.3 What this chapter adds that v1 does not touch</h3>
+
+  <p>v1 assumes an exact-likelihood (Gaussian, decoupled mean/covariance) policy throughout; safety enters only through the weights and "all MPO machinery carries over" <span class="prov v1">v1 · GN</span>. Everything that makes the method a <em>diffusion</em>-policy method is new here <span class="prov v2n" style="color:var(--reward)">v2 · new</span>: the weighted denoising M-step and its weighted-ELBO bias (§7.2–7.3, Prop. 7.2), the path-space KL trust region reusing DIME/TruDi machinery (§8.1), the sampling-cost problem and its distillation fix (§7.4), and the inference-time HJ/CBF guard that converts soft expected-cost safety into a hard per-step guarantee (§8.2). This is where the publishable contribution sits — and where the group already owns two of the three load-bearing components.</p>
+
+  <div class="tbl-wrap">
+  <table class="defense-table">
+    <caption>v1 note vs. this chapter — the merge at a glance</caption>
+    <thead><tr><th>Component</th><th>v1 (advisor's note)</th><th>This chapter (v2)</th></tr></thead>
+    <tbody>
+      <tr><td>Constrained E-step / posterior</td><td class="def">present, correct</td><td class="def">identical (both = CVPO)</td></tr>
+      <tr><td>Constraints</td><td class="def">\(m\) from the start ✓</td><td class="def">adopts \(m\)-constraint form</td></tr>
+      <tr><td>Dual solution</td><td class="att">gradient ascent, learned \(\lambda\)</td><td class="def">exact convex solve, computed \(\lambda\)</td></tr>
+      <tr><td>Per-state \(\lambda(s)\)</td><td class="att">network by dual ascent</td><td class="def">regression to solved targets (§5.3)</td></tr>
+      <tr><td>Schedule</td><td class="def">anneal + adaptive option</td><td class="def">improvement budget, proven (§6.2)</td></tr>
+      <tr><td>Infeasibility</td><td class="def">\(\lambda_{\max}\), slack, advantage-constraint</td><td class="def">certificate + objective switch (§6.1)</td></tr>
+      <tr><td>CVPO identified</td><td class="att">"worth a literature pass"</td><td class="def">yes — Variant A <em>is</em> CVPO (§3, §11)</td></tr>
+      <tr><td>Policy class</td><td class="att">Gaussian only</td><td class="def">diffusion + path-space KL (§7–8)</td></tr>
+      <tr><td>Deployment guarantee</td><td class="att">none</td><td class="def">HJ/CBF guard (§8.2)</td></tr>
+      <tr><td>Discount mismatch noted</td><td class="def">yes ✓</td><td class="def">adopted into limitations</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The one-line summary for the meeting: the advisor's instinct was right on the mechanism (the constraint is linear in the sample weighting; the multiplier dynamics are the disease) and pre-empted on the base construction by CVPO — which is good news, because the risky part ships with an ICML paper's theory and code already attached. The delta that remains genuinely open is the diffusion composition of §7–9, and that is worth telling him before defense week eats the calendar: Variant A already exists as CVPO, better heard now than from a reviewer.</p>
+</section>
+
+<section class="section" id="s12">
+  <div class="section-head"><span class="sn">12</span><h2>Positioning: lineage and the open gap</h2></div>
+
+  <p class="lead">Every ingredient of C-TruDi is published; the composition is not. The table is the argument.</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <caption>The composition gap — who has which ingredient (as of July 2026)</caption>
+    <thead><tr><th>Method</th><th>Exact constrained E-step</th><th>Diffusion policy</th><th>Path-space trust region</th><th>Online</th><th>State-wise λ(s)</th><th>HJ / hard layer</th></tr></thead>
+    <tbody>
+      <tr><td>MPO / MO-MPO (2018/20)</td><td>preference-only (ε<sub>k</sub>)</td><td>—</td><td>—</td><td class="win">✓</td><td>—</td><td>—</td></tr>
+      <tr><td>CVPO (ICML 2022)</td><td class="win">✓ (batch λ)</td><td>— (Gaussian)</td><td>—</td><td class="win">✓</td><td>derived, unused</td><td>—</td></tr>
+      <tr><td>CRPO (ICML 2021)</td><td>rectification, no dual</td><td>—</td><td>—</td><td class="win">✓</td><td>—</td><td>—</td></tr>
+      <tr><td>QVPO (NeurIPS 2024)</td><td>—</td><td class="win">✓</td><td>—</td><td class="win">✓</td><td>—</td><td>—</td></tr>
+      <tr><td>DPMD / SDAC (ICML 2025)</td><td>—</td><td class="win">✓</td><td>mirror-descent KL</td><td class="win">✓</td><td>—</td><td>—</td></tr>
+      <tr><td>BDPO (ICML 2025)</td><td>—</td><td class="win">✓</td><td class="win">✓</td><td>— (offline)</td><td>—</td><td>—</td></tr>
+      <tr><td>DIME (ICML 2025) / TruDi (2026)</td><td>—</td><td class="win">✓</td><td class="win">✓</td><td class="win">✓</td><td>—</td><td>—</td></tr>
+      <tr><td>FISOR (ICLR 2024)</td><td>feasibility-weighted BC</td><td class="win">✓ (guidance)</td><td>—</td><td>— (offline)</td><td>region-wise</td><td class="win">✓ (HJ)</td></tr>
+      <tr><td>SafeDiffuser (ICLR 2025)</td><td>—</td><td class="win">✓ (planner)</td><td>—</td><td>—</td><td>—</td><td class="win">✓ (CBF)</td></tr>
+      <tr><td><strong>C-TruDi (proposed)</strong></td><td class="win">✓ + improvement budget</td><td class="win">✓</td><td class="win">✓</td><td class="win">✓</td><td class="win">optional (§5)</td><td class="win">✓ (deploy)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Framing for a paper, in one sentence: <em>CVPO's exact E-step meets TruDi's trust-region diffusion, with HJ guarantees layered at deployment</em> — an online constrained-EM method whose policy class is, for the first time, expressive enough for the multimodal safe-action sets that motivated diffusion policies in the first place. The nearest misses are FISOR (safe + diffusion, but offline, behavior-cloning-based, no exact E-step) and DPMD/DIME/TruDi (online diffusion EM/trust-region, but unconstrained). The group owns two of the three load-bearing components.</p>
+</section>
+
+<!-- ===================== SECTION 12 ===================== -->
+<section class="section" id="s13">
+  <div class="section-head"><span class="sn">13</span><h2>Validation plan</h2></div>
+
+  <p class="lead">Four stages, each with a go/no-go threshold. The staging isolates one risk at a time; skipping stages conflates them.</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <caption>Staged validation — Safety-Gymnasium (PointGoal1, CarGoal1, PointButton1)</caption>
+    <thead><tr><th>Stage</th><th>What changes</th><th>Baselines</th><th>Go / no-go threshold</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Reproduce CVPO, Gaussian policy</td><td>SAC-Lag, PPO-Lag</td><td>match published CVPO reward-at-budget; internalize the dual solve</td></tr>
+      <tr><td class="num">2</td><td>Diffusion M-step (Def. 7.1) + path-KL trust region (§8.1); shared (η,λ)</td><td>Stage-1 CVPO</td><td>match Gaussian CVPO on reward-at-budget; win on ≥1 multimodal task; realized-vs-target cost gap (Risk 1) bounded and stable</td></tr>
+      <tr><td class="num">3</td><td>State-dependent λ(s) (§5.3-A) + improvement budget d<sub>k</sub> (Prop. 6.1)</td><td>Stage-2</td><td>state-wise violations ↓ without dual-variance inflation; keep λ(s) only if it earns its variance</td></tr>
+      <tr><td class="num">4</td><td>Deployment HJ guidance / projection (§8.2)</td><td>Stage-3, FISOR</td><td>near-zero deployment violations; quantify the residual gap the soft constraint leaves</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The three decisive ablations, mapped to the risks of §10: (i) Gaussian vs diffusion E-step at equal budget — does multimodality pay where safe-action sets are disconnected (obstacle tasks)? (ii) shared λ vs λ(s) at matched compute — Risk 2's referendum; (iii) with/without inference guidance — measures exactly the tail mass that expected-cost training cannot reach. Report, always: normalized reward vs normalized cost at fixed budget, cost-regret over training, violation-oscillation amplitude (the multiplier-dynamics symptom this whole chapter exists to remove), and wall-clock to operating point (Risk 3).</p>
+</section>
+
+<!-- ===================== EXERCISES & REFERENCES ===================== -->
+<section class="section" id="ex">
+  <div class="section-head"><span class="sn">·</span><h2>Exercises</h2></div>
+  <ol class="exlist">
+    <li>Derive the dual \(g(\eta,\lambda)\) of Theorem 4.2 for <em>two</em> cost constraints \(\mathbb E_q[Q_{c_1}]\le d_1\), \(\mathbb E_q[Q_{c_2}]\le d_2\). Show joint convexity in \((\eta,\lambda_1,\lambda_2)\) and give the KKT interpretation of each partial derivative.</li>
+    <li>Prove the claim of Lemma 2.3 rigorously for finite action sets: show \(g(\eta,\lambda)=\lambda(d-\min_a Q_c)+O(1)\) as \(\lambda\to\infty\) at fixed \(\eta\), and exhibit the rate of the \(O(1)\) term.</li>
+    <li>Show that with a per-state KL constraint (not aggregated), the optimal temperature becomes state-dependent, \(\eta^*(s)\), and that the aggregated version of Definition 4.1 corresponds to a single \(\eta\) shared across states with per-state KL free to redistribute. Which do MPO and CVPO use, and why does it matter for exploration?</li>
+    <li>Compute the effective sample size \(M_{\text{eff}}\) of §5.2 in closed form when \(Q_r-\lambda Q_c\) is linear in \(a\) and \(\pi_{\text{old}}=\mathcal N(0,I)\). At what tilt magnitude does \(M_{\text{eff}}/M\) drop below 0.1?</li>
+    <li>Prove Proposition 7.2's corollary: \(|J_c(\pi_{\theta_{\text{new}}})-\mathbb E_\rho\mathbb E_{q^*}[Q_c]| \le \frac{2\gamma\, c_{\max}}{(1-\gamma)^2}\sqrt{\tfrac12 \beta'}\), where \(\beta'\) bounds \(\mathbb E_\rho[\mathrm{KL}(q^*\|\pi_{\theta_{\text{new}}})]\), using the performance-difference lemma and Pinsker. Relate \(\beta'\) to the ELBO gap and the M-step KL radius β.</li>
+    <li>Design the switching rule of §6.1 so that the overall E-step remains a convex program per state (hint: the cost-descent objective is itself Definition 3.1 with \(Q_r\) replaced by \(-Q_c\); show the switch preserves the Gibbs form and derive its dual).</li>
+    <li>(Research) The E-step constraint is on \(\mathbb E_q[Q_c]\); a chance constraint \(\Pr_{a\sim q}(Q_c>d)\le\alpha\) is <em>not</em> linear in \(q\) but is still convex in \(q\) for fixed \(d\). Derive the resulting E-step and show the weights become a hard/soft hybrid: \(w\propto \pi_{\text{old}}\,e^{Q_r/\eta}\cdot\sigma\)-tilted indicator. Compare with FISOR's feasibility indicator.</li>
+  </ol>
+
+  <hr class="soft">
+
+  <div class="section-head"><span class="sn">·</span><h2>References</h2></div>
+  <ol class="refs">
+    <li>Abdolmaleki, Springenberg, Tassa, Munos, Heess &amp; Riedmiller. <em>Maximum a Posteriori Policy Optimisation</em> (MPO). <span class="venue">ICLR 2018; arXiv:1806.06920.</span><span class="verified">verified</span></li>
+    <li>Abdolmaleki, Huang, Hasenclever et al. <em>A Distributional View on Multi-Objective Policy Optimisation</em> (MO-MPO). <span class="venue">ICML 2020; arXiv:2005.07513.</span><span class="verified">verified</span></li>
+    <li>Song, Abdolmaleki, Springenberg et al. <em>V-MPO: On-Policy Maximum a Posteriori Policy Optimization</em>. <span class="venue">ICLR 2020; arXiv:1909.12238.</span></li>
+    <li>Liu, Cen, Isenbaev, Liu, Wu, Li &amp; Zhao. <em>Constrained Variational Policy Optimization for Safe Reinforcement Learning</em> (CVPO). <span class="venue">ICML 2022; arXiv:2201.11927.</span><span class="verified">verified</span></li>
+    <li>Xu, Liang &amp; Lan. <em>CRPO: A New Approach for Safe Reinforcement Learning with Convergence Guarantee</em>. <span class="venue">ICML 2021; arXiv:2011.05869.</span><span class="verified">verified</span></li>
+    <li>Ma, Guan, Li, Zhang, Zheng &amp; Chen. <em>Feasible Actor-Critic: Constrained RL for Ensuring Statewise Safety</em> (FAC). <span class="venue">arXiv:2105.10682.</span></li>
+    <li>Yu, Ma, Li &amp; Chen. <em>Reachability Constrained Reinforcement Learning</em> (RCRL). <span class="venue">ICML 2022; arXiv:2205.07536.</span><span class="verified">verified</span></li>
+    <li>Ding, Jin, Liu &amp; Luo. <em>Diffusion-Based Reinforcement Learning via Q-Weighted Variational Policy Optimization</em> (QVPO). <span class="venue">NeurIPS 2024; arXiv:2405.16173.</span><span class="verified">verified</span></li>
+    <li>Zheng, Li, Yao, Yan et al. <em>Safe Offline Reinforcement Learning with Feasibility-Guided Diffusion Model</em> (FISOR). <span class="venue">ICLR 2024; arXiv:2401.10700.</span><span class="verified">verified</span></li>
+    <li>Ma et al. <em>Diffusion Policy Mirror Descent / Soft Diffusion Actor-Critic</em> (DPMD, SDAC). <span class="venue">ICML 2025; arXiv:2301.10923 lineage.</span></li>
+    <li>Gao, Xu et al. <em>Behavior-Regularized Diffusion Policy Optimization for Offline RL</em> (BDPO). <span class="venue">ICML 2025; arXiv:2502.04778.</span><span class="verified">verified</span></li>
+    <li>Celik, Li, Blessing, Lioutikov &amp; Neumann. <em>DIME: Diffusion-Based Maximum Entropy Reinforcement Learning</em>. <span class="venue">ICML 2025; arXiv:2502.02316.</span><span class="verified">verified</span></li>
+    <li>Le, Celik, Blessing, Hoang, Voelcker, Brunnbauer, Richter, Volpp &amp; Neumann. <em>TruDi: Trust-Region Diffusion Policies for Massively Parallel On-Policy RL</em>. <span class="venue">arXiv:2606.15260 (2026).</span></li>
+    <li>Voelcker et al. <em>REPPO: Relative Entropy Pathwise Policy Optimization</em>. <span class="venue">2025.</span></li>
+    <li>Xiao, Wang et al. <em>SafeDiffuser: Safe Planning with Diffusion Probabilistic Models</em>. <span class="venue">ICLR 2025; arXiv:2306.00148.</span><span class="verified">verified</span></li>
+    <li>Zhang et al. <em>ALaM: Augmented Lagrangian Multiplier Network for State-wise Safety in RL</em>. <span class="venue">arXiv:2605.00667 (2026).</span></li>
+    <li>Chen, Li &amp; Zhao. <em>Boosting Continuous Control with Consistency Policy</em> (CPQL). <span class="venue">AAMAS 2024; arXiv:2310.06343.</span><span class="verified">verified</span></li>
+    <li>Chen et al. <em>One-Step Flow Policy Mirror Descent</em> (FPMD). <span class="venue">arXiv:2507.23675.</span></li>
+    <li>Ganai, Gao &amp; Herbert. <em>Hamilton–Jacobi Reachability in Reinforcement Learning: A Survey</em>. <span class="venue">IEEE OJ-CSYS 3 (2024); arXiv:2407.09645.</span></li>
+    <li><em>Decoupled Guidance Diffusion for Adaptive Offline Safe RL</em>. <span class="venue">arXiv:2605.02777 (2026).</span></li>
+    <li>Ji, Zhang, Xu et al. <em>Safety-Gymnasium: A Unified Safe RL Benchmark</em>. <span class="venue">NeurIPS 2023 D&amp;B; arXiv:2310.12567.</span></li>
+    <li>Boyd &amp; Vandenberghe. <em>Convex Optimization</em>. <span class="venue">Cambridge UP, 2004 — §3.2.6 (perspective), §5 (duality).</span></li>
+  </ol>
+
+  <p class="note">Verification status. References marked <span class="verified" style="position:static">verified</span> were confirmed against primary sources during the July 2026 literature search underlying this chapter. TruDi's exact trust-region enforcement mechanism (projection vs Lagrangian on β) should be re-checked against the PDF (§4.2–4.3) — the REPPO ancestry suggests a Lagrangian relaxation. arXiv IDs of 2026 preprints (ALaM, Decoupled Guidance) are as retrieved and may shift on revision. The per-state dual \(\bar g\) appears in CVPO's appendix with the authors' explicit caution about compute and Q-error sensitivity — the position this chapter's §5 formalizes rather than contradicts.</p>
+</section>
+
+<footer class="footer">
+  <span>Chapter 10 · Constrained Policy Optimization as Inference · deep-math edition</span>
+  <span>draft 2026.07 — comments welcome</span>
+</footer>
+
+</div><!-- /.wrap -->
+
+<script>
+function renderKatex(){
+  if (typeof window.renderMathInElement !== "function") return;
+  window.renderMathInElement(document.body,{
+    delimiters:[
+      {left:"$$",right:"$$",display:true},
+      {left:"\\[",right:"\\]",display:true},
+      {left:"\\(",right:"\\)",display:false}
+    ],
+    throwOnError:false,
+    trust:true
+  });
+}
+if (document.readyState !== "loading") renderKatex();
+else document.addEventListener("DOMContentLoaded", renderKatex);
+window.addEventListener("load", renderKatex);
+</script>
+</body>
+</html>

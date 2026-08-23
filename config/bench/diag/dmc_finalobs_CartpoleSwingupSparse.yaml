@@ -1,0 +1,103 @@
+# DIAGNOSTIC ARM -- single-variable test, not a benchmark cell.
+#
+# Identical to config/bench/paper/dmc/CartpoleSwingupSparse.yaml (which collapsed to 0.0
+# from a peak of 716.8) EXCEPT one key: env.kwargs.forward_final_observation: true.
+#
+# Why: REPPO itself warns on this path --
+#   "[REPPO] WARNING: env truncated some episodes but did not provide
+#    infos['final_observation']; Q-bootstrap on truncation will use the auto-reset
+#    observation (wrong)."
+# BraxAutoResetWrapper records the true terminal obs as info['raw_obs'] and
+# RSLRLBraxWrapper forwards it, but our adapter was dropping it (the flag existed and did
+# nothing -- 'raw' is a dict, so it was silently discarded by the tensor filter; now wired).
+#
+# On CartpoleSwingupSparse the reward is 0 for the whole early rollout (measured: 0/8192
+# nonzero), so the bootstrap is the ONLY thing shaping the critic -- and with 1000-step
+# episodes and phase-synchronised envs, every truncation feeds it a reset state, in
+# correlated bursts. That is the suspected source of the 40% Q volatility.
+#
+# NOTE this makes our bootstrap MORE correct than the reference's, which does not consume
+# raw_obs either. If it fixes the collapse, the paper-comparison arm must record it as a
+# deliberate deviation rather than silently adopt it.
+
+runner_class_name: OnPolicyRunner
+seed: 1
+
+env:
+  kwargs:
+    # Separate eval env so the periodic deterministic eval does not reset and disturb
+    # the training env 21 times per run. 128 envs is ample for a deterministic policy,
+    # whose only source of return variance is the initial state.
+    num_eval_envs: 128
+    forward_final_observation: true
+
+algorithm:
+  class_name: REPPO
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -0.5
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  critic_learning_rate: null
+  max_grad_norm: 0.5
+  aux_loss_mult: 1.0
+  aux_reward_pred: true          # jaxrl/reppo.py:493-501 (embedding + reward, mean over D+1)
+  reward_scale: 1.0              # env/mjx_dmc.yaml reward_scaling
+  num_learning_epochs: 8         # mjx_dmc_large_data
+  num_mini_batches: 64           # mjx_dmc_large_data
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  dual_optim_mode: actor
+  critic_loss_denominator: batch
+  force_last_step_truncated: true
+  target_entropy_final: null
+  reward_normalization: false
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: reference
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  squash: tanh
+  action_scale: 1.0
+  min_std: 0.0
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims: [512, 512]
+    activation: swish
+    use_layer_norm: true
+    norm_type: rmsnorm
+    log_std_squash: clamp
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 151
+    v_min: 0.0                   # env/mjx_dmc.yaml
+    v_max: 150.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.0            # jax_models.py:298 (torch reference uses 40.9)
+    predict_reward: true         # prediction head emits hidden_dim + 1
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 381            # 1024 envs x 128 steps x 381 = 49,938,432 steps (~50M)
+  eval_interval: 19
+  eval_episodes: 128
+  eval_modes: [ode]
+  log_env_steps: true
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: diag_finalobs_CartpoleSwingupSparse
+  logger: tensorboard

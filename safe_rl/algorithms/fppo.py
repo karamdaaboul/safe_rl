@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from safe_rl.modules import ActorCritic
+from safe_rl.modules import ActorCriticCost
 from safe_rl.storage import RolloutStorageCMDP
 from safe_rl.utils.torch_utils import (
     get_flat_params_from,
@@ -29,7 +29,7 @@ class FPPO:
     and progressively tightens them toward cost_limits as the agent satisfies them.
     """
 
-    policy: ActorCritic
+    policy: ActorCriticCost
 
     def __init__(
         self,
@@ -644,8 +644,8 @@ class FPPO:
     # ------------------------------------------------------------------
 
     def _validate_and_fix_cost_critic(self):
-        if not hasattr(self.policy, "cost_critic"):
-            raise ValueError("Policy must have a cost_critic attribute for FPPO.")
+        if getattr(self.policy, "cost_critic", None) is None:
+            raise ValueError("FPPO requires a policy with a cost_critic; use ActorCriticCost")
         # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.
         if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
             return
@@ -659,7 +659,7 @@ class FPPO:
         if last_layer.out_features != self.num_costs:
             print(
                 f"WARNING: Cost critic outputs {last_layer.out_features} values but FPPO expects "
-                f"{self.num_costs}. Configure ActorCritic with num_costs={self.num_costs}."
+                f"{self.num_costs}. Configure ActorCriticCost with num_costs={self.num_costs}."
             )
 
     def reduce_parameters(self):

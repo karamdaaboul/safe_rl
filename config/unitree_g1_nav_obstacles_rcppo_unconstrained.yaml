@@ -1,0 +1,102 @@
+# UNCONSTRAINED (lambda == 0) baseline for Unitree-G1-Nav-Obstacles-Safe-Collision.
+#
+# Matched reference for config/unitree_g1_nav_obstacles_rcppo.yaml (the constrained
+# RCPPO run, logs/g1_nav_rcppo/g1_navigation_obstacles/2026-07-07_07-01-54/). It is
+# BYTE-FOR-BYTE identical to that config except for the two lambda fields below:
+#
+#   lambda_max: 0.0            # was 100.0
+#   lambda_init: [0, 0, 0]     # was [0.001, 0.001, 0.001]
+#
+# With sum_norm: true the PID output is clamped every iteration to
+# min(max(0, pid_output), lambda_max) == 0 (safe_rl/algorithms/ppol_pid.py:247,255),
+# so lambda is pinned at 0 forever and the sum-normalised surrogate
+# (A_r - lambda*A_c)/(1+lambda) collapses to pure reward A = A_r. The reach/cost
+# critics (V_h, Q_h) still train on the same max-backup targets, so this is a
+# trained-Q_h unconstrained baseline (same convention as the velocity-suite
+# UNSAFE_* runs and the PointGoal baseline_eps0.05_unconstrained run).
+#
+# Purpose: isolate the SAFETY TAX / behaviour change from the constraint — same env,
+# same seed, same architecture, same reward — so the only difference in the learned
+# navigation behaviour is the reachability constraint being on vs off.
+#
+# Run:
+#   G1_VELOCITY_POLICY_PATH=/home/human/workspaces/unitree_rl_mjlab/logs/velocity/g1_flat \
+#   MUJOCO_GL=egl PYTHONPATH=/home/human/workspaces/safe_rl \
+#   python scripts/train/unitree_mjlab.py \
+#     --env_id Unitree-G1-Nav-Obstacles-Safe-Collision \
+#     --num_envs 4096 --config config/unitree_g1_nav_obstacles_rcppo_unconstrained.yaml \
+#     --log_dir logs/g1_nav_rcppo --experiment_name g1_navigation_obstacles_unconstrained
+
+algorithm:
+  class_name: RCPPO
+
+  # -- shared params (carried over from the tuned PPOL_PID config) --
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.005
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.0003
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # -- reachability --
+  gamma_h: 0.99
+  cost_margin: 0.0
+  signed_margin: false
+  scale_cost_advantage: true
+  cost_limits: [0.05, 0.1, 0.1]   # eps on E[V_h]: [fall, collision, velocity]
+  train_reach_q: true
+  reach_q_lr: 0.001
+  reach_q_loss_coef: 1.0
+
+  # -- PID Lagrangian --  UNCONSTRAINED: lambda pinned at 0 (see header)
+  lagrangian_pid: [0.05, 0.5, 0.1]  # [Kp, Ki, Kd]
+  lambda_init: [0.0, 0.0, 0.0]
+  lambda_max: 0.0                   # <-- only change vs the constrained config
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # Cost critic loss (value clipping is invalid for max-backup targets)
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+
+policy:
+  class_name: ActorCriticReachQ
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+  reach_critic_kwargs:
+    hidden_dims: [256, 256, 128]
+    activation: elu
+
+runner:
+  experiment_name: g1_navigation_obstacles_unconstrained
+  max_iterations: 2000
+  num_steps_per_env: 8
+  save_interval: 50
+  empirical_normalization: false
+  logger: tensorboard
+  wandb_project: safe_rl
+  run_name: ""
+
+runner_class_name: OnPolicyRunner
+seed: 1

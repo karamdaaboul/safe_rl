@@ -1,5 +1,6 @@
 """Definitions for neural networks."""
 
+from .map_encoder import MapAttentionEncoder, build_obs_encoder
 from .memory import Memory
 from .mlp import MLP
 from .simba import (
@@ -14,6 +15,8 @@ from .simba import (
 )
 
 __all__ = [
+    "MapAttentionEncoder",
+    "build_obs_encoder",
     "Memory",
     "MLP",
     "SimbaV2",

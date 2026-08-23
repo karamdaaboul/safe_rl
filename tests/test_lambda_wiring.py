@@ -91,3 +91,35 @@ def test_lambda_controller_state_survives_roundtrip() -> None:
     fresh._lambda_ctrl.load_state_dict(state)
     assert fresh._lambda_ctrl.lam == alg._lambda_ctrl.lam
     assert fresh._lambda_ctrl.integral == alg._lambda_ctrl.integral
+
+
+def test_episodic_lambda_steps_once_per_new_measurement() -> None:
+    """The controller must not integrate an unchanged cost report.
+
+    `update_lagrangian_multipliers` fires on every update(), but the runner's
+    `current_costs` is a mean over completed episodes and only moves when an env
+    finishes one (~every episode_len/num_envs iterations). Re-integrating the same
+    value in between multiplies the effective Ki by that factor and makes the loop
+    oscillate instead of converge.
+    """
+    from tests.test_cvpo import _make_cvpo  # reuse the shared builder
+
+    alg = _make_cvpo(lambda_source="episodic", lambda_update="pid", lambda_lr=0.05,
+                     lambda_kp=0.25, lambda_max=10.0, lambda_episodic_warmup=0)
+
+    # Same measurement delivered 50 times: exactly one controller step.
+    for _ in range(50):
+        alg.update_lagrangian_multipliers([80.0])
+    after_stale = alg.lam
+    assert alg._lambda_reports == 1
+
+    # A genuinely new measurement moves it again.
+    alg.update_lagrangian_multipliers([81.0])
+    assert alg._lambda_reports == 2
+    assert alg.lam != after_stale
+
+    # And a repeat of that one does not.
+    reports_before = alg._lambda_reports
+    for _ in range(10):
+        alg.update_lagrangian_multipliers([81.0])
+    assert alg._lambda_reports == reports_before

@@ -1,0 +1,101 @@
+# VT-MPO: MPO on a survival-shaped MDP (arXiv:2602.04599, virtual-termination semantics).
+#
+# Constraint violations do NOT consume a budget policed by a dual. They shorten the effective
+# planning horizon: alpha(s,a) = exp(-lam * sum_i c_i), r~ = alpha r, gamma~ = gamma alpha, and the
+# critic learns Q_surv under those. The MPO E-step and M-step are UNCHANGED -- that is the paper's
+# central claim and the reason this arm is worth running.
+#
+# WHY HERE: our measured blocker is that std_a(Q_c) is 0.03-0.16 against a level of ~16, so the
+# additive -lambda*Q_c term carries under 1% of the across-action spread the per-state E-step
+# softmax can use. SDH makes the cost a MULTIPLICATIVE attenuation of the whole return, compounding
+# along the horizon -- a first-order signal instead of a sub-1% one.
+#
+# THIS IS NOT A CMDP. cost_limits below is carried for logging and the shared eval path only; it is
+# not enforced. The operating point is set by sdh_lambda_final, which must be swept, and arms must
+# be compared at MATCHED REALIZED COST rather than "at the same constraint".
+# MPO — Maximum a Posteriori Policy Optimization (Abdolmaleki et al., ICLR 2018)
+# Off-policy EM actor-critic. Reuses the SAC twin reward critics + replay buffer; the
+# actor update is the MPO E-step (per-batch convex dual over the temperature eta ->
+# non-parametric weights) + M-step (weighted MLE under decoupled mean/cov KL trust
+# regions). Unconstrained sibling of CVPO (see config/safety_gymnasium_cvpo.yaml);
+# exploration comes from the E-step KL trust region, so SAC entropy is disabled.
+
+algorithm:
+  class_name: VTMPO
+  cost_limits: [25.0]       # logging/eval only -- NOT enforced by this algorithm (see header)
+  sdh_lambda_final: 0.3     # THE knob. 0 recovers plain MPO exactly.
+  sdh_lambda_init: 0.0
+  sdh_warmup: 0             # 0/0 = fixed scale, which is what the lam sweep uses. The paper ramps
+  sdh_ramp: 0               # linearly over training; set warmup/ramp once the scale is chosen.
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # with num_steps_per_env: 4 -> UTD ~8 at 16 envs (~16 at 8 envs)
+  max_grad_norm: 1.0
+
+  # -- MPO E-step
+  sample_action_num: 64     # candidate actions sampled per state (Acme/RL-X use 20)
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+  estep_use_target_critic: true    # score candidates with the target critics (Acme)
+  estep_q_reduction: mean          # twin mean, not min-pessimism (Acme)
+
+  # -- MPO M-step (decoupled KL trust regions)
+  # Per-dimension trust regions (Acme's default): eps below is PER ACTION DIM —
+  # divide the joint budget (0.01 / 1e-4) by the env's action dim when porting.
+  per_dim_constraining: true
+  kl_mean_constraint: 0.005      # = 0.01 / 2 action dims (Point/Car robots)
+  kl_var_constraint: 0.00005     # = 1e-4 / 2 action dims
+  decoupled_mstep: true          # split weighted MLE like the KL (mean at old std)
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  # alpha_mean_max / alpha_var_max: left at the code defaults (10 / 1000). These are
+  # overflow guards; the old 0.1 / 10 values pinned the multipliers and disabled the
+  # M-step trust region (see codex/mpo-vs-acme-reference.md).
+  mstep_iteration_num: 5
+  # Target actor: plain Polyak (default). The hard periodic copy doubles early learning
+  # speed but cost final policy quality in the 3-seed paired Humanoid-Flat ablation
+  # (deterministic eval 55.1+-7.3 vs 67.0+-8.5 for Polyak, Polyak ahead on all 3 seeds).
+
+policy:
+  class_name: SACActorCritic  # unconstrained — no cost critic
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+
+runner:
+  n_step: 10                # REQUIRED > 1: the survival-shaped return is built in the
+                            # n-step window (ReplayStorage._gather_n_step). The paper also
+                            # uses TD(n), and it matches our FH-DCMPO arms.
+  num_steps_per_env: 4
+  max_iterations: 20000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  experiment_name: safety_gymnasium_vtmpo_goal1
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

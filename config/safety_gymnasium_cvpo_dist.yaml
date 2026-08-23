@@ -1,0 +1,85 @@
+# CVPO — Constrained Variational Policy Optimization (Liu et al., ICML 2022)
+# Off-policy EM safe-RL. Reuses the SafeSAC twin reward critics + cost critic + replay
+# buffer; the actor update is the CVPO E-step (per-batch convex dual over eta, lambda ->
+# non-parametric weights) + M-step (weighted MLE under decoupled mean/cov KL trust regions).
+# Chosen over PID-Lagrangian methods because the cost multiplier is re-solved per batch,
+# avoiding the "wait for the multiplier to catch up" oscillation that pins penalty methods
+# on the reward/cost frontier (see codex/distributional-cost-critic.md).
+
+algorithm:
+  class_name: CVPO
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # with num_steps_per_env: 4 -> UTD ~8 at 16 envs
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  per_dim_constraining: true
+  kl_mean_constraint: 0.005      # = 0.01 / 2 action dims
+  kl_var_constraint: 0.00005     # = 1e-4 / 2 action dims
+  decoupled_mstep: true
+  estep_use_target_critic: true
+  estep_q_reduction: mean
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  # alpha_mean_max / alpha_var_max: left at the code defaults (10 / 1000) — the old
+  # 0.1 / 10 caps pinned the multipliers and disabled the M-step trust region.
+  mstep_iteration_num: 5
+
+  # -- Cost constraint
+  cost_limits: [25.0]       # episodic cost limit; can be overridden via --cost_limits
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  # Graded-lambda controller instead of the per-batch joint dual solve. The joint solve is
+  # bang-bang (lambda snaps to a bound) once the sampled action set can't reach qc_thres; the
+  # graded controller integrates the violation for a stable, regulating multiplier.
+  # See codex/cvpo-negative-result.md.
+  lambda_mode: grad         # "grad" (recommended) or "dual" (original per-batch joint SLSQP)
+  lambda_lr: 0.03           # step size for the graded-lambda controller
+  lambda_max: 100.0         # cap on lambda (also the dual upper bound in "dual" mode)
+
+policy:
+  class_name: SafeActorCritic
+  critic_type: distributional
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  log_std_min: -20
+  log_std_max: 2
+  num_costs: 1
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  n_step: 3
+  save_interval: 5000
+  empirical_normalization: false
+  experiment_name: safety_gymnasium_cvpo_dist
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

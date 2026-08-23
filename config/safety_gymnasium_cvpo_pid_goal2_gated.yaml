@@ -1,0 +1,129 @@
+# CVPO — Constrained Variational Policy Optimization (Liu et al., ICML 2022)
+# Off-policy EM safe-RL. Reuses the SafeSAC twin reward critics + cost critic + replay
+# buffer; the actor update is the CVPO E-step (per-batch convex dual over eta, lambda ->
+# non-parametric weights) + M-step (weighted MLE under decoupled mean/cov KL trust regions).
+# Chosen over PID-Lagrangian methods because the cost multiplier is re-solved per batch,
+# avoiding the "wait for the multiplier to catch up" oscillation that pins penalty methods
+# on the reward/cost frontier (see codex/distributional-cost-critic.md).
+
+algorithm:
+  class_name: CVPO
+  # -- Discount and target update
+  gamma: 0.99
+  # Cost-critic fix arm. The 1-step cost target at gamma=0.99 on a sparse binary cost
+  # gives a per-sample learning signal ~36x smaller than the per-sample noise, and the
+  # critic settles into a near-constant, level-deficient solution (measured on the
+  # original arm: calibration slope 0.07 against a true cost-to-go range 0-38, level
+  # ~0.6x Bellman-consistent). n-step targets carry n real cost samples per update and
+  # contract the level error by gamma^n per backup instead of gamma.
+  # NOTE: n_step is a buffer-wide setting, so this changes the REWARD critic's horizon too.
+  # It is read from the `runner:` block below (OffPolicyRunner forwards it into the
+  # algorithm); setting it here under `algorithm:` is silently ignored.
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # matched to the improved arm
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 8.0       # FSRL-equivalent: its 0.5 acts on an MLE term scaled by 1/K (K=16).
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint
+  cost_limits: [20.0]       # FINAL target (tighter than FSRL/FCSRL's 25 on level 2)
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  # Both fixes at once: critic-side (n-step + non-negative head) and units-side.
+  qc_scale_source: analytic # env-agnostic; use_measured_qc_scale re-estimates per env
+  use_measured_qc_scale: true  # estimate qc_scale from PointGoal2 rollouts, then freeze
+  qc_thres_adapt: false
+  # Graded-lambda controller instead of the per-batch joint dual solve. The joint solve is
+  # bang-bang (lambda snaps to a bound) once the sampled action set can't reach qc_thres; the
+  # graded controller integrates the violation for a stable, regulating multiplier.
+  # See codex/cvpo-negative-result.md.
+  lambda_source: episodic   # lambda from realized J_c, not from Q_c's level
+  lambda_mode: grad         # eta from the dual solve; lambda from the controller below
+  lambda_update: pid        # Kp + integral + Kd, anti-windup at the bounds
+  lambda_kp: 0.5            # immediate response, doubled: the gated schedule waits for lambda,
+                            # so controller speed now sets wall-clock rather than risking overshoot.
+  lambda_kd: 0.5            # damping; meaningful now the controller steps once per measurement
+  lambda_anti_windup: true  # freeze the integral while saturated so lambda can come back down
+  lambda_init: 0.0          # start unconstrained and let the controller integrate up
+  lambda_episodic_warmup: 5 # real cost reports before engaging; the runner's 0.0 fallback is discarded
+  lambda_lr: 0.3            # = Ki. At 0.1 the multiplier gained ~0.4 per 5k-iteration stage while
+                            # the open-loop schedule dropped the budget 5.0 -- it could never catch up.
+  lambda_max: 8.0           # measured balanced lambda on level 2 is ~2.0, so 16 ran at 8x
+                            # balanced -- the reward-annihilation regime (goals 0.23). 8 keeps
+                            # enough authority to enforce while the goal gate stops the
+                            # curriculum before lambda has to destroy the policy.
+
+policy:
+  class_name: SafeSACActorCritic
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  log_std_min: -20
+  log_std_max: 2
+  num_costs: 1
+  # Cost is non-negative, so Q_c is too; the linear head emitted negatives on 2.2% of
+  # states, concentrated in low-cost ones (3.1% in the lowest MC bin vs 0.2% in the top).
+  cost_critic_nonneg: false  # linear head: softplus enforces Qc>=0 by squashing and its
+                             # gradient dies with it (std_a(Qc) -> 1e-40, cost term gone).
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step targets for BOTH reward and cost critics
+  experiment_name: safety_gymnasium_cvpo_pid_goal2_gated
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1
+
+env:
+  # Closed-loop cost-limit curriculum (safety_gymnasium SafeCostLimitCurriculum).
+  # Tightens only when the agent is BOTH scoring and inside its current budget. Each gate
+  # alone admits the failure the other rules out: goals alone never bind for a competent
+  # agent (the 150->20 run held 9.3 goals against a threshold of 3, so the schedule became a
+  # timer that outran lambda and slid the budget straight through the achievable cost);
+  # cost alone is satisfied by an agent that stops moving (goals 0.03 at a fixed limit of 25).
+  cost_limit_curriculum:
+    initial_cost_limit: 100.0   # trained PointGoal2 costs ~85-105 unconstrained. Starting at 150
+                                # spent ~60k iterations racing down through slack budgets; start
+                                # just above the achievable cost and let the goal gate hold it
+                                # there while the agent learns.
+    min_cost_limit: 20.0        # final target; matches algorithm.cost_limits
+    decrement: 5.0              # a step the E-step can deliver by reweighting 64 candidates
+    success_threshold: 3.0      # must reach goals REPEATEDLY before tightening
+    window: 10                  # completed episodes per sub-env judged per stage. Halved from 20:
+                                # with the cost gate a stage already lasts as long as lambda needs,
+                                # so the window only has to average out episode noise.
+    gate_on_cost: true          # THE fix: never tighten a budget the agent is not yet meeting

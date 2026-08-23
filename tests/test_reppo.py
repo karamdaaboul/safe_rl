@@ -22,7 +22,6 @@ def _make_policy(**overrides):
         num_actions=ACT_DIM,
         actor_type="gaussian",
         critic_type="standard",
-        num_critics=2,
         actor_kwargs={"hidden_dims": [16], "activation": "elu", "init_noise_std": 1.0, "noise_std_type": "log"},
         critic_kwargs={"hidden_dims": [16], "activation": "elu"},
     )
@@ -72,41 +71,41 @@ def test_one_step_soft_q_target_counts_entropy_once():
     torch.testing.assert_close(got, expected, rtol=1e-5, atol=1e-5)
 
 
-def test_online_bootstrap_uses_online_nets():
-    """With use_target_networks=False, corrupting the TARGET nets must not change returns."""
-    torch.manual_seed(0)
+def test_no_target_networks_exist():
+    """REPPO must carry no target networks -- the reference has none.
+
+    Its bootstrap reads the live actor/critic; freezing `next_values` once per
+    iteration at collection IS the target mechanism. Polyak targets were inherited
+    SAC scaffolding and were never enabled in any shipped config.
+    """
     policy = _make_policy()
-    alg = _make_alg(policy, use_target_networks=False)
-    next_obs, _ = _rollout_one_step(alg)
-
-    torch.manual_seed(7)
-    alg.compute_returns(next_obs)
-    before = alg.storage.returns.clone()
-
-    with torch.no_grad():  # corrupt targets — online bootstrap must be immune
-        for p in policy.critic_targets.parameters():
-            p.add_(100.0)
-        for p in policy.actor_target.parameters():
-            p.add_(100.0)
-    torch.manual_seed(7)
-    alg.compute_returns(next_obs)
-    torch.testing.assert_close(alg.storage.returns, before)
+    for attr in ("actor_target", "critic_target", "critic_targets", "critics"):
+        assert not hasattr(policy, attr), f"{attr} should no longer exist"
+    assert hasattr(policy, "critic")
+    alg = _make_alg(policy)
+    for attr in ("use_target_networks", "tau"):
+        assert not hasattr(alg, attr), f"REPPO.{attr} should no longer exist"
 
 
-def test_q_reduction_modes():
-    torch.manual_seed(0)
-    policy = _make_policy()
-    q1 = torch.tensor([1.0, 4.0])
-    q2 = torch.tensor([3.0, 2.0])
-    for mode, expected in [
-        ("min", torch.tensor([1.0, 2.0])),
-        ("mean", torch.tensor([2.0, 3.0])),
-        ("q1", torch.tensor([1.0, 4.0])),
-    ]:
-        alg = _make_alg(_make_policy(), actor_q_reduction=mode)
-        torch.testing.assert_close(alg._q_reduce(q1, q2), expected)
-    with pytest.raises(ValueError):
-        _make_alg(policy, actor_q_reduction="bogus")
+def test_privileged_critic_obs_is_separate_from_actor_obs():
+    """Asymmetric obs must survive the refactor: the critic keeps its own input
+    dimension and its own normalizer, distinct from the actor's."""
+    policy = REPPOActorCritic(
+        num_actor_obs=OBS_DIM,
+        num_critic_obs=OBS_DIM + 3,          # privileged obs is wider
+        num_actions=ACT_DIM,
+        actor_type="gaussian",
+        critic_type="standard",
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_kwargs={"hidden_dims": [16], "activation": "elu"},
+        critic_kwargs={"hidden_dims": [16], "activation": "elu"},
+    )
+    assert policy.actor_obs_normalizer is not policy.critic_obs_normalizer
+    assert policy.critic_obs_normalizer._mean.shape[-1] == OBS_DIM + 3
+    assert policy.actor_obs_normalizer._mean.shape[-1] == OBS_DIM
+    q = policy.evaluate_q(torch.randn(4, OBS_DIM + 3), torch.randn(4, ACT_DIM))
+    assert q.shape == (4, 1)
 
 
 def test_min_std_floor_and_state_dependent_sigma():
@@ -171,18 +170,27 @@ def test_target_entropy_scales_with_action_dim_for_stochastic_actor():
     assert alg.target_entropy == -0.5 * ACT_DIM
 
 
-def test_alpha_kl_floor_holds():
-    """alpha_kl must never decay below alpha_kl_min (the v10/v11 gate-collapse fix)."""
+def test_kl_dual_decays_to_zero_under_slack():
+    """With the constraint slack, the multiplier must fall toward 0 -- that is
+    complementary slackness, not a failure.
+
+    The old `alpha_kl_min` floor blocked this and quietly changed the objective from
+    "constrained improvement" to "constrained improvement + a permanent KL
+    regularizer". The v10/v11 collapse it patched was a dual *rate* problem (512
+    Adam steps per iteration), not a flaw in the formulation.
+    """
     torch.manual_seed(0)
-    alg = _make_alg(_make_policy(), alpha_kl_min=0.1, desired_kl=10.0,  # huge slack -> dual wants to decay
+    alg = _make_alg(_make_policy(), desired_kl=10.0,  # huge slack: KL will never bind
                     alpha_lr=0.5, num_learning_epochs=4, num_mini_batches=1)
+    before = alg.alpha_kl.item()
     obs = torch.randn(N_ENVS, OBS_DIM)
     alg.act(obs, obs)
     alg.process_env_step(torch.randn(N_ENVS, 1), torch.zeros(N_ENVS, 1),
                          {"time_outs": torch.zeros(N_ENVS)}, next_obs=obs, next_critic_obs=obs)
     alg.compute_returns(obs)
     alg.update()
-    assert alg.alpha_kl.item() >= 0.1 - 1e-6
+    assert alg.alpha_kl.item() < before, "slack constraint must push the multiplier down"
+    assert not hasattr(alg, "alpha_kl_min")
 
 
 def test_tanh_squash_bounded_actions_and_mc_kl():
@@ -210,7 +218,7 @@ def test_tanh_squash_bounded_actions_and_mc_kl():
     kl = (td.log_prob(s).sum(-1) - td.log_prob(s).sum(-1)).mean()
     assert abs(kl.item()) < 1e-6
 
-    alg = _make_alg(policy, kl_clip_mode="clipped", use_target_networks=False, actor_q_reduction="q1")
+    alg = _make_alg(policy, kl_clip_mode="clipped")
     _rollout_one_step(alg)
     alg.compute_returns(torch.randn(N_ENVS, OBS_DIM))
     metrics = alg.update()
@@ -293,9 +301,8 @@ def test_stored_obs_are_normalized_so_kl_starts_at_zero():
     # must reproduce the stored distribution exactly — for every step, including the
     # first (whose statistics are the most stale).
     for step in range(3):
-        mu, sigma = policy.current_distribution_params(
-            alg.storage.observations[step], normalized=True
-        )
+        dist = policy._build_distribution(alg.storage.observations[step])
+        mu, sigma = dist.mean, dist.scale
         torch.testing.assert_close(mu, alg.storage.mu[step], rtol=1e-6, atol=1e-6)
         torch.testing.assert_close(sigma, alg.storage.sigma[step], rtol=1e-6, atol=1e-6)
 
@@ -350,14 +357,13 @@ def test_simba_actor_and_aux_loss_update():
     policy = _make_policy(
         actor_type="stochastic",
         critic_type="distributional",
-        num_critics=1,
         min_std=0.05,
         actor_kwargs={"network_type": "simba", "network_kwargs": {"hidden_dim": 16, "num_blocks": 1},
                       "log_std_squash": "tanh", "log_std_min": -3.0, "log_std_max": 0.7},
         critic_kwargs={"num_atoms": 21, "v_min": -5.0, "v_max": 5.0,
                        "network_type": "simba", "network_kwargs": {"hidden_dim": 16, "num_blocks": 1}},
     )
-    alg = _make_alg(policy, use_target_networks=False, actor_q_reduction="q1", aux_loss_mult=1.0)
+    alg = _make_alg(policy, aux_loss_mult=1.0)
     next_obs, _ = _rollout_one_step(alg, time_outs=torch.tensor([1.0, 0.0, 0.0, 0.0]),
                                     dones=torch.tensor([[1.0], [0.0], [0.0], [0.0]]))
     alg.compute_returns(next_obs)
@@ -421,8 +427,6 @@ def test_force_last_step_truncated_bootstraps_and_masks_last_step():
             num_learning_epochs=1,
             num_mini_batches=1,
             device="cpu",
-            use_target_networks=False,
-            actor_q_reduction="q1",
             force_last_step_truncated=force,
         )
         alg.init_storage("rl", N_ENVS, 2, [OBS_DIM], [OBS_DIM], [ACT_DIM])
@@ -465,9 +469,166 @@ def test_critic_loss_denominator_conventions():
     assert loss_batch == pytest.approx(loss_mask * surviving / total, rel=1e-5)
 
 
+def test_action_scale_widens_squashed_range_and_shifts_entropy_target():
+    """`action_scale` s makes the tanh policy span (-s, s) with an exact log-Jacobian.
+
+    tanh caps |a| at 1, but mjlab locomotion applies no action clipping, so an
+    unbounded-Gaussian policy (PPO) commands far more — measured up to 4.46 on Go2's
+    calf joints. Widening the range must (a) actually widen every action path and
+    (b) shift target_entropy by n*log(s), so `target_entropy: -0.5` keeps meaning the
+    same thing rather than silently demanding a log(s)-per-dim sharper policy.
+    """
+    scale = 3.0
+    torch.manual_seed(0)
+    policy = _make_policy(actor_type="stochastic", squash="tanh", action_scale=scale,
+                          actor_kwargs={"hidden_dims": [16], "activation": "elu"})
+    alg = _make_alg(policy, target_entropy=-0.5)
+
+    obs = torch.randn(128, OBS_DIM)
+    sampled = policy.act(obs)
+    deterministic = policy.act_inference(obs)
+    reparam, _, _, _ = policy.sample_with_log_prob(obs)
+    for name, actions in (("act", sampled), ("act_inference", deterministic), ("rsample", reparam)):
+        assert actions.abs().max().item() <= scale, f"{name} exceeded the action scale"
+        assert actions.abs().max().item() > 1.0, f"{name} never left the unscaled +-1 range"
+
+    expected = -0.5 * ACT_DIM + ACT_DIM * math.log(scale)
+    assert alg.target_entropy == pytest.approx(expected, rel=1e-6)
+
+    # scale 1 must be bit-identical to the historical behaviour
+    torch.manual_seed(0)
+    plain = _make_policy(actor_type="stochastic", squash="tanh",
+                         actor_kwargs={"hidden_dims": [16], "activation": "elu"})
+    plain_alg = _make_alg(plain, target_entropy=-0.5)
+    assert plain_alg.target_entropy == pytest.approx(-0.5 * ACT_DIM)
+    assert plain.act(obs).abs().max().item() <= 1.0
+
+    with pytest.raises(ValueError, match="action_scale"):
+        _make_policy(actor_type="stochastic", squash="tanh", action_scale=0.0)
+
+
 def test_reference_parity_switch_validation():
     policy = _make_policy()
     with pytest.raises(ValueError, match="dual_optim_mode"):
         REPPO(policy, device="cpu", dual_optim_mode="bogus")
     with pytest.raises(ValueError, match="critic_loss_denominator"):
         REPPO(policy, device="cpu", critic_loss_denominator="bogus")
+
+
+def test_legacy_twin_critic_checkpoint_still_loads(capsys):
+    """Checkpoints predating the twin-critic removal stored `critics.0.*`.
+
+    They must remap onto the single critic rather than becoming unloadable, and a
+    stored SECOND critic must be dropped loudly — silently keeping only critic 1
+    would misreport a twin-min policy as reproduced.
+    """
+    torch.manual_seed(0)
+    policy = _make_policy()
+    sd = policy.state_dict()
+
+    legacy = {}
+    for key, value in sd.items():
+        if key.startswith("critic."):
+            legacy["critics.0." + key[len("critic."):]] = value
+            legacy["critics.1." + key[len("critic."):]] = value.clone()
+        elif key.startswith("critic_target."):
+            legacy["critic_targets.0." + key[len("critic_target."):]] = value
+        else:
+            legacy[key] = value
+    assert not any(k.startswith("critic.") for k in legacy)
+
+    fresh = _make_policy()
+    fresh.load_state_dict(legacy)
+    assert "dropped" in capsys.readouterr().out
+    torch.testing.assert_close(fresh.critic.state_dict()["network.0.weight"],
+                               sd["critic.network.0.weight"])
+
+
+# ---------------------------------------------------------------------------
+# Reference (JAX) aux loss: embedding MSE + reward MSE, averaged over D+1 slots
+# ---------------------------------------------------------------------------
+
+def _make_reference_policy(predict_reward: bool):
+    return _make_policy(
+        critic_type="reference",
+        critic_kwargs={
+            "num_atoms": 11,
+            "v_min": 0.0,
+            "v_max": 10.0,
+            "hidden_dim": 8,
+            "encoder_layers": 2,
+            "head_layers": 2,
+            "pred_layers": 2,
+            "predict_reward": predict_reward,
+        },
+    )
+
+
+def test_reward_prediction_head_widens_by_one_and_splits_reference_order():
+    """`pred[..., :1]` is the reward, `pred[..., 1:]` the next-state features."""
+    torch.manual_seed(0)
+    critic = _make_reference_policy(predict_reward=True).critic
+    assert critic.pred_module[-1][-1].out_features == critic.hidden_dim + 1
+
+    feats = torch.randn(3, critic.hidden_dim)
+    raw = critic.pred_module(feats)
+    pred_f, pred_r = critic.predict_features_reward(feats)
+    torch.testing.assert_close(pred_r, raw[..., :1])
+    torch.testing.assert_close(pred_f, raw[..., 1:])
+    # predict_features stays the feature slice, so the non-reward path is unchanged
+    torch.testing.assert_close(critic.predict_features(feats), raw[..., 1:])
+
+    off = _make_reference_policy(predict_reward=False).critic
+    assert off.pred_module[-1][-1].out_features == off.hidden_dim
+    with pytest.raises(RuntimeError, match="predict_reward"):
+        off.predict_features_reward(feats)
+
+
+def test_aux_loss_matches_reference_concat_mean_and_done_mask():
+    """mean over D+1 of (1-done)*concat[feature_err, reward_err] -- not a 50/50 split."""
+    torch.manual_seed(0)
+    policy = _make_reference_policy(predict_reward=True)
+    alg = _make_alg(policy, aux_loss_mult=1.0, aux_reward_pred=True, critic_loss_denominator="batch")
+
+    B, D = 6, policy.critic.hidden_dim
+    critic_obs = torch.randn(B, OBS_DIM)
+    actions = torch.randn(B, ACT_DIM)
+    aux_target = torch.randn(B, D)
+    aux_reward = torch.randn(B)
+    aux_done = torch.tensor([0.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+    truncated = torch.zeros(B)
+
+    with torch.no_grad():
+        pred_f, pred_r = policy.evaluate_q_features_reward(critic_obs, actions, normalized=True)
+        se = torch.cat([(pred_f - aux_target).pow(2), (pred_r - aux_reward.view(-1, 1)).pow(2)], dim=-1)
+        expected = ((1.0 - aux_done).view(-1, 1) * se).mean(dim=-1).mean()
+
+    # The reward slot carries weight 1/(D+1); a 50/50 split would differ materially.
+    with torch.no_grad():
+        naive = 0.5 * ((pred_f - aux_target).pow(2).mean(-1) + (pred_r.squeeze(-1) - aux_reward).pow(2))
+        naive = ((1.0 - aux_done) * naive).mean()
+    assert not torch.isclose(expected, naive, rtol=1e-3)
+
+    # Snapshot BEFORE the update: _update_critic steps the optimizer, so the
+    # aux-off comparison has to start from the same parameters, not the updated ones.
+    import copy
+
+    sd = copy.deepcopy(policy.state_dict())
+    total = alg._update_critic(critic_obs, actions, torch.zeros(B), truncated,
+                               aux_target, aux_reward, aux_done)
+    # Isolate the aux contribution by re-running with the aux term switched off.
+    policy2 = _make_reference_policy(predict_reward=True)
+    policy2.load_state_dict(sd)
+    alg2 = _make_alg(policy2, aux_loss_mult=0.0, critic_loss_denominator="batch")
+    value_only = alg2._update_critic(critic_obs, actions, torch.zeros(B), truncated)
+    torch.testing.assert_close(torch.tensor(total - value_only), expected, rtol=1e-4, atol=1e-6)
+
+
+def test_aux_reward_pred_off_leaves_the_embedding_only_path_untouched():
+    torch.manual_seed(0)
+    policy = _make_reference_policy(predict_reward=False)
+    alg = _make_alg(policy, aux_loss_mult=1.0, aux_reward_pred=False)
+    B, D = 4, policy.critic.hidden_dim
+    critic_obs, actions = torch.randn(B, OBS_DIM), torch.randn(B, ACT_DIM)
+    loss = alg._update_critic(critic_obs, actions, torch.zeros(B), torch.zeros(B), torch.randn(B, D))
+    assert math.isfinite(loss)

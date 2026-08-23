@@ -1,0 +1,79 @@
+# MPO on mjlab Ant-Flat — CAPS-ONLY ablation (arm C).
+#
+# This is the current in-repo MPO behaviour: scalar (summed-over-dims) M-step KL trust
+# region with capped multipliers, coupled weighted-MLE, and E-step Q from the online twin
+# critics reduced by min(). Paired with config/mjlab_ant_mpo_acme.yaml, which flips only
+# the four flags where we deviate from DeepMind Acme's reference MPO loss
+# (acme/jax/losses/mpo.py). Everything else is held identical between the two arms.
+
+runner_class_name: OffPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: MPO
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 4
+  max_grad_norm: 1.0
+
+  # -- MPO E-step
+  sample_action_num: 64     # candidate actions per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+  estep_use_target_critic: false   # online critics (ours); Acme scores with the target critic
+  estep_q_reduction: min           # SAC-style pessimism (ours); Acme takes the critic mean
+
+  # -- MPO M-step (decoupled KL trust regions)
+  # eps below bounds the KL SUMMED over the 8 action dims; the acme arm splits the same
+  # total budget per-dimension (0.01/8 and 1e-4/8).
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 10.0      # ONLY change vs arm A: 100x cap, Acme never caps its duals
+  alpha_var_max: 1000.0
+  mstep_iteration_num: 5
+  per_dim_constraining: false
+  decoupled_mstep: false    # single Normal(mean, std) for the weighted MLE
+
+policy:
+  class_name: SACActorCritic
+  actor_type: stochastic
+  critic_type: standard
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+
+runner:
+  num_steps_per_env: 1
+  max_iterations: 30000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 2500
+  empirical_normalization: false
+  experiment_name: mjlab_ant_mpo_caps
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  log_interval: 100
+  n_step: 1
+  reward_normalization: false

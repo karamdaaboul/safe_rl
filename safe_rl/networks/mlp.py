@@ -101,19 +101,6 @@ class MLP(nn.Sequential):
         for idx, layer in enumerate(layers):
             self.add_module(f"{idx}", layer)
 
-    def init_weights(self, scales: float | tuple[float]) -> None:
-        """Initialize the weights of the MLP.
-
-        Args:
-            scales: Scale factor for the weights.
-        """
-        linear_idx = 0
-        for module in self:
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=get_param(scales, linear_idx))
-                nn.init.zeros_(module.bias)
-                linear_idx += 1
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass of the MLP."""
         for layer in self:

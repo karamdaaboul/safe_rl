@@ -42,7 +42,7 @@ algorithm:
     mirror_loss_coeff: 0.0
 
 policy:
-  class_name: ActorCritic
+  class_name: ActorCriticCost
   actor_type: gaussian
   critic_type: standard
   actor_kwargs:

@@ -1,0 +1,157 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO-DIME on ManiSkill PickCube-v1 — THE POSITIVE CONTROL.
+#
+# WHY: TruDi (arXiv 2606.15260) reports its diffusion policy solving ManiSkill
+# manipulation tasks that require an actual grasp (PickCube-v1, StackCube-v1,
+# PullCubeTool-v1; Fig. 4/11 — StackCube's behavior-entropy 0.87 is only
+# measurable if the policy is really stacking). Our port fails to grasp on mjlab
+# Lift-Cube-Yam-Grasp (0.0000 over 39.3M steps) where PPO reaches 0.919.
+#
+# tests/test_dime_reference_parity.py proves our DIME actor and its loss are
+# BIT-IDENTICAL to the authors' code (all 10,398 gradients, max|diff|=0). It does
+# NOT cover the REPPO collection/lambda-return/critic path in combination with a
+# diffusion actor. So two hypotheses remain live for the mjlab failure:
+#   (1) the mjlab-YAM env/reward defeats REPPO's critic bootstrap, or
+#   (2) our REPPO<->DIME integration has a defect outside the parity surface.
+# This run separates them. If PickCube is solved, (2) dies and the mjlab result
+# is an env story. If it is not, we have a bug and the Ant win came from a path
+# that does not exercise it.
+#
+# HYPERPARAMETERS: matched to the authors' config/reppo_dime_maniskill.yaml —
+# 1024 envs x 128 steps x 64 minibatches x 4 epochs, lr 3e-4, kl_bound 0.1,
+# ent_target_mult 4.0, 151 atoms over the ManiSkill support [-15, 15]
+# (config/env/maniskill.yaml), 50M env steps = 381 iterations.
+# reward_scale 1.0: ManiSkill's normalized_dense reward is already O(1) per step,
+# unlike mjlab's dt-scaled rewards that needed 10x.
+# ===========================================================================
+
+# NOTE: `scripts/train/train_safety_gymnasium.py` reads an `env:` block but only
+# uses it for Safety-Gymnasium options — it does NOT forward it to make_env. The
+# values below are therefore DOCUMENTATION of what ManiSkillVecEnv's own defaults
+# produce, not settings that are applied. They match the reference:
+#   obs_mode        state              (wrapper default; their config/env/maniskill.yaml)
+#   reward_mode     normalized_dense   (wrapper default)
+#   partial_reset   true               (wrapper default; terminations -> truncations)
+#   control_mode    ManiSkill default  (their env_kwargs sets no control_mode either,
+#                                       giving 8-dim pd_joint_delta_pos for Panda —
+#                                       consistent with target_entropy -4.0*8 = -32)
+# Change them in the wrapper's signature, not here, or they will silently no-op.
+
+algorithm:
+  class_name: REPPODIME
+  # gamma is DERIVED from the episode length, as the reference does
+  # (trudi/src/torchrl/envs.py: gamma = 1 - 10/max_episode_steps).
+  # PickCube episodes are 50 steps -> 0.8. Using 0.99 here gives a ~100-step
+  # effective horizon on a 50-step task and was one of three bugs that made
+  # our first PickCube runs flatline at success_rate ~0.005.
+  gamma: 0.8
+  lam: 0.95
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  # 4, NOT 1: their reppo_dime_maniskill.yaml uses 4. (1 is the value in their
+  # generic reppo_dime_torch.yaml, which is where these were mistakenly copied from.)
+  kl_action_rep: 4
+  dime_kl_mode: forward
+  # 1.0, NOT 0.01: their reppo_dime_maniskill.yaml sets ent_start: 1.0. Using the
+  # generic config's 0.01 made the initial entropy temperature 100x too low, so the
+  # policy had almost no exploration pressure, converged to a reaching-only plateau
+  # by iter ~40 and never discovered a grasp (success flat at 0.005 over 50M steps
+  # while the authors' own code reaches 0.498 by 7.5M on this same box).
+  init_alpha_temp: 1.0
+  init_alpha_kl: 0.01
+  target_entropy: -4.0          # = -(reference ent_target_mult 4.0)
+  dual_optim_mode: actor
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  aux_loss_mult: 1.0
+  reward_scale: 1.0
+  # log our metrics ALSO under the reference's key names (actor/kl, critic/qf_mean, ...)
+  # so our run and theirs overlay on the same wandb charts in dime_benchmark_rerun
+  trudi_wandb_schema: true
+  num_learning_epochs: 4
+  num_mini_batches: 64
+
+policy:
+  class_name: DIMEActorCritic
+  critic_type: reference
+  # compile_score_net is OFF: it is NOT validated in real training.
+  # Microbenchmark said 2.97x on sampling / 1.59x on the update, and the unit test
+  # proves state_dict safety -- but both real training paths failed:
+  #   * mjlab (torch 2.10): BackendCompilerFailed at the first compiled forward,
+  #     legacy-vs-new TF32 API clash in inductor's pad_mm (run z21hc3wh).
+  #   * ManiSkill (torch 2.11): HUNG -- 45 min with no output past wandb startup,
+  #     where the uncompiled run was printing iterations every ~136 s (run jow09e2o).
+  # Cost here is real (~90% of the 136 s/iter is the update, not physics), so this
+  # is worth fixing, but it needs debugging on an idle box -- not on a run whose
+  # result we depend on.
+  compile_score_net: false
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  diffusion:
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: true
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 512
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0       # PLAIN floats — PyYAML parses signless 1.0e4 as a STRING
+      inner_clip: 100.0
+      weight_init: 1.0e-8
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  critic_kwargs:
+    num_atoms: 151              # reference num_bins
+    v_min: -15.0                # reference env.vmin
+    v_max: 15.0                 # reference env.vmax
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+
+runner:
+  num_steps_per_env: 128
+  # x-axis in ENV STEPS, matching the reference wandb _step
+  log_env_steps: true
+  # periodic ODE+SDE eval -> eval/success_ode_100 (the reference headline metric)
+  eval_interval: 20
+  eval_episodes: 100
+  max_iterations: 381           # 1024 x 128 x 381 = 50M env steps
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: maniskill_pickcube_reppodime
+  # EXACT reference scheme: run_name = f"{cfg.name}_torch_{env.name}"
+  run_name: "reppo-dime-2_torch_PickCube-v1"
+  # reference tags = [cfg.name, env.name, env.type, *cfg.tags]
+  # Reference tag scheme is [cfg.name, env.name, env.type, *cfg.tags]; matching it
+  # exactly makes the two codebases overlay on the same charts. 'ours' is appended
+  # ONLY so a head-to-head can tell the two apart in the UI — the reference run is
+  # launched with tags=[experimental,reference]. Metric keys stay identical
+  # (trudi_wandb_schema: true), which is what actually makes the curves comparable.
+  wandb_tags: ['reppo-dime-2', 'PickCube-v1', 'maniskill', 'experimental', 'ours']
+  logger: wandb
+  wandb_project: dime_benchmark_rerun

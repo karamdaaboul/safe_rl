@@ -1,6 +1,8 @@
 # v24 config applied to Humanoid-Flat (classic-task sibling of Ant-Flat).
-# Same reward family and dt-scaling as Ant, so support [-20,150] and
-# reward_scale 10 carry over; standard 50M budget (1024 x 128 x 381).
+# reward_scale 10 and the 50M budget (1024 x 128 x 381) carry over from Ant, but
+# the value support does NOT: the Humanoid's alive weight is 4x Ant's and it
+# runs at ~6 m/s, putting its discounted return an order of magnitude above the
+# Ant's. Support re-fitted to [-25, 300] from measurement -- see critic_kwargs.
 runner_class_name: OnPolicyRunner
 seed: 1
 
@@ -51,14 +53,12 @@ algorithm:
   # -- returns
   gamma: 0.99
   lam: 0.95
-  normalize_advantage_per_mini_batch: false
   # -- KL constraint
   desired_kl: 0.1
   kl_clip_mode: clipped
   # -- learned dual variables
   init_alpha_temp: 1.0            # reference ent_start
   init_alpha_kl: 0.01             # reference kl_start
-  alpha_kl_min: 0.0               # reference has no floor
   target_entropy: -0.5            # = reference ent_target_mult 0.5
   # -- optimizers (reference: plain Adam, one lr, no weight decay)
   optimizer_class: adam
@@ -68,11 +68,8 @@ algorithm:
   alpha_lr: 0.0003
   max_grad_norm: 0.5
   # -- reference-faithful REPPO components
-  use_target_networks: false
-  actor_q_reduction: q1           # single critic
   aux_loss_mult: 1.0
   reward_scale: 10.0              # mjlab dt-scaled rewards (see header)
-  tau: 0.005                      # unused while use_target_networks is false
   # -- training
   num_learning_epochs: 4
   num_mini_batches: 128
@@ -81,7 +78,6 @@ policy:
   class_name: REPPOActorCritic
   actor_type: stochastic
   critic_type: reference          # encoder/head-split critic (their Critic)
-  num_critics: 1
   actor_obs_normalization: true
   critic_obs_normalization: true
   min_std: 0.0                    # reference actor_min_std
@@ -97,9 +93,20 @@ policy:
     log_std_max: 2.0
     init_noise_std: 1.0
   critic_kwargs:
-    num_atoms: 301                # widened support needs more bins to keep resolution
-    v_min: -20.0
-    v_max: 150.0
+    # Support re-fitted for Humanoid-Flat (was [-20, 150] / 301 atoms, inherited
+    # from Ant). Measured on the PPO-trained Humanoid policy with gamma 0.99 and
+    # reward_scale 10: per-step scaled reward 1.324, so the steady-state target
+    # is r/(1-gamma) = 132.4; sampled discounted returns came out mean 124.5,
+    # p99 148.5, max 150.2. That sits ON the old ceiling, which is the same
+    # clamped-target failure v24 was created to fix on Ant -- and REPPO has to
+    # be able to exceed the PPO policy, not just match it. v_max 300 leaves
+    # ~2.3x headroom over the PPO asymptote (room for a ~10 m/s gait); v_min
+    # -25 covers early falling episodes (worst per-step scaled -0.51 over the
+    # ~25-step episodes seen at iteration 1). Atoms raised to hold bin width at
+    # 0.60, matching the 0.57 the Ant support was tuned for.
+    num_atoms: 541                # (300 + 25) / 540 = 0.602 bin width
+    v_min: -25.0
+    v_max: 300.0
     hidden_dim: 512
     encoder_layers: 2             # reference num_critic_encoder_layers
     head_layers: 2                # reference num_critic_head_layers

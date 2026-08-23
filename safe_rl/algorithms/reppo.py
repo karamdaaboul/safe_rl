@@ -16,17 +16,17 @@ class REPPO:
     """Relative Entropy Pathwise Policy Optimization — Q(s,a) variant.
 
     Faithful to https://arxiv.org/abs/2507.11019: the actor is updated by
-    pathwise (reparameterized) gradients through a twin Q(s,a) critic, so
+    pathwise (reparameterized) gradients through a single Q(s,a) critic, so
     ∂Q/∂a · ∂a/∂θ carries the reward signal directly. The critic is trained
-    on a soft-Q λ-target computed once per update from a frozen target actor:
+    on a soft-Q λ-target computed once per update from the online nets:
 
         a'_t ~ π_target(s'_t)
-        soft_V(s'_t) = min(Q1, Q2)_target(s'_t, a'_t) − α · log_prob_target(a'_t)
+        soft_V(s'_t) = Q(s'_t, a'_t) − α · log_prob(a'_t)
         target_q[t]  = λ-blended return on (r_t − α · log_prob_t) bootstrapped
                        on soft_V(s'_t), masking γ-bootstrap by (1 − done | truncated)
 
     Actor loss (pathwise):
-        a_π = π(s).rsample();  q_π = min_i Q_i(s, a_π)
+        a_π = π(s).rsample();  q_π = Q(s, a_π)
         L_actor = E[α · log π(a_π|s) − q_π]
     REPPO gate: replace L_actor with α_kl · KL(π_old ‖ π) when KL exceeds the
     desired bound. KL is closed-form on the raw Gaussian (μ, σ).
@@ -52,21 +52,21 @@ class REPPO:
         max_grad_norm: float = 1.0,
         desired_kl: float = 0.1,
         target_entropy: float = -1.0,
+        target_entropy_final: float | None = None,
+        target_entropy_anneal_start: int = 0,
+        target_entropy_anneal_end: int = 1,
         init_alpha_temp: float = 0.1,
         init_alpha_kl: float = 0.1,
-        tau: float = 0.005,
-        use_target_networks: bool = True,
-        actor_q_reduction: str = "min",
         kl_clip_mode: str = "full",
-        alpha_kl_min: float = 0.0,
         dual_optim_mode: str = "separate",
         force_last_step_truncated: bool = False,
         critic_loss_denominator: str = "mask",
         aux_loss_mult: float = 0.0,
+        aux_reward_pred: bool = False,
         reward_scale: float = 1.0,
+        trudi_wandb_schema: bool = False,
         reward_normalization: bool = False,
         reward_norm_g_max: float = 10.0,
-        normalize_advantage_per_mini_batch: bool = False,
         device: str = "cpu",
         rnd_cfg: dict | None = None,
         symmetry_cfg: dict | None = None,
@@ -130,7 +130,7 @@ class REPPO:
             actor_params = actor_params + [self.log_alpha_temp, self.log_alpha_kl]
         self.optimizer = opt_cls(actor_params, lr=learning_rate, **opt_kwargs)
         critic_lr = critic_learning_rate if critic_learning_rate is not None else learning_rate
-        self.critic_optimizer = opt_cls(policy.critics.parameters(), lr=critic_lr, **opt_kwargs)
+        self.critic_optimizer = opt_cls(policy.critic.parameters(), lr=critic_lr, **opt_kwargs)
         if self.dual_optim_mode == "separate":
             self.alpha_optimizer: optim.Optimizer | None = opt_cls(
                 [self.log_alpha_temp, self.log_alpha_kl], lr=alpha_lr, **opt_kwargs
@@ -151,13 +151,8 @@ class REPPO:
         self.num_mini_batches = num_mini_batches
         self.gamma = gamma
         self.lam = lam
-        self.tau = tau
-        # Reference REPPO has NO target networks (online bootstrap) and a single
-        # critic (no twin-min pessimism); both retained here as options.
-        self.use_target_networks = use_target_networks
-        if actor_q_reduction not in ("min", "mean", "q1"):
-            raise ValueError(f"actor_q_reduction must be 'min', 'mean' or 'q1'; got {actor_q_reduction!r}")
-        self.actor_q_reduction = actor_q_reduction
+        # Reference REPPO has NO target networks — the bootstrap uses the online
+        # critic. Retained as an option; the single critic is not optional.
         # Reference actor_kl_clip_mode: "clipped" (author default) hard-gates each
         # sample — when its KL exceeds the bound the reward loss is REPLACED by
         # alpha_kl*KL, structurally stopping oversized steps. "full" is the soft
@@ -165,12 +160,6 @@ class REPPO:
         if kl_clip_mode not in ("full", "clipped"):
             raise ValueError(f"kl_clip_mode must be 'full' or 'clipped'; got {kl_clip_mode!r}")
         self.kl_clip_mode = kl_clip_mode
-        # Floor on the KL dual. Without it the exponential parameterization decays
-        # alpha_kl to ~0 during any stretch where KL < bound (loss alpha*(bound-kl)
-        # with positive slack), leaving the clipped gate with NO restoring force by
-        # the time the policy reaches the bound — observed: init 0.5 -> 0.002
-        # within minutes, KL then pinned at the bound for the whole run (v10/v11).
-        self.alpha_kl_min = float(alpha_kl_min)
         # Reference compute_gve does `truncated[-1] = 1.0` IN PLACE, and the same
         # tensor is what the critic update reads. So the last rollout step both
         # bootstraps 1-step (no lambda blend, no termination mask) and is dropped
@@ -189,11 +178,26 @@ class REPPO:
         # critic features of (s,a) and sg[features of (s',a')]).
         self.aux_loss_mult = float(aux_loss_mult)
         self._aux_targets: torch.Tensor | None = None
+        # Reference (JAX) aux loss also regresses a one-step reward prediction and
+        # averages it TOGETHER with the per-feature errors over D+1 slots, masked by
+        # (1 - done):
+        #   aux = mean((1-done) * concat[(pred_f - next_emb)^2, (pred_r - r)^2], -1)
+        # (`jaxrl/reppo.py:493-501`). Off by default -- the torch reference this port
+        # was originally written against has the embedding term only, so enabling it
+        # unconditionally would change every existing REPPO config.
+        self.aux_reward_pred = bool(aux_reward_pred)
+        self._aux_rewards: torch.Tensor | None = None
+        self._aux_dones: torch.Tensor | None = None
         # Reward scaling (reference REPPO env.reward_scaling): dt-scaled sim
         # rewards make per-step reward ~0.01, so Q-differences are tiny next to
         # the fixed-scale KL trust-region cost and the actor barely moves.
         # Scaling inside the algorithm keeps runner/wandb reward logging raw.
         self.reward_scale = float(reward_scale)
+        # Emit our metrics ALSO under the TruDi reference's wandb key names, so a
+        # run of ours and a run of theirs can be overlaid on one chart. See
+        # safe_rl/utils/trudi_wandb_schema.py. Off by default; set true in the
+        # ManiSkill comparison configs.
+        self.trudi_wandb_schema = bool(trudi_wandb_schema)
         # Adaptive alternative (reference RewardNormalizer): divide rewards by
         # max(std(G), max|G|/g_max) of the running discounted return — removes
         # the per-task reward_scale tuning and auto-fits the critic support to
@@ -207,7 +211,6 @@ class REPPO:
         self.max_grad_norm = max_grad_norm
         self.desired_kl = desired_kl
         self.learning_rate = learning_rate
-        self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
         # Resolve the action dimension for the entropy target. Prefer the
         # wrapper policy's num_actions (always set on REPPOActorCritic) — the
@@ -219,6 +222,37 @@ class REPPO:
             policy, "num_actions", getattr(getattr(policy, "actor", None), "num_actions", 1)
         )
         self.target_entropy = target_entropy * num_actions
+        # Widening the squashed action range to (-s, +s) adds an exact
+        # +num_actions*log(s) to the differential entropy of every policy. Shift the
+        # target by the same constant so `target_entropy: -0.5` keeps meaning "this
+        # sharp relative to the action range" instead of silently demanding a
+        # log(s)-per-dim sharper policy the moment the range is widened.
+        action_scale = float(getattr(policy, "action_scale", 1.0))
+        self._entropy_shift = num_actions * math.log(action_scale) if action_scale != 1.0 else 0.0
+        self.target_entropy += self._entropy_shift
+
+        # Optional target-entropy anneal. The target is held at its initial value
+        # while the critic is still forming (annealing a temperature against a
+        # critic that does not yet rank actions just sharpens toward noise), then
+        # moves linearly to `target_entropy_final` between the two iteration marks.
+        # Both endpoints are PER ACTION DIMENSION, like `target_entropy`, and both
+        # get the same action-scale shift so the schedule means the same thing at
+        # any action range.
+        self._num_actions = num_actions
+        self._target_entropy_start = self.target_entropy
+        self._target_entropy_final = (
+            target_entropy_final * num_actions + self._entropy_shift
+            if target_entropy_final is not None
+            else None
+        )
+        self._anneal_start = int(target_entropy_anneal_start)
+        self._anneal_end = int(target_entropy_anneal_end)
+        if self._target_entropy_final is not None and self._anneal_end <= self._anneal_start:
+            raise ValueError(
+                "target_entropy_anneal_end must exceed target_entropy_anneal_start; got "
+                f"{self._anneal_start} -> {self._anneal_end}"
+            )
+        self._iteration = 0
 
         self._final_obs_warned = False
 
@@ -230,13 +264,59 @@ class REPPO:
     def alpha_kl(self) -> torch.Tensor:
         return self.log_alpha_kl.exp()
 
-    def _q_reduce(self, q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-        """Combine twin Q estimates per `actor_q_reduction` (reference: single Q)."""
-        if self.actor_q_reduction == "min":
-            return torch.minimum(q1, q2)
-        if self.actor_q_reduction == "mean":
-            return 0.5 * (q1 + q2)
-        return q1
+    def extra_state_dict(self) -> dict:
+        """Algorithm state the runner's checkpoint does not otherwise capture.
+
+        `policy.state_dict()` covers the networks and obs normalizers, and the
+        runner saves `self.optimizer`. That leaves the duals (which live here, not
+        on the policy) and the critic/alpha optimizer moments. Without these a
+        "resume" silently restarts the dual dynamics: alpha_temp jumps from its
+        converged value back to `init_alpha_temp`, re-injecting entropy bonus into
+        the critic targets.
+        """
+        state = {
+            "log_alpha_temp": self.log_alpha_temp.detach().clone(),
+            "log_alpha_kl": self.log_alpha_kl.detach().clone(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "iteration": self._iteration,
+        }
+        if self.alpha_optimizer is not None:
+            state["alpha_optimizer"] = self.alpha_optimizer.state_dict()
+        return state
+
+    def load_extra_state(self, state: dict) -> None:
+        """Restore what `extra_state_dict` saved. Tolerates older checkpoints."""
+        if not state:
+            return
+        with torch.no_grad():
+            if "log_alpha_temp" in state:
+                self.log_alpha_temp.copy_(state["log_alpha_temp"].to(self.device))
+            if "log_alpha_kl" in state:
+                self.log_alpha_kl.copy_(state["log_alpha_kl"].to(self.device))
+        if "critic_optimizer" in state:
+            self.critic_optimizer.load_state_dict(state["critic_optimizer"])
+        if "alpha_optimizer" in state and self.alpha_optimizer is not None:
+            self.alpha_optimizer.load_state_dict(state["alpha_optimizer"])
+        self._iteration = int(state.get("iteration", self._iteration))
+
+    def _advance_target_entropy(self) -> None:
+        """Linear target-entropy anneal, held flat until `target_entropy_anneal_start`.
+
+        No-op unless `target_entropy_final` is configured, so every existing config
+        keeps a constant target.
+        """
+        self._iteration += 1
+        if self._target_entropy_final is None:
+            return
+        if self._iteration <= self._anneal_start:
+            self.target_entropy = self._target_entropy_start
+            return
+        frac = (self._iteration - self._anneal_start) / (self._anneal_end - self._anneal_start)
+        frac = min(max(frac, 0.0), 1.0)
+        self.target_entropy = (
+            self._target_entropy_start
+            + frac * (self._target_entropy_final - self._target_entropy_start)
+        )
 
     # ------------------------------------------------------------------
     # Runner interface
@@ -293,8 +373,7 @@ class REPPO:
 
         action = self.policy.act(norm_obs, normalized=True).detach()
         # Stored value is the reduced Q(s, a) — for logging only; not used in updates.
-        q1, q2 = self.policy.evaluate_q(norm_critic_obs, action, normalized=True)
-        value = self._q_reduce(q1, q2).detach()
+        value = self.policy.evaluate_q(norm_critic_obs, action, normalized=True).detach()
         if value.dim() == 1:
             value = value.unsqueeze(-1)
 
@@ -378,17 +457,14 @@ class REPPO:
             self.transition.next_privileged_observations = norm_next_priv
 
             with torch.no_grad():
-                if self.use_target_networks:
-                    next_a, next_logp = self.policy.target_sample_with_log_prob(
-                        norm_next_actor, normalized=True
-                    )
-                    q1, q2 = self.policy.evaluate_q_target(norm_next_priv, next_a, normalized=True)
-                else:
-                    next_a, next_logp, _, _ = self.policy.sample_with_log_prob(
-                        norm_next_actor, normalized=True
-                    )
-                    q1, q2 = self.policy.evaluate_q(norm_next_priv, next_a, normalized=True)
-                next_v = self._q_reduce(q1, q2).view(-1, 1)
+                # Reference REPPO bootstraps from the ONLINE actor and critic; the
+                # per-iteration freezing of these values at collection is the target
+                # mechanism, so no polyak copy is involved.
+                next_a, next_logp, _, _ = self.policy.sample_with_log_prob(
+                    norm_next_actor, normalized=True
+                )
+                next_q = self.policy.evaluate_q(norm_next_priv, next_a, normalized=True)
+                next_v = next_q.view(-1, 1)
                 alpha = self.alpha_temp.detach()
                 ent_bonus = (-self.gamma * alpha * next_logp).view(-1, 1)
                 self._collect_next_values.append(next_v)
@@ -456,23 +532,15 @@ class REPPO:
                 B = next_priv.shape[1] * T
                 flat_next = next_priv.reshape(B, -1)
                 flat_next_actor = self.storage.next_observations.reshape(B, -1)
-                if self.use_target_networks:
-                    target_a, target_logp = self.policy.target_sample_with_log_prob(
-                        flat_next_actor, normalized=True
-                    )
-                    q1, q2 = self.policy.evaluate_q_target(flat_next, target_a, normalized=True)
-                else:
-                    # Reference REPPO: bootstrap from the ONLINE actor and critic
-                    # (no target networks; value estimates track the newest params).
-                    target_a, target_logp, _, _ = self.policy.sample_with_log_prob(
-                        flat_next_actor, normalized=True
-                    )
-                    q1, q2 = self.policy.evaluate_q(flat_next, target_a, normalized=True)
+                target_a, target_logp, _, _ = self.policy.sample_with_log_prob(
+                    flat_next_actor, normalized=True
+                )
+                next_q = self.policy.evaluate_q(flat_next, target_a, normalized=True)
                 # Reference-exact soft-return decomposition (torchrl collect_fn):
                 # the entropy bonus enters the REWARD at full weight,
                 #   r'_t = r_t - gamma * alpha * logpi(a'_t | s'_t),
                 # and the lambda-blend uses the PLAIN Q'.
-                q_next = self._q_reduce(q1, q2).squeeze(-1)  # plain Q'  [B]
+                q_next = next_q.squeeze(-1)  # plain Q'  [B]
                 soft_v = q_next.view(T, -1, 1)  # [T, N, 1]
                 ent_bonus = (-self.gamma * alpha * target_logp).view(T, -1, 1)  # [T, N, 1]
                 if self.aux_loss_mult > 0.0:
@@ -485,6 +553,16 @@ class REPPO:
             # mask: 1 if we should bootstrap from next state, 0 if pure termination.
             done = self.storage.dones.float()
             trunc = self.storage.truncated
+
+            # Per-sample targets for the reference reward-prediction aux term. Flattened
+            # the same [T*N] way as `_aux_targets`, so the minibatch `idx` indexes all
+            # three consistently. `storage.rewards` is already reward_scale-multiplied
+            # (line 405), matching the reference, which scales in the env wrapper.
+            if self.aux_reward_pred and self.aux_loss_mult > 0.0:
+                self._aux_rewards = self.storage.rewards.flatten(0, 1).detach()
+                self._aux_dones = done.flatten(0, 1).detach()
+            else:
+                self._aux_rewards = self._aux_dones = None
             not_terminal = (1.0 - done).clamp_min(0.0)
             bootstrap_mask = torch.maximum(not_terminal, trunc)  # truncated → bootstrap
 
@@ -521,7 +599,7 @@ class REPPO:
                 "q_bias": (self.storage.values - ret).mean().item(),
             }
             if self.policy.is_distributional_critic:
-                c = self.policy.critic_1
+                c = self.policy.critic
                 self._diagnostics["frac_targets_clipped"] = (
                     ((ret > c.v_max) | (ret < c.v_min)).float().mean().item()
                 )
@@ -535,15 +613,24 @@ class REPPO:
     # ------------------------------------------------------------------
 
     def update(self) -> dict[str, float]:
+        self._advance_target_entropy()
         critic_loss_sum = 0.0
         actor_loss_sum = entropy_sum = kl_sum = q_value_sum = alpha_temp_loss_sum = alpha_kl_loss_sum = 0.0
-        actor_gn_sum = critic_gn_sum = 0.0
+        actor_gn_sum = critic_gn_sum = dep_gap_sum = 0.0
+        # Last-minibatch values, for like-for-like comparison with the reference's logging
+        # (which reports the final minibatch, not a mean). See metrics_out below.
+        critic_loss_last = q_value_last = entropy_last = kl_last = 0.0
+        critic_gn_last = actor_gn_last = 0.0
         n = 0
         for batch in self._minibatch_generator(self.num_mini_batches, self.num_learning_epochs):
             obs_b, critic_obs_b, actions_b, returns_b, old_mu_b, old_sigma_b, truncated_b, idx_b = batch
 
             aux_target_b = self._aux_targets[idx_b] if self._aux_targets is not None else None
-            critic_loss = self._update_critic(critic_obs_b, actions_b, returns_b, truncated_b, aux_target_b)
+            aux_reward_b = self._aux_rewards[idx_b] if self._aux_rewards is not None else None
+            aux_done_b = self._aux_dones[idx_b] if self._aux_dones is not None else None
+            critic_loss = self._update_critic(
+                critic_obs_b, actions_b, returns_b, truncated_b, aux_target_b, aux_reward_b, aux_done_b
+            )
             critic_loss_sum += critic_loss
 
             metrics = self._update_actor(obs_b, critic_obs_b, old_mu_b, old_sigma_b)
@@ -555,18 +642,24 @@ class REPPO:
             alpha_kl_loss_sum += metrics["alpha_kl_loss"]
             actor_gn_sum += metrics["actor_grad_norm"]
             critic_gn_sum += metrics["critic_grad_norm"]
+            dep_gap_sum += metrics["deployment_gap"]
 
-            if self.use_target_networks:
-                self.policy.soft_update_targets(self.tau)
-                self.policy.soft_update_actor_target(self.tau)
+            critic_loss_last = critic_loss
+            q_value_last = metrics["q_value"]
+            entropy_last = metrics["entropy"]
+            kl_last = metrics["kl"]
+            critic_gn_last = metrics["critic_grad_norm"]
+            actor_gn_last = metrics["actor_grad_norm"]
+
             n += 1
 
         self.storage.clear()
         self._collect_next_values.clear()
         self._collect_ent_bonus.clear()
         self._collect_aux_targets.clear()
+        self._aux_rewards = self._aux_dones = None
 
-        return {
+        metrics_out = {
             "value_function": critic_loss_sum / max(n, 1),
             "surrogate": actor_loss_sum / max(n, 1),
             "entropy": entropy_sum / max(n, 1),
@@ -578,10 +671,33 @@ class REPPO:
             "alpha_kl_loss": alpha_kl_loss_sum / max(n, 1),
             # Pre-clip gradient norms (reference logs both). Reference Go2 finals:
             # actor 0.043, critic 0.67 — its actor clip never binds.
+            "target_entropy": self.target_entropy,
+            "deployment_gap": dep_gap_sum / max(n, 1),
             "actor_grad_norm": actor_gn_sum / max(n, 1),
             "critic_grad_norm": critic_gn_sum / max(n, 1),
+            # LAST-minibatch values alongside the means above. The reference assigns its
+            # log dict INSIDE the minibatch loop, so every per-iteration scalar it reports
+            # is the last minibatch of the last epoch — not a mean. Comparing our means
+            # against their last-minibatch values is not like-for-like, and it produced a
+            # spurious "their critic is driven 9x harder" reading (their 7.01 vs our 0.77)
+            # that was pure aggregation difference. Log both so either comparison is valid.
+            "value_function_last": critic_loss_last,
+            "q_value_last": q_value_last,
+            "entropy_last": entropy_last,
+            "kl_last": kl_last,
+            "critic_grad_norm_last": critic_gn_last,
+            "actor_grad_norm_last": actor_gn_last,
             **getattr(self, "_diagnostics", {}),
         }
+        if getattr(self, "trudi_wandb_schema", False):
+            # Mirror our metrics under the TruDi reference's wandb key names
+            # (actor/kl, critic/qf_mean, ...) so our runs and the authors' runs
+            # overlay on the SAME wandb charts. Additive: our own keys are kept,
+            # and the runner logs any key containing "/" verbatim.
+            from safe_rl.utils.trudi_wandb_schema import add_trudi_aliases
+
+            metrics_out = add_trudi_aliases(metrics_out)
+        return metrics_out
 
     def _minibatch_generator(self, num_mini_batches: int, num_epochs: int):
         """REPPO-local shuffled minibatch generator.
@@ -635,6 +751,8 @@ class REPPO:
         returns: torch.Tensor,
         truncated: torch.Tensor,
         aux_target: torch.Tensor | None = None,
+        aux_reward: torch.Tensor | None = None,
+        aux_done: torch.Tensor | None = None,
     ) -> float:
         # Mask timeout (truncated) steps out of the critic loss: their bootstrap
         # target is only valid when the env surfaced final_observation, and the
@@ -646,38 +764,43 @@ class REPPO:
         # shrinks the gradient rather than just removing the sample.
         denom = mask.sum().clamp_min(1.0) if self.critic_loss_denominator == "mask" else float(mask.numel())
 
-        # With num_critics=1, critic_2 aliases critic_1 — summing both terms
-        # would silently double the gradient (effective 2x critic lr).
-        twin = self.policy.critic_2 is not self.policy.critic_1
-
         if self.policy.is_distributional_critic:
-            logits_1, logits_2 = self.policy.evaluate_q_dist(critic_obs, actions, normalized=True)
-            c = self.policy.critic_1
+            logits = self.policy.evaluate_q_dist(critic_obs, actions, normalized=True)
+            c = self.policy.critic
             soft_targets = self._hlgauss_embed(
                 returns.view(-1), c.v_min, c.v_max, c.num_atoms
             ).detach()
-            ce_1 = -(soft_targets * F.log_softmax(logits_1, dim=-1)).sum(-1)
-            critic_loss = (mask * ce_1).sum() / denom
-            if twin:
-                ce_2 = -(soft_targets * F.log_softmax(logits_2, dim=-1)).sum(-1)
-                critic_loss = critic_loss + (mask * ce_2).sum() / denom
+            ce = -(soft_targets * F.log_softmax(logits, dim=-1)).sum(-1)
+            critic_loss = (mask * ce).sum() / denom
         else:
-            q1, q2 = self.policy.evaluate_q(critic_obs, actions, normalized=True)
-            se_1 = (returns - q1).pow(2).view(-1)
-            critic_loss = (mask * se_1).sum() / denom
-            if twin:
-                se_2 = (returns - q2).pow(2).view(-1)
-                critic_loss = critic_loss + (mask * se_2).sum() / denom
+            q = self.policy.evaluate_q(critic_obs, actions, normalized=True)
+            se = (returns - q).pow(2).view(-1)
+            critic_loss = (mask * se).sum() / denom
 
         # Self-predictive aux loss (reference): the prediction head applied to critic
         # features of (s,a) regresses to sg[features of (s',a')], truncation-masked like
         # the value loss. Without the head this degenerates into pulling the critic's own
         # representation toward its next-state features, which smooths dQ/da.
         if self.aux_loss_mult > 0.0 and aux_target is not None:
-            pred = self.policy.evaluate_q_features(
-                critic_obs, actions, normalized=True, predict=True
-            )
-            aux_per_sample = (pred - aux_target).pow(2).mean(dim=-1)
+            if self.aux_reward_pred and aux_reward is not None:
+                # Reference form (jaxrl/reppo.py:493-501): the reward error is
+                # CONCATENATED onto the D per-feature errors and the mean is taken over
+                # all D+1 slots — so the reward term carries weight 1/(D+1), not 1/2 —
+                # and the whole thing is masked by (1 - done) before the outer
+                # (1 - truncated) mask below.
+                pred, pred_rew = self.policy.evaluate_q_features_reward(
+                    critic_obs, actions, normalized=True
+                )
+                se = torch.cat(
+                    [(pred - aux_target).pow(2), (pred_rew - aux_reward.view(-1, 1)).pow(2)], dim=-1
+                )
+                not_done = (1.0 - aux_done.view(-1, 1)).clamp_(0.0, 1.0) if aux_done is not None else 1.0
+                aux_per_sample = (not_done * se).mean(dim=-1)
+            else:
+                pred = self.policy.evaluate_q_features(
+                    critic_obs, actions, normalized=True, predict=True
+                )
+                aux_per_sample = (pred - aux_target).pow(2).mean(dim=-1)
             critic_loss = critic_loss + self.aux_loss_mult * (mask * aux_per_sample).sum() / denom
 
         self.critic_optimizer.zero_grad()
@@ -687,7 +810,7 @@ class REPPO:
         # actor clip never binds. If ours sits above max_grad_norm the two runs are
         # not in the same optimization regime, whatever the losses look like.
         self._last_critic_grad_norm = float(
-            nn.utils.clip_grad_norm_(self.policy.critics.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.policy.critic.parameters(), self.max_grad_norm)
         )
         self.critic_optimizer.step()
         return critic_loss.item()
@@ -735,8 +858,7 @@ class REPPO:
         # requires_grad off through the backward so the actor pass does not
         # populate critic .grad buffers (re-enabled after optimizer.step()).
         self._set_critic_grad(requires_grad=False)
-        q1, q2 = self.policy.evaluate_q(critic_obs, action_pi, normalized=True)
-        q_pi = self._q_reduce(q1, q2).squeeze(-1)
+        q_pi = self.policy.evaluate_q(critic_obs, action_pi, normalized=True).squeeze(-1)
 
         primary = (self.alpha_temp.detach() * log_prob_pi - q_pi)
 
@@ -788,6 +910,20 @@ class REPPO:
         else:
             entropy = (0.5 + 0.5 * math.log(2.0 * math.pi) + torch.log(sigma_new.clamp_min(1e-8))).sum(-1)
 
+        # Critic-measured deployment gap: how much value the critic thinks is lost
+        # by deploying the mode instead of sampling,
+        #     Delta_dep = E_s[ E_a~pi[Q(s,a)] - Q(s, tanh(mu(s))) ].
+        # Positive => the critic rates typical samples ABOVE the deterministic
+        # action, i.e. the max-ent policy's mode is not what the critic was
+        # trained to value. This is the quantity the entropy experiments move.
+        with torch.no_grad():
+            if getattr(self.policy, "squash", "none") == "tanh":
+                mode_action = getattr(self.policy, "action_scale", 1.0) * torch.tanh(mu_new)
+            else:
+                mode_action = mu_new
+            q_mode = self.policy.evaluate_q(critic_obs, mode_action, normalized=True).squeeze(-1)
+            deployment_gap = (q_pi.detach() - q_mode).mean()
+
         # Dual updates — gradients only flow into log_alpha_*; entropy/kl detached.
         # α_temp: push policy entropy toward target_entropy (paper convention).
         alpha_temp_loss = self.alpha_temp * (entropy.mean().detach() - self.target_entropy)
@@ -806,9 +942,6 @@ class REPPO:
         self.optimizer.step()
         if self.alpha_optimizer is not None:
             self.alpha_optimizer.step()
-        if self.alpha_kl_min > 0.0:
-            with torch.no_grad():
-                self.log_alpha_kl.clamp_(min=math.log(self.alpha_kl_min))
         self._set_critic_grad(requires_grad=True)
 
         return {
@@ -818,6 +951,7 @@ class REPPO:
             "q_value": q_pi.mean().item(),
             "alpha_temp_loss": alpha_temp_loss.item(),
             "alpha_kl_loss": alpha_kl_loss.item(),
+            "deployment_gap": deployment_gap.item(),
             "actor_grad_norm": actor_grad_norm.item(),
             "critic_grad_norm": getattr(self, "_last_critic_grad_norm", 0.0),
         }
@@ -827,5 +961,5 @@ class REPPO:
     # ------------------------------------------------------------------
 
     def _set_critic_grad(self, requires_grad: bool) -> None:
-        for param in self.policy.critics.parameters():
+        for param in self.policy.critic.parameters():
             param.requires_grad = requires_grad

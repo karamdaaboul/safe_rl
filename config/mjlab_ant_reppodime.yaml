@@ -1,0 +1,113 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO-DIME v0 — REPPO with the TruDi DIME diffusion actor, on mjlab Ant-Flat.
+#
+# Base: mjlab_ant_reppo_v24_support (the reference-matched Gaussian line with
+# the Ant-calibrated support/reward_scale) with the actor swapped for the
+# denoising-diffusion policy, mirroring the reference's own reppo -> reppo_dime
+# diff (trudi/src/torchrl/reppo_dime.py + config/reppo_dime_torch.yaml):
+#   * algorithm REPPODIME: forward path-KL trust region against a frozen
+#     old_actor (hard-synced per update), kl_action_rep 1, kl_bound 0.1.
+#   * duals: ent_start 0.01 / kl_start 0.01 (DIME values — NOT the Gaussian
+#     v24's init_alpha_temp 1.0), riding the actor Adam (dual_optim_mode:
+#     actor = reference placement inside the grad clip).
+#   * target_entropy -4.0 = minus the reference's ent_target_mult 4.0; the
+#     DIME pseudo-entropy (-run_cost) is an ELBO quantity on its own scale —
+#     never carry Gaussian targets (-0.5) over.
+#   * diffusion block = reference reppo_dime_torch.yaml verbatim: 8 EM steps,
+#     prior N(0, 2.5), learnable per-dim friction, frozen dt on a cosine
+#     schedule, 3x512 GELU control net with near-zero output init.
+# Critic, returns, budget: unchanged from v24_support.
+#
+# What to watch on the first runs: kl ~0 at iter 1 (near-zero-init control
+# net) staying under 0.1; entropy drifting toward -4*n_act; alpha_temp moving
+# off 0.01; deployment_gap (SDE-vs-ODE action value) — the multimodality
+# signal. Expect a large fps drop vs the Gaussian: collection pays 2 chains
+# (act + bootstrap) x 8 control-net evals per env step, and the forward-KL
+# actor update pays a second full rollout (dime_kl_mode: reverse halves that).
+# ===========================================================================
+
+algorithm:
+  class_name: REPPODIME
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL trust region (reference kl_bound / actor_kl_clip_mode / kl_action_rep)
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  kl_action_rep: 1
+  dime_kl_mode: forward           # reference-main; "reverse" = fused rev-KL, ~half cost
+  # -- learned dual variables (reference ent_start / kl_start, DIME values)
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -4.0            # = -(reference ent_target_mult 4.0)
+  dual_optim_mode: actor          # duals ride actor Adam + grad clip, as in reference
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # mjlab dt-scaled rewards (see v24 header)
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: DIMEActorCritic
+  critic_type: reference          # encoder/head-split critic (unchanged from v24)
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  diffusion:                      # reference reppo_dime_torch.yaml, verbatim
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: true
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 512
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-8
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  critic_kwargs:
+    num_atoms: 301
+    v_min: -20.0
+    v_max: 150.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 381             # 1024 envs x 128 steps x 381 = 50M steps
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_ant_reppodime
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

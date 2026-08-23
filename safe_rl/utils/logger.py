@@ -105,13 +105,22 @@ class Logger:
 
             if costs is not None and self.cur_cost_sum is not None:
                 for cost_idx in range(self.num_costs):
-                    self.costbuffers[cost_idx].extend(
-                        self.cur_cost_sum[new_ids, cost_idx].cpu().numpy().tolist()
-                    )
+                    self.costbuffers[cost_idx].extend(self.cur_cost_sum[new_ids, cost_idx].cpu().numpy().tolist())
                 self.cur_cost_sum[new_ids] = 0
 
             self.cur_reward_sum[new_ids] = 0
             self.cur_episode_length[new_ids] = 0
+
+    def _collection_size(self, collection_size: int | None, num_iters: int) -> int:
+        """Environment steps in a logging window.
+
+        Falls back to ``num_steps_per_env * num_envs * num_iters``, which assumes one
+        simulator step per agent step. That assumption breaks under action repeat, so
+        runners that know the true count pass it explicitly.
+        """
+        if collection_size is not None:
+            return collection_size
+        return int(self.runner_cfg.get("num_steps_per_env", 1)) * self.num_envs * num_iters
 
     def log(
         self,
@@ -124,12 +133,20 @@ class Logger:
         width: int = 80,
         pad: int = 40,
         num_iters: int = 1,
+        collection_size: int | None = None,
     ) -> None:
         """Write metrics to the external logger and print console output.
 
         ``collect_time`` / ``learn_time`` may cover ``num_iters`` iterations when the
         caller batches logging over a window; the step count and FPS are scaled
         accordingly so they reflect the whole window.
+
+        Args:
+            collection_size: Environment steps covered by this window. Pass this
+                whenever the runner knows the true count — with action repeat one
+                agent step is several simulator steps, and the
+                ``num_steps_per_env * num_envs`` assumption below under-reports the
+                budget by that factor. Defaults to that assumption.
         """
         if self.log_dir is None:
             return
@@ -137,15 +154,15 @@ class Logger:
         # -- Timing ----------------------------------------------------------
         iteration_time = collect_time + learn_time
         self.tot_time += iteration_time
-        num_steps_per_env = int(self.runner_cfg.get("num_steps_per_env", 1))
-        collection_size = num_steps_per_env * self.num_envs * num_iters
+        collection_size = self._collection_size(collection_size, num_iters)
         self.tot_timesteps += collection_size
         fps = int(collection_size / max(iteration_time, 1e-6))
 
         # -- Episode extras --------------------------------------------------
         extras_string = ""
         if self.ep_infos:
-            for key in self.ep_infos[0]:
+            # Union, not ep_infos[0]: metrics logged only on episode end would be dropped.
+            for key in dict.fromkeys(k for ep_info in self.ep_infos for k in ep_info):
                 infotensor = torch.tensor([], device=self.device)
                 for ep_info in self.ep_infos:
                     if key not in ep_info:
@@ -195,9 +212,7 @@ class Logger:
                     self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, it)
 
         # -- Console output --------------------------------------------------
-        self._print_console(
-            it, start_it, total_it, collect_time, learn_time, fps, loss_dict, extras_string, width, pad
-        )
+        self._print_console(it, start_it, total_it, collect_time, learn_time, fps, loss_dict, extras_string, width, pad)
 
         # -- Clear episode infos for next iteration --------------------------
         self.ep_infos.clear()
@@ -219,7 +234,14 @@ class Logger:
             - ``lambda_*``      -> ``SafeRL/<key>``
             - ``alpha``         -> ``SafeRL/alpha``
             - ``noise_std``     -> ``Policy/mean_noise_std``
+            - ``replay_*``      -> ``Replay/<suffix>``
+            - ``critic_cost_*`` -> ``critic/cost_<suffix>``
+            - ``eval_*``        -> ``Eval/<suffix>``    (periodic deterministic evaluation)
             - everything else   -> ``Train/<key>``
+
+        The cost-critic rule is deliberately narrow (``critic_cost_`` rather than
+        ``critic_``): REPPO logs ``critic_grad_norm``, which has always been a ``Train/`` tag,
+        and a blanket prefix rule would silently relocate it on existing dashboards.
         """
         if key.endswith("_loss"):
             return f"Loss/{key[:-5]}"
@@ -227,6 +249,12 @@ class Logger:
             return f"SafeRL/{key}"
         if key == "noise_std":
             return "Policy/mean_noise_std"
+        if key.startswith("critic_cost_"):
+            return f"critic/{key[len('critic_'):]}"
+        if key.startswith("replay_"):
+            return f"Replay/{key[len('replay_'):]}"
+        if key.startswith("eval_"):
+            return f"Eval/{key[len('eval_'):]}"
         return f"Train/{key}"
 
     def _init_writer(self, env_cfg: dict | object) -> None:
@@ -256,9 +284,7 @@ class Logger:
 
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         else:
-            raise ValueError(
-                f"Logger type '{self.logger_type}' not found. Choose 'wandb' or 'tensorboard'."
-            )
+            raise ValueError(f"Logger type '{self.logger_type}' not found. Choose 'wandb' or 'tensorboard'.")
 
     def _store_code_state(self) -> None:
         """Save git diffs and upload them to external loggers."""

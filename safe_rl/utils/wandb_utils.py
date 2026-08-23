@@ -49,11 +49,20 @@ class WandbSummaryWriter(SummaryWriter):
 
         # Initialize wandb — disable git integration to avoid broken symlinks
         # for .diff files when running inside a container (offline mode).
+        # Optional tags, so a run can be filtered alongside runs from another
+        # codebase (e.g. the TruDi reference, which tags
+        # [cfg.name, env.name, env.type, *cfg.tags]). Absent -> no tags, as before.
+        # Look in both places, mirroring how run_name is resolved above: the runner
+        # block for OnPolicyRunner-style configs, and the top level otherwise.
+        wandb_tags = None
+        if isinstance(cfg, dict):
+            wandb_tags = cfg.get("wandb_tags") or cfg.get("runner", {}).get("wandb_tags")
         wandb.init(
             project=project,
             entity=entity,
             name=run_name,
             dir=wandb_dir,
+            tags=list(wandb_tags) if wandb_tags else None,
             settings=wandb.Settings(disable_git=True),
         )
 

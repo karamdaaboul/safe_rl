@@ -26,7 +26,7 @@ CRITIC_OBS_DIM = 7
 ACT_DIM = 3
 
 
-def _make_policy(squash: str = "tanh") -> REPPOActorCritic:
+def _make_policy(squash: str = "tanh", action_scale: float = 1.0) -> REPPOActorCritic:
     torch.manual_seed(0)
     return REPPOActorCritic(
         num_actor_obs=OBS_DIM,
@@ -34,8 +34,8 @@ def _make_policy(squash: str = "tanh") -> REPPOActorCritic:
         num_actions=ACT_DIM,
         actor_type="stochastic",
         critic_type="distributional",
-        num_critics=2,
         squash=squash,
+        action_scale=action_scale,
         actor_kwargs={"hidden_dims": [16, 16], "network_type": "mlp"},
         critic_kwargs={
             "num_atoms": 11,
@@ -114,8 +114,8 @@ def test_q_argmax_never_scores_below_the_mode():
     mode = policy.act_inference(obs)
 
     def q_of(actions: torch.Tensor) -> torch.Tensor:
-        q1, q2 = policy.evaluate_q(critic_obs, actions)
-        return torch.minimum(q1, q2).squeeze(-1)
+        # single critic (as the reference has) -> evaluate_q returns one tensor
+        return policy.evaluate_q(critic_obs, actions).squeeze(-1)
 
     assert (q_of(chosen) >= q_of(mode) - 1e-5).all()
 
@@ -194,3 +194,20 @@ def test_one_episode_per_env_is_unbiased_when_fast_envs_fail():
 
     unbiased = simulate(one_per_env=True, want=2)
     assert sorted(unbiased) == [10, 100], "one-per-env must draw exactly one episode from each env"
+
+
+def test_q_argmax_respects_action_scale():
+    """Candidates must be `action_scale * tanh(u)`, not `tanh(u)`.
+
+    Scaling to +-1 only would hand both the critic and the environment actions up
+    to `action_scale` times too small -- the Q-greedy comparison would then be
+    against a crippled candidate set rather than the policy's real action range.
+    """
+    scale = 3.0
+    policy = _make_policy(squash="tanh", action_scale=scale)
+    obs = torch.randn(64, OBS_DIM)
+    critic_obs = torch.randn(64, CRITIC_OBS_DIM)
+    chosen = make_q_argmax_policy(policy, num_samples=32)(obs, critic_obs)
+    assert chosen.abs().max() <= scale
+    # with sigma ~ 1 and 32 samples, some candidate must exceed the unscaled bound
+    assert chosen.abs().max() > 1.0, "candidates never left the +-1 range: action_scale ignored"

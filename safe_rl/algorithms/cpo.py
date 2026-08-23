@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal
 
-from safe_rl.modules import ActorCritic
+from safe_rl.modules import ActorCriticCost
 from safe_rl.storage import RolloutStorageCMDP
 from safe_rl.utils import (
     conjugate_gradients,
@@ -28,11 +28,11 @@ class CPO:
     Value and cost-value critics are updated with standard PPO-style clipped value loss.
     """
 
-    policy: ActorCritic
+    policy: ActorCriticCost
 
     def __init__(
         self,
-        policy: ActorCritic,
+        policy: ActorCriticCost,
         num_learning_epochs: int = 10,
         num_mini_batches: int = 4,
         clip_param: float = 0.2,
@@ -134,6 +134,10 @@ class CPO:
         return trainable_parameters(params)
 
     def _collect_value_parameters(self) -> List[torch.nn.Parameter]:
+        if getattr(self.policy, "cost_critic", None) is None:
+            raise ValueError(
+                f"{type(self).__name__} requires a policy with a cost_critic; use ActorCriticCost"
+            )
         params: List[torch.nn.Parameter] = []
         params.extend(self.policy.critic.parameters())
         params.extend(self.policy.cost_critic.parameters())
@@ -159,9 +163,6 @@ class CPO:
             cost_shape=cost_shape,
             device=self.device,
         )
-
-    def test_mode(self) -> None:
-        self.policy.eval()
 
     def train_mode(self) -> None:
         self.policy.train()

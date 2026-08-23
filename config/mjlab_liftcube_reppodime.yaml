@@ -1,0 +1,108 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO-DIME v0 on Mjlab-Lift-Cube-Yam — THE multimodality test.
+#
+# Base: mjlab_liftcube_reppo_v24_support (measured value support v_min -150 /
+# 501 atoms, curriculum timing, and probe analysis — see that file's header)
+# with the Gaussian actor swapped for the TruDi DIME diffusion policy, exactly
+# as in mjlab_ant_reppodime.yaml.
+#
+# Why this task: Gaussian REPPO v24/v25 held Episode_Reward/grasp at 0.0000
+# across 300 iterations / 39.3M steps while PPO reached 0.919 — diagnosed
+# (codex/reppo-v24-manipulation-analysis.md) as an exploration-bootstrap
+# failure of the UNIMODAL tanh-Gaussian on the gripper dimension. A multimodal
+# diffusion actor is precisely the intervention; watch
+#   Mean episode Metrics/lift_height/episode_success   (the task metric)
+#   Episode_Reward/grasp                               (the bootstrap signal)
+#   Loss/dime_action_sat_frac                          (tanh saturation)
+#   Loss/deployment_gap + Loss/dime_sde_ode_action_gap (multimodality signals)
+# Curriculum stages land at iterations ~102 and ~196 (see v24_support header).
+#
+# NOTE: pass --experiment_name explicitly (the YAML's experiment_name is popped
+# and discarded by load_safe_rl_yaml; logs otherwise land under yam_lift_cube/).
+# ===========================================================================
+
+algorithm:
+  class_name: REPPODIME
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL trust region (reference kl_bound / actor_kl_clip_mode / kl_action_rep)
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  kl_action_rep: 1
+  dime_kl_mode: forward           # reference-main; "reverse" = fused rev-KL, ~half cost
+  # -- learned dual variables (reference ent_start / kl_start, DIME values)
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -4.0            # = -(reference ent_target_mult 4.0), DIME scale
+  dual_optim_mode: actor          # duals ride actor Adam + grad clip, as in reference
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # inherited from Ant; see v24_support header
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: DIMEActorCritic
+  critic_type: reference          # encoder/head-split critic (unchanged from v24_support)
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  diffusion:                      # reference reppo_dime_torch.yaml, verbatim
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: true
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 512
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0         # PLAIN floats — PyYAML parses signless 1.0e4 as a STRING
+      inner_clip: 100.0
+      weight_init: 1.0e-8
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  critic_kwargs:
+    num_atoms: 501                # [-150,150] at bin width 0.600 (see v24_support)
+    v_min: -150.0
+    v_max: 150.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 900             # 900*128 = 115.2k per-env steps ~= PPO ref 120k
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_liftcube_reppodime
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

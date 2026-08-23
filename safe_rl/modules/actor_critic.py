@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from safe_rl.modules.actor import DeterministicActor, GaussianActor
-from safe_rl.modules.critic import CategoricalCostCritic, DistributionalCritic, HLGaussCostCritic, StandardCritic
+from safe_rl.modules.critic import DistributionalCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
 
 
@@ -22,12 +22,10 @@ class ActorCritic(nn.Module):
         actor_type: str = "gaussian",
         critic_type: str = "standard",
         num_critics: int = 1,
-        num_costs: int = 0,
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
-        cost_critic_kwargs: dict[str, Any] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         """Initialize Actor-Critic.
@@ -39,17 +37,14 @@ class ActorCritic(nn.Module):
             actor_type: Type of actor - "deterministic" or "gaussian".
             critic_type: Type of critic - "standard" or "distributional".
             num_critics: Number of critic networks.
-            num_costs: Number of constraint cost heads. If > 0, a `cost_critic` submodule is built and
-                `evaluate_cost()` becomes available. The runner injects this from `len(cost_limits)`.
             actor_obs_normalization: Whether to normalize actor observations.
             critic_obs_normalization: Whether to normalize critic observations.
             actor_kwargs: Actor-specific parameters.
             critic_kwargs: Critic-specific parameters.
-            cost_critic_kwargs: Cost-critic MLP parameters (hidden_dims, activation, ...). Only read when num_costs > 0.
         """
         if kwargs:
             print(
-                "ActorCritic.__init__ got unexpected arguments, which will be ignored: "
+                f"{type(self).__name__}.__init__ got unexpected arguments, which will be ignored: "
                 + str([key for key in kwargs])
             )
         super().__init__()
@@ -57,12 +52,10 @@ class ActorCritic(nn.Module):
         # Deep copy to avoid modifying original dicts
         actor_kwargs = deepcopy(actor_kwargs) if actor_kwargs is not None else {}
         critic_kwargs = deepcopy(critic_kwargs) if critic_kwargs is not None else {}
-        cost_critic_kwargs = deepcopy(cost_critic_kwargs) if cost_critic_kwargs is not None else {}
 
         self.actor_type = actor_type
         self.critic_type = critic_type
         self.num_critics = num_critics
-        self.num_costs = num_costs
 
         # ==================== Actor ====================
         if actor_type == "deterministic":
@@ -129,46 +122,6 @@ class ActorCritic(nn.Module):
         else:
             self.critic_obs_normalizer = nn.Identity()
 
-        # ==================== Cost critic (optional) ====================
-        # Built only for safe RL algorithms; runner injects num_costs from len(cost_limits).
-        if num_costs > 0:
-            loss_type = cost_critic_kwargs.pop("loss_type", "mse")
-            self.cost_critic_loss_type = loss_type
-            if loss_type == "mse":
-                self.cost_critic = StandardCritic(
-                    num_obs=num_critic_obs,
-                    num_actions=0,
-                    output_dim=num_costs,
-                    **cost_critic_kwargs,
-                )
-            elif loss_type == "hlgauss":
-                self.cost_critic = HLGaussCostCritic(
-                    num_obs=num_critic_obs,
-                    num_costs=num_costs,
-                    **cost_critic_kwargs,
-                )
-            elif loss_type == "categorical":
-                self.cost_critic = CategoricalCostCritic(
-                    num_obs=num_critic_obs,
-                    num_costs=num_costs,
-                    **cost_critic_kwargs,
-                )
-            else:
-                raise ValueError(
-                    f"Unknown cost_critic loss_type: {loss_type!r}. Must be 'mse', 'hlgauss' or 'categorical'."
-                )
-            print(f"Cost critic ({loss_type}): {self.cost_critic}")
-        else:
-            self.cost_critic = None
-            self.cost_critic_loss_type = None
-
-    @property
-    def is_distributional_cost_critic(self) -> bool:
-        """True for classification-based cost critics (HL-Gauss / categorical), which output
-        per-cost logits over a fixed support instead of a scalar and are trained with
-        cross-entropy. Callers use this to select the distributional loss/decoding path."""
-        return self.cost_critic_loss_type in ("hlgauss", "categorical")
-
     def reset(self, dones: torch.Tensor | None = None) -> None:
         pass
 
@@ -206,13 +159,6 @@ class ActorCritic(nn.Module):
         if not self.is_distributional_critic:
             raise RuntimeError("value_dist only available for distributional critic")
         return self._value_dist
-
-    @property
-    def cost_logits(self) -> torch.Tensor:
-        """Return cached cost logits from last evaluate_cost call (HL-Gauss cost critic only)."""
-        if self.cost_critic_loss_type != "hlgauss":
-            raise RuntimeError("cost_logits only available when cost_critic loss_type is 'hlgauss'")
-        return self._cost_logits
 
     def update_distribution(self, observations: torch.Tensor) -> None:
         """Update the action distribution (for Gaussian actor only)."""
@@ -277,69 +223,6 @@ class ActorCritic(nn.Module):
                     [critic(critic_observations) for critic in self.critics], dim=1
                 )
         return value
-
-    def evaluate_cost(self, critic_observations: torch.Tensor, **kwargs: dict[str, Any]) -> torch.Tensor:
-        """Evaluate the cost-value function (safe RL only).
-
-        Returns:
-            cost_value: [batch_size, num_costs].
-        """
-        if self.cost_critic is None:
-            raise RuntimeError("evaluate_cost requires num_costs > 0 (no cost_critic was built)")
-        critic_observations = self.critic_obs_normalizer(critic_observations)
-        if self.is_distributional_cost_critic:
-            logits = self.cost_critic(critic_observations)
-            self._cost_logits = logits
-            # Always decode as the expected value here. GAE requires an unbiased
-            # baseline, so the standard `evaluate_cost` path must not return CVaR
-            # (which is the upper-tail expectation and biases A_C globally negative,
-            # closing the P3O ReLU gate). Risk-sensitive callers should call
-            # `evaluate_cost_cvar` explicitly.
-            return self.cost_critic.expected_value(logits)
-        return self.cost_critic(critic_observations)
-
-    def evaluate_cost_cvar(
-        self,
-        critic_observations: torch.Tensor,
-        alpha: float | None = None,
-        **kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        """Risk-sensitive cost-value evaluation (HL-Gauss critic only).
-
-        Decodes the predicted cost-return distribution as CVaR over the worst
-        ``alpha`` tail. Used by safety-gate / κ-adaptation logic that wants to
-        react to predicted catastrophic outcomes; *not* used as the GAE baseline.
-
-        Args:
-            critic_observations: same shape contract as ``evaluate_cost``.
-            alpha: tail fraction in (0, 1]. Defaults to ``self.cost_critic.cvar_alpha``
-                if set on the critic; raises if neither is provided.
-        """
-        if self.cost_critic is None:
-            raise RuntimeError("evaluate_cost_cvar requires num_costs > 0 (no cost_critic was built)")
-        if self.cost_critic_loss_type != "hlgauss":
-            raise RuntimeError(
-                "evaluate_cost_cvar requires the HL-Gauss cost critic; "
-                f"got loss_type={self.cost_critic_loss_type!r}"
-            )
-        if alpha is None:
-            alpha = getattr(self.cost_critic, "cvar_alpha", None)
-        if alpha is None:
-            raise ValueError(
-                "evaluate_cost_cvar called without an alpha; either pass alpha=... "
-                "or set cost_critic.cvar_alpha"
-            )
-        critic_observations = self.critic_obs_normalizer(critic_observations)
-        logits = self.cost_critic(critic_observations)
-        self._cost_logits = logits
-        return self.cost_critic.cvar_value(logits, alpha)
-
-    def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        """Update observation normalizers."""
-        if self.actor_obs_normalization:
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
-            self.critic_obs_normalizer.update(critic_obs)
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load the parameters of the actor-critic model.

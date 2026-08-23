@@ -75,7 +75,7 @@ algorithm:
   # use_data_augmentation would call a null augmentation func in the PPO base.
 
 policy:
-  class_name: ActorCritic
+  class_name: ActorCriticCost
   actor_type: gaussian
   critic_type: standard
   actor_kwargs:

@@ -386,8 +386,10 @@ def test_safe_actor_critic_supports_both_critic_types() -> None:
         t1, t2 = p.evaluate_q_target(obs, act)
         assert q1.shape == q2.shape == t1.shape == t2.shape == (4, 1)
         assert p.evaluate_cost_q(obs, act).shape == (4, 1)
+    # "quantile" became a real critic type in Phase 1 (see tests/test_quantile_critic.py);
+    # an unknown name must still be rejected rather than silently falling back.
     with pytest.raises(ValueError, match="critic_type"):
-        SafeActorCritic(num_actor_obs=NUM_OBS, num_critic_obs=NUM_OBS, num_actions=NUM_ACT, critic_type="quantile")
+        SafeActorCritic(num_actor_obs=NUM_OBS, num_critic_obs=NUM_OBS, num_actions=NUM_ACT, critic_type="c51")
 
 
 def test_cvpo_runs_with_distributional_critics_and_nstep() -> None:

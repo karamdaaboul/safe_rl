@@ -1,0 +1,106 @@
+# REPPO-DIME on Mjlab-Lift-Cube-Yam-GRASP -- the decisive control for the v24
+# manipulation failure.
+#
+# WHY THIS FILE EXISTS: the earlier DIME lift-cube run used the BASE
+# `Mjlab-Lift-Cube-Yam` task, which has NO grasp reward term at all (its rewards
+# are lift / lift_precise / action_rate_l / joint_pos_limits / joint_vel_hinge).
+# The documented Gaussian failure -- and PPO's 0.919 -- are on the `-Grasp`
+# variant, which DOES carry `Episode_Reward/grasp`. Comparing the two was an
+# error; this config runs the same task the baseline ran.
+#
+# BASELINE TO BEAT (codex/reppo-v24-manipulation-analysis.md sec.8, 1024 envs):
+#   PPO      33,600 per-env steps: grasp 0.9191, success 0.6806, reward 77.1
+#   REPPO v25 38,400 per-env steps: grasp 0.0000, success 0.0000, reward 19.2
+#   -- 0.0000 was the ONLY value REPPO's grasp ever took, over 39.3M env steps.
+#
+# THE HYPOTHESIS THIS TESTS: sec.8 names tanh saturation on the gripper action as
+# the leading mechanism -- the actor's pre-tanh gripper mean sits so deep in
+# saturation that closing needs a ~6-sigma excursion, so no grasp ever occurs, so
+# the critic never learns closing pays, so dQ/d(gripper) stays ~0. A diffusion
+# policy has no single pre-tanh mean and measured only 2.5% action saturation on
+# this task family, so if saturation is the binding constraint DIME should break
+# the circle. If DIME also never grasps, the constraint is elsewhere.
+#
+# MATCHED to the v25 baseline: task, 1024 envs, 128 steps/env, 300 iterations
+# (38,400 per-env steps), reward_scale 10, critic support [-40,100]/281 atoms.
+# NOT matched (policy-class-specific, kept at reference/paper defaults):
+# desired_kl 0.1 (path-space KL, different scale from the Gaussian's 0.03),
+# target_entropy -4.0 and init_alpha_temp 0.01 (ELBO pseudo-entropy scale).
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: REPPODIME
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  kl_action_rep: 1
+  dime_kl_mode: forward
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -4.0
+  dual_optim_mode: actor
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas:
+  - 0.9
+  - 0.999
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  aux_loss_mult: 1.0
+  reward_scale: 10.0
+  num_learning_epochs: 4
+  num_mini_batches: 128
+policy:
+  class_name: DIMEActorCritic
+  critic_type: reference
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  diffusion:
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: true
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 512
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-08
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  critic_kwargs:
+    num_atoms: 281
+    v_min: -40.0
+    v_max: 100.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+runner:
+  num_steps_per_env: 128
+  max_iterations: 300
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_liftcube_grasp_reppodime
+  run_name: ''
+  logger: wandb
+  wandb_project: mjlab

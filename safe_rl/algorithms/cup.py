@@ -6,7 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import List, Optional
 
-from safe_rl.modules import ActorCritic
+from safe_rl.modules import ActorCriticCost
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -17,7 +17,7 @@ class CUP:
     Based on the paper: "Constrained Update Projection Approach to Safe Policy Optimization"
     https://arxiv.org/pdf/2209.07089.pdf
     """
-    policy: ActorCritic
+    policy: ActorCriticCost
 
     def __init__(
         self,
@@ -641,21 +641,6 @@ class CUP:
             normalize_cost_advantage=not self.normalize_advantage_per_mini_batch
         )
 
-    def get_lagrange_info(self):
-        """Get Lagrange multiplier information for logging"""
-        return {
-            "nu_mean": torch.tensor(self.nu).mean().item() if isinstance(self.nu, list) else self.nu,
-            "nu_list": self.nu,
-            "cost_limits": self.cost_limits,
-            "nu_lr": self.nu_lr,
-            "nu_max": self.nu_max,
-            "delta": self.delta,
-            "recent_costs": [
-                self.cost_history[i][-5:] if len(self.cost_history[i]) >= 5 else self.cost_history[i]
-                for i in range(self.num_costs)
-            ]
-        }
-
     def get_penalty_info(self):
         """
         Get penalty information for logging (compatible with OnPolicyRunner).
@@ -697,9 +682,9 @@ class CUP:
         Validate that the cost critic outputs the correct number of cost values.
         If not, recreate the cost critic with the correct output dimension.
         """
-        # Check if the policy has a cost_critic attribute
-        if not hasattr(self.policy, 'cost_critic'):
-            raise ValueError("ActorCritic must have a cost_critic attribute for CUP algorithm")
+        # Check if the policy has a cost_critic
+        if getattr(self.policy, "cost_critic", None) is None:
+            raise ValueError("CUP requires a policy with a cost_critic; use ActorCriticCost")
         
         # Get the last layer of the cost critic to check output dimension
         last_layer = None
@@ -715,5 +700,5 @@ class CUP:
         
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but CUP expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
-            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with the num_costs parameter.")
+            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")

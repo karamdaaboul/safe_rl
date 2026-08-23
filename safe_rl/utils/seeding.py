@@ -11,10 +11,24 @@ varying init as well as layout), but it does mean a run cannot be reproduced, wh
 any regression oracle.
 
 ``seed_everything`` seeds python / numpy / torch / cuda from one integer. ``deterministic``
-additionally requests deterministic kernels; note that some ops used here (the categorical
-projection's ``scatter_add_`` on CUDA) have no deterministic GPU implementation, so bit-exact
-reproducibility is a CPU property. On GPU the seeding still pins init and sampling, which
-removes the dominant source of run-to-run drift.
+additionally requests deterministic kernels.
+
+Seeding alone is **not** enough for the distributional critics. The categorical projection
+accumulates probability mass with ``index_add_``, which on CUDA is implemented with
+``atomicAdd``: several source elements target the same atom and land in hardware-scheduling
+order, and float addition is not associative. Measured 2026-08-13 on this box: two identical
+``index_add_`` calls differed by 7.2e-05 without the flag and by exactly 0 with it.
+
+That last-bits difference is then amplified by the off-policy loop (policy -> visited states
+-> replay -> critic -> policy). Three DMPO runs with the same seed on the same GPU shared
+**0 of 8** log blocks and were 9.8 reward apart by iteration 7000; with ``deterministic=True``
+five runs were bit-identical over 8000 iterations. Scalar critics have no scatter and
+reproduce exactly either way.
+
+Cost is ~20% wall-clock (113 -> 136 ms/iter on SafetyPointGoal1, 8 envs), so it is worth
+leaving on for anything that will be compared, and optional for long production runs.
+Determinism pins *which* trajectory you get, not a better one -- multiple seeds are still
+required for any performance claim.
 """
 
 from __future__ import annotations
@@ -31,9 +45,11 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
 
     Args:
         seed: the base seed.
-        deterministic: also request deterministic algorithms and cuDNN behaviour. This can
-            slow training down and will raise for ops lacking a deterministic implementation,
-            so it is opt-in and intended for regression tests rather than production runs.
+        deterministic: also request deterministic algorithms and cuDNN behaviour. Required
+            for reproducible runs with the distributional critics (see the module docstring);
+            ~20% slower. ``warn_only=True`` means an op without a deterministic kernel falls
+            back silently rather than raising -- check the log for a warning naming it if two
+            runs disagree.
     """
     seed = int(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)

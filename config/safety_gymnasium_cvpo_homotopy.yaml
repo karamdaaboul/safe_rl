@@ -1,0 +1,136 @@
+# CVPO + feasible threshold homotopy.
+#
+# Delta vs config/safety_gymnasium_cvpo_both_lam4.yaml (the current best arm: critic-side
+# n-step + non-negative head, units-side measured qc_scale, lambda_max sized from the E-step
+# scale) is the threshold only. Everything else is held fixed so the homotopy is the single
+# variable.
+#
+# The problem it addresses: at ~1.8x the episodic budget, one KL-bounded E-step can shed a
+# fraction of a percent of the gap, so {q : KL(q||pi_old) <= eps, E_q[Q_c] <= qc_thres} is empty
+# and the dual parks lambda at its cap -- where exp((Q_r - lam*Q_c)/eta) no longer depends on
+# Q_r at all. Instead ask each update only for a reachable reduction from where the policy
+# actually is, floored at the real target:
+#
+#     thresh = max(q_target, (1 - beta) * C_now),   C_now = E_{a~pi_old}[Q_c]
+#
+# This is the opposite direction from `qc_thres_adapt` (codex/cvpo-qc-threshold-calibration.md),
+# which only ever tightened and walked the threshold to its floor.
+
+algorithm:
+  class_name: CVPO
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 0.1       # matched to both_lam4, so the M-step is not a second variable
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint
+  cost_limits: [25.0]       # episodic cost limit; can be overridden via --cost_limits
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  # Static threshold: used during warmup, and as the anchor for the q_target clamp band.
+  qc_scale_source: measured
+  qc_scale_measured: 0.0764
+  qc_scale_probe: >-
+    scratchpad/probe_runs/cvpo_orig_115723_m29999_seed1_n200_calib.jsonl
+    (200 episodes, seed 1, checkpoint CVPO/20260803_115723/model_29999.pt,
+    G_c(s0) mean 3.550 / J_c mean 46.475)
+  qc_thres_adapt: false     # the old tighten-only ratchet stays off
+
+  # -- Feasible threshold homotopy
+  qc_thres_homotopy: true
+  homotopy_beta: 0.005      # fractional reduction demanded per *update* (2 per env step here).
+                            # Self-limiting: thresh is pinned just under C_now, so it descends
+                            # only as fast as the policy does -- it does not compound.
+  homotopy_ratchet: true    # monotone non-increasing, floored at q_target (CLAUDE.md 6.2)
+  homotopy_beta_max: 0.02   # hard cap on the per-update ask. A bare min(thresh_prev, .) is
+                            # monotone but decouples the demand from feasibility: if C_now
+                            # rises, thresh_prev sits far more than beta below it and the ask
+                            # silently grows past what the trust region can deliver -- the
+                            # original bug arriving slowly. This keeps the ratchet reachable.
+  homotopy_cnow_ema: 0.01   # smooth C_now (~100-update horizon) before the ratchet, so one
+                            # noisy batch cannot lock the threshold onto a level never occupied
+
+  # -- Measured q_target (the homotopy floor)
+  # q_target = cost_lim * EMA[C_now] / EMA[J_c], so C_now/q_target ~= J_c/cost_lim: the Q-space
+  # overshoot equals the episodic overshoot. The analytic scale (0.1 -> 2.50) instead reads
+  # C_now = 2.12 as already satisfied, which is why lambda sat at 0 in the baseline arms; the
+  # static measured scale (0.0764 -> 1.91) fixes the units but leaves the critic's level bias
+  # (Q_c(s0) 2.12 vs MC G_c(s0) 3.55), giving a ratio of 1.11 against a true 1.86.
+  qc_target_ema: true
+  qc_target_ema_horizon: 200    # updates, for the Q_c numerator
+  # qc_target_jc_ema: left unset on purpose. The two EMAs tick in different clocks -- C_now
+  # once per gradient update, J_c once per update() call -- so a hand-set weight silently
+  # mismatches the horizons, and q_target then moves for a reason that is not the policy.
+  # Unset, it is derived as num_updates_per_step / qc_target_ema_horizon.
+  qc_target_warmup_reports: 10  # fall back to the static threshold until this many reports
+  qc_target_max_rise: 0.01      # cap q_target's fractional rise per update; falls unclamped,
+                                # since a tightening target is the intended direction
+  qc_target_min_frac: 0.1       # clamp band on q_target, as a fraction of the static threshold
+  qc_target_max_frac: 10.0
+
+  # -- Diagnostics
+  feasibility_probe_interval: 1  # bisect the KL-bounded floor of E_q[Q_c] every update
+
+  # Graded-lambda controller instead of the per-batch joint dual solve. The joint solve is
+  # bang-bang (lambda snaps to a bound) once the sampled action set can't reach the threshold;
+  # the graded controller integrates the violation for a stable, regulating multiplier.
+  # See codex/cvpo-negative-result.md.
+  lambda_mode: grad         # "grad" (recommended) or "dual" (original per-batch joint SLSQP)
+  lambda_lr: 0.03           # step size for the graded-lambda controller
+  lambda_max: 4.0           # sized from measured E-step scale: median std_a(Q_r)/std_a(Q_c) = 0.78,
+                            # so lambda~0.8 balances reward and cost in the exponent; 100 made cost 128x reward.
+
+policy:
+  class_name: SafeSACActorCritic
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  log_std_min: -20
+  log_std_max: 2
+  num_costs: 1
+  cost_critic_nonneg: true
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step targets for BOTH reward and cost critics
+  experiment_name: safety_gymnasium_cvpo_homotopy
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

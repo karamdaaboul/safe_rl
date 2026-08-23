@@ -1,0 +1,127 @@
+# DIAGNOSTIC ONLY - not a research arm, do not report numbers from it.
+#
+# Question: does the diffusion arm's cost-signal action spread (std_qc) develop like the Gaussian
+# arms' once the E-step reads the ONLINE cost critic instead of the lagging target?
+#
+# Measured across arms at iterations 1k/2k/3k, std_qc grows 5-6x in every Gaussian arm
+# (0.031 -> 0.19) and SHRINKS in the diffusion arm (6.3e-4 -> 3.8e-4). But the diffusion config
+# inherited `estep_use_target_critic: true` from safety_gymnasium_mpo_dime.yaml while every arm it
+# was compared against leaves it default(false) -- so std_qc was being read off a target network
+# lagging ~200 updates on a critic still climbing steeply. That makes the comparison apples-to-
+# oranges. This run removes that one difference and nothing else.
+#
+# Decision rule, fixed in advance: if std_qc reaches the Gaussian arms' 1k-2k range (>~0.03) and is
+# TRENDING UP by iteration 2500, the 8h diffusion arm is worth launching. If it stays orders of
+# magnitude below, the arm has a real cost-critic pathology and the 8h run would be wasted.
+algorithm:
+  class_name: FHDCMPODIME
+  gamma: 0.99
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+  sample_action_num: 20
+  dual_constraint: 0.1
+  estep_use_target_critic: false
+  estep_q_reduction: mean
+  kl_path_constraint: 0.05
+  alpha_path_scale: 1.0
+  alpha_path_max: 100.0
+  kl_form: simplified
+  mstep_iteration_num: 5
+  cost_limits:
+  - 25.0
+  cost_horizon: 1000
+  qc_thres: 25.0
+  qc_thres_adapt: false
+  fh_risk_mode: mean
+  fh_alpha: 0.9
+  fh_kappa: 1.0
+  fh_kappa_warmup: 5000
+  fh_kappa_ramp: 15000
+  lambda_source: episodic
+  lambda_mode: grad
+  lambda_update: pid
+  lambda_kp: 0.12
+  lambda_kd: 0.5
+  lambda_anti_windup: true
+  lambda_init: 0.0
+  lambda_episodic_warmup: 5
+  lambda_lr: 0.05
+  lambda_max: 1.8
+  cost_critic_lr: 0.0003
+policy:
+  class_name: SafeMPODIMEActorCritic
+  critic_type: standard
+  critic_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+  diffusion:
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: false
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 256
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-08
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  num_costs: 1
+  num_cost_critics: 1
+  cost_critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: true
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims:
+      - 256
+      - 256
+      activation: relu
+env:
+  kwargs:
+    horizon_feature: true
+    budget_feature: false
+runner:
+  num_steps_per_env: 4
+  max_iterations: 2500
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 2500
+  empirical_normalization: false
+  n_step: 10
+  experiment_name: safety_gymnasium_fhdcmpo_dime_diag
+  run_name: ''
+  logger: tensorboard
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 250
+runner_class_name: OffPolicyRunner
+seed: 1

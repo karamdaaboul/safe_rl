@@ -174,18 +174,3 @@ class RandomNetworkDistillation(nn.Module):
     Different weight schedules.
     """
 
-    def _constant_weight_schedule(self, step: int, **kwargs):
-        return self.initial_weight
-
-    def _step_weight_schedule(self, step: int, final_step: int, final_value: float, **kwargs):
-        return self.initial_weight if step < final_step else final_value
-
-    def _linear_weight_schedule(self, step: int, initial_step: int, final_step: int, final_value: float, **kwargs):
-        if step < initial_step:
-            return self.initial_weight
-        elif step > final_step:
-            return final_value
-        else:
-            return self.initial_weight + (final_value - self.initial_weight) * (step - initial_step) / (
-                final_step - initial_step
-            )

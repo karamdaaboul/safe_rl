@@ -1,0 +1,156 @@
+# ===========================================================================
+# REPPO-DIME on Mjlab-Lift-Cube-Yam-Grasp, matched to the Gaussian v26 config.
+#
+# WHY NOW: the Gaussian arm only became a usable baseline once its action range
+# was widened. v25 (tanh capped at |a| <= 1) recorded Episode_Reward/grasp
+# 0.0000 across 300 iterations, twice. v26 (action_scale 5.0, reward_scale 5.0)
+# reached grasp 0.868 / episode_success 0.548 by iteration 299 and 0.54-0.75 on
+# resume, i.e. around PPO's 0.6806. The measured reason: PPO's solution uses arm
+# actions up to |7| and a gripper action of -5.06, so it simply does not exist
+# inside [-1, 1]; REPPO v25's cap bound on dims 1 and 3 for 57% and 67% of steps.
+#
+# DIME hard-coded TanhTransform() -> (-1, 1) at all three sampler sites, so it
+# could not have run "the same config" as v26 at all. safe_rl/networks/dime/
+# models.py now takes action_scale, applying a = s*tanh(x) and the exact
+# +num_actions*log(s) correction to every pseudo-log-prob (log|da/dx| =
+# n*log(s) + sum_i log(1 - tanh(x_i)^2)). Default stays 1.0, so
+# tests/test_dime_reference_parity.py remains bit-identical to the authors' code.
+#
+# CHANGES vs config/mjlab_liftcube_grasp_reppodime.yaml:
+#   policy.action_scale     1.0 (implicit) -> 5.0   [identical to Gaussian v26]
+#   algorithm.reward_scale  10.0 -> 5.0             [identical to Gaussian v26]
+#   runner.max_iterations   300 -> 700              [v26 needed ~260 iterations
+#       before episode_success left zero at all, then went 0 -> 0.55 in ~40. A
+#       300-iteration budget would truncate DIME mid-takeoff exactly as it
+#       truncated v26, and the two arms must get the same budget: the Gaussian
+#       total is 299 + 400 = 699.]
+#
+# Everything else is DIME's own calibration and is deliberately UNCHANGED:
+# target_entropy -4.0 (a path-ELBO quantity, not Gaussian differential entropy),
+# desired_kl 0.1, kl_action_rep 1, init_alpha_temp 0.01. REPPO's `_entropy_shift`
+# adds the matching n*log(5) to target_entropy automatically, so it must NOT be
+# re-tuned by hand here.
+# ===========================================================================
+
+# REPPO-DIME on Mjlab-Lift-Cube-Yam-GRASP -- the decisive control for the v24
+# manipulation failure.
+#
+# WHY THIS FILE EXISTS: the earlier DIME lift-cube run used the BASE
+# `Mjlab-Lift-Cube-Yam` task, which has NO grasp reward term at all (its rewards
+# are lift / lift_precise / action_rate_l / joint_pos_limits / joint_vel_hinge).
+# The documented Gaussian failure -- and PPO's 0.919 -- are on the `-Grasp`
+# variant, which DOES carry `Episode_Reward/grasp`. Comparing the two was an
+# error; this config runs the same task the baseline ran.
+#
+# BASELINE TO BEAT (codex/reppo-v24-manipulation-analysis.md sec.8, 1024 envs):
+#   PPO      33,600 per-env steps: grasp 0.9191, success 0.6806, reward 77.1
+#   REPPO v25 38,400 per-env steps: grasp 0.0000, success 0.0000, reward 19.2
+#   -- 0.0000 was the ONLY value REPPO's grasp ever took, over 39.3M env steps.
+#
+# THE HYPOTHESIS THIS TESTS: sec.8 names tanh saturation on the gripper action as
+# the leading mechanism -- the actor's pre-tanh gripper mean sits so deep in
+# saturation that closing needs a ~6-sigma excursion, so no grasp ever occurs, so
+# the critic never learns closing pays, so dQ/d(gripper) stays ~0. A diffusion
+# policy has no single pre-tanh mean and measured only 2.5% action saturation on
+# this task family, so if saturation is the binding constraint DIME should break
+# the circle. If DIME also never grasps, the constraint is elsewhere.
+#
+# MATCHED to the v25 baseline: task, 1024 envs, 128 steps/env, 300 iterations
+# (38,400 per-env steps), reward_scale 10, critic support [-40,100]/281 atoms.
+# NOT matched (policy-class-specific, kept at reference/paper defaults):
+# desired_kl 0.1 (path-space KL, different scale from the Gaussian's 0.03),
+# target_entropy -4.0 and init_alpha_temp 0.01 (ELBO pseudo-entropy scale).
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: REPPODIME
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  kl_action_rep: 1
+  dime_kl_mode: forward
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -4.0
+  dual_optim_mode: actor
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas:
+  - 0.9
+  - 0.999
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  aux_loss_mult: 1.0
+  reward_scale: 5.0               # v26-matched: was 10.0
+  num_learning_epochs: 4
+  num_mini_batches: 128
+policy:
+  class_name: DIMEActorCritic
+  action_scale: 5.0               # v26-matched: was 1.0 (implicit)
+  critic_type: reference
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  diffusion:
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: true
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 512
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-08
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  critic_kwargs:
+    # v27: WIDENED FLOOR. v26 collapsed at iteration ~175 after reaching
+    # Episode_Reward/grasp 0.6587 by iteration 100 -- far faster than the Gaussian,
+    # which was still at exactly 0.0000 until ~260. At the collapse the diagnostics
+    # read frac_targets_clipped 0.4250 with returns_mean -40.66 against v_min -40.0:
+    # the returns ran off the BOTTOM of the support and pinned there. Once ~42% of
+    # targets clip, the critic can no longer rank actions and the actor follows a
+    # broken gradient -- grasp went 0.6529 -> 0.0000 between iterations 175 and 200
+    # and never recovered over the next 190.
+    #
+    # v_min -100 gives the negative transient room to be represented instead of
+    # clipped. num_atoms 401 keeps the bin width at 200/401 = 0.50, matching v26's
+    # 140/281 = 0.50 so resolution is unchanged -- only the range grows.
+    # v_max 100 is retained: the Gaussian v26 reaches reward 67/1000 steps
+    # -> 0.335/step after reward_scale 5 -> discounted return ~33, well inside it.
+    num_atoms: 401
+    v_min: -100.0
+    v_max: 100.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+runner:
+  num_steps_per_env: 128
+  max_iterations: 700             # v26-matched budget (299+400)
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_liftcube_grasp_reppodime_v26
+  run_name: 'liftcube_grasp_reppodime_v27_support'
+  wandb_tags: ['liftcube-grasp', 'reppo-dime', 'v27', 'action_scale5', 'reward_scale5', 'support-fix']
+  logger: wandb
+  wandb_project: mjlab

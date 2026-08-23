@@ -9,7 +9,7 @@ from torch import nn
 class EmpiricalNormalization(nn.Module):
     """Normalize mean and variance of values based on empirical values."""
 
-    def __init__(self, shape, eps=1e-2, until=None, eps_mode="add_std"):
+    def __init__(self, shape, eps=1e-2, until=None, eps_mode="add_std", clip=None):
         """Initialize EmpiricalNormalization module.
 
         Args:
@@ -24,13 +24,19 @@ class EmpiricalNormalization(nn.Module):
                 divides by ~0.10 — add_std amplifies such channels ~5x harder,
                 turning numerically-tiny variations (contact flags, gravity
                 components, command dims) into high-magnitude network inputs.
+            clip (float or None): Clamp the normalized output to ``[-clip, clip]``.
+                Guards against a near-constant channel dividing by a near-zero early
+                std. ``None`` (default) leaves it unclamped.
         """
         super().__init__()
         if eps_mode not in ("add_std", "add_var"):
             raise ValueError(f"eps_mode must be 'add_std' or 'add_var'; got {eps_mode!r}")
+        if clip is not None and clip <= 0:
+            raise ValueError(f"clip must be positive or None; got {clip!r}")
         self.eps = eps
         self.eps_mode = eps_mode
         self.until = until
+        self.clip = clip
         self.register_buffer("_mean", torch.zeros(shape).unsqueeze(0))
         self.register_buffer("_var", torch.ones(shape).unsqueeze(0))
         self.register_buffer("_std", torch.ones(shape).unsqueeze(0))
@@ -56,9 +62,17 @@ class EmpiricalNormalization(nn.Module):
 
         if self.training:
             self.update(x)
+        return self.normalize(x)
+
+    def normalize(self, x):
+        """Apply the current statistics without updating them."""
         if self.eps_mode == "add_var":
-            return (x - self._mean) / self._std
-        return (x - self._mean) / (self._std + self.eps)
+            normalized = (x - self._mean) / self._std
+        else:
+            normalized = (x - self._mean) / (self._std + self.eps)
+        if self.clip is None:
+            return normalized
+        return normalized.clamp(-self.clip, self.clip)
 
     @torch.jit.unused
     def update(self, x):

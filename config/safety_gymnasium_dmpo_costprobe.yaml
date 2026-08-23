@@ -11,6 +11,13 @@
 # near-constant: calibration slope 0.094 over a true range of 0-38).
 # Support [-5, 15]: SafetyPointGoal1 converges near reward ~27/episode (per-step ~0.027,
 # gamma 0.99 -> Q ~ 2.7), so ~5x headroom against HL-Gauss edge clipping.
+#
+# RUN WITH --deterministic. The categorical critics accumulate probability mass with
+# index_add_, which uses CUDA atomicAdd: without the flag, three runs with the SAME seed on
+# the SAME GPU shared 0 of 8 log blocks and were 9.8 reward apart by 7k. With it, five runs
+# were bit-identical over 8k. Costs ~20% wall-clock. See safe_rl/utils/seeding.py.
+#
+
 algorithm:
   class_name: CVPO
   # -- Discount and target update

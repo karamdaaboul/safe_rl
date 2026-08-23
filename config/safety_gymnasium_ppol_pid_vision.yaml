@@ -44,7 +44,7 @@ algorithm:
   symmetry_cfg: null
 
 policy:
-  class_name: ActorCritic
+  class_name: ActorCriticCost
   actor_type: gaussian
   critic_type: standard
   actor_kwargs:

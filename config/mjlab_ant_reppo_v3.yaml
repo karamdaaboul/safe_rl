@@ -1,0 +1,74 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO v3 for mjlab Ant-Flat — reference-faithful + SimbaV2.
+#
+# v1/v2 deviated from the published REPPO (arXiv:2507.11019) in ways that made
+# it noisier and slower than the PPO baseline. v3 restores the reference design:
+#   - state-dependent std (StochasticActor) with tanh-bounded log_std
+#     [log 0.05, log 2.0] and an additive min_std floor of 0.05
+#     (reference: std = exp(log_std) + min_std)
+#   - SimbaV2 hyperspherical networks for actor AND critic (the paper's
+#     architecture; safe_rl/networks/simba.py is a faithful port)
+#   - single critic, no twin-min pessimism (actor_q_reduction: q1)
+#   - NO target networks — online bootstrap (use_target_networks: false)
+#   - self-predictive aux loss: critic features of (s,a) -> sg[features(s',a')]
+#     (aux_loss_mult, as in the reference critic update)
+# Budget identical to v1/v2 and the PPO baseline (1024 envs x 64 steps x 1500).
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL constraint
+  desired_kl: 0.1
+  # -- learned dual variables
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: 0.0     # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- reference-faithful REPPO components
+  aux_loss_mult: 1.0
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic          # state-dependent std (reference REPPO)
+  critic_type: distributional
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.05                   # additive floor: std = exp(log_std) + min_std
+  actor_kwargs:
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 128
+      num_blocks: 1
+    log_std_squash: tanh
+    log_std_min: -3.0             # std in [~0.05, ~2.0] before the floor
+    log_std_max: 0.7
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -20.0
+    v_max: 100.0
+    network_type: simba
+    network_kwargs:
+      hidden_dim: 512
+      num_blocks: 2
+
+runner:
+  num_steps_per_env: 64
+  max_iterations: 1500
+  empirical_normalization: false
+  save_interval: 250
+  experiment_name: mjlab_ant_reppo_v3
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

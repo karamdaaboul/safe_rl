@@ -1,0 +1,97 @@
+# RCPPO: Reachability-Constrained PPO (RCRL-style, Yu et al. ICML 2022).
+# The cost critic learns the HJ reachability value V_h(s) = worst future constraint
+# violation (max-backup) instead of the discounted cost sum; the PID Lagrangian
+# regulates the state-wise level E[V_h] toward the feasibility threshold epsilon
+# given by cost_limits (NOT an episodic cost budget — keep it near 0).
+algorithm:
+  class_name: RCPPO
+  # training parameters (mirrors safety_gymnasium_ppol_pid.yaml)
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.02
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 40.0
+  learning_rate: 0.0003
+  num_learning_epochs: 40
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # Reachability parameters
+  gamma_h: 0.99          # discount of the max-backup (contraction; close to 1)
+  cost_margin: 0.0       # h(s) = cost - margin, clamped >= 0
+  cost_limits: [0.1]     # feasibility threshold epsilon on E[V_h]; 0.0 = strict (lambda may blow up early)
+
+  # Q_h(s, a) head for the runtime safety filter (requires policy ActorCriticReachQ)
+  train_reach_q: true
+  reach_q_lr: 0.001
+  reach_q_loss_coef: 1.0
+
+  # PID Lagrangian on E[V_h] (P-lighter/D-heavier than the episodic-budget default,
+  # since the per-state level moves faster than an episodic sum)
+  lagrangian_pid: [0.05, 0.005, 0.1]  # [Kp, Ki, Kd]
+  lambda_init: [0.001]
+  lambda_max: 100.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # Cost critic loss (clipping is forced off for max-backup targets)
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+
+  # Disable extra features by default
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCriticReachQ
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 256]
+    activation: elu
+  reach_critic_kwargs:
+    hidden_dims: [256, 256, 256]
+    activation: elu
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 500
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: safety_gymnasium_rcppo_filter
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# Runtime least-restrictive safety filter driven by the learned Q_h head:
+# actions whose predicted reachability value exceeds `threshold` are replaced
+# ("switch") or blended ("blend") with the safest of `num_candidates` sampled actions.
+reach_filter:
+  enabled: true
+  threshold: 0.1        # matches cost_limits epsilon
+  num_candidates: 16
+  mode: switch          # switch | blend
+  blend_temp: 0.5
+  perturb_std: 0.4

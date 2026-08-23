@@ -385,6 +385,24 @@ class StochasticActor(nn.Module):
         x = dist.rsample()
         return self.action_b + self.action_c * torch.tanh(x)
 
+    def log_prob(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Log density of GIVEN squashed actions under the current policy, [batch, 1].
+
+        Exact inverse of :meth:`sample`'s change of variables: recover the pre-squash
+        Gaussian variable ``x = atanh((a - b)/c)`` and apply the same tanh-Jacobian and
+        per-joint scale terms. The unit action is clamped to ``1 - 1e-6`` before the
+        atanh so replayed actions that sit exactly on the boundary stay finite -- the
+        same guard the SAC literature applies on the log-prob side.
+        """
+        mean, log_std = self.forward(obs)
+        unit = (actions - self.action_b) / self.action_c.clamp_min(1e-8)
+        x = torch.atanh(unit.clamp(-1.0 + 1e-6, 1.0 - 1e-6))
+        dist = Normal(mean, log_std.exp())
+        log_prob = dist.log_prob(x).sum(dim=-1, keepdim=True)
+        log_prob -= (2 * (math.log(2.0) - x - nn.functional.softplus(-2 * x))).sum(dim=-1, keepdim=True)
+        log_prob += self.neg_log_action_scale
+        return log_prob
+
     def as_onnx(self, pre_normalizer: nn.Module | None = None, actor_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
         """Return an ONNX-exportable wrapper: pre_normalizer → actor_normalizer → backbone → tanh(mean)."""
         return _OnnxStochasticActor(self, pre_normalizer, actor_normalizer, verbose)

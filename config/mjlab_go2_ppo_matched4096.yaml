@@ -1,0 +1,68 @@
+# PPO on Unitree-Go2-Flat, matched to REPPO v34 on EVERY batching axis.
+#
+#   num_envs 4096 | num_steps_per_env 64 | max_iterations 200
+#   = 52,428,800 env steps -- identical to v34 @200, the arm it is compared against.
+#
+# Previous budget-matched PPO matched only the TOTAL (1024 x 24 x 1600). That
+# left two confounds against v34's 4096 x 64: different parallelism and a
+# different rollout length per update, so "PPO 0.263 vs v34 0.248" was not a
+# clean comparison. This config removes both.
+#
+# What this changes for PPO, stated plainly: its tuned baseline used 24 steps
+# per env, so the per-update batch grows 4096*24 = 98,304 -> 4096*64 = 262,144,
+# and with num_mini_batches 4 the minibatch goes 24,576 -> 65,536. Iterations
+# drop to 150, so PPO gets 150 x 5 x 4 = 3,000 gradient updates. That is a real
+# departure from PPO's tuned regime -- it is the price of matching the batching
+# axes, and it should be read as "PPO under REPPO's data layout", not as PPO at
+# its best. Its own 196M-step baseline (0.215 scripted) remains the reference
+# for what a well-tuned PPO reaches on this task.
+#
+# algorithm/ policy blocks are verbatim from the mjlab task-tuned PPO.
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: PPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+  rnd_cfg: null
+  symmetry_cfg: null
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims:
+    - 512
+    - 256
+    - 128
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims:
+    - 512
+    - 256
+    - 128
+    activation: elu
+runner:
+  num_steps_per_env: 64
+  max_iterations: 200
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: mjlab_go2_ppo_matched4096
+  run_name: ''
+  logger: tensorboard
+  wandb_project: mjlab

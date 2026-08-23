@@ -172,11 +172,6 @@ def main() -> None:
         help="Safety-Gymnasium camera.",
     )
     parser.add_argument(
-        "--hidden_goal",
-        action="store_true",
-        help="Wrap env with HiddenGoalWrapper (masks goal_lidar from observations).",
-    )
-    parser.add_argument(
         "--debug_env",
         action="store_true",
         help=(
@@ -196,10 +191,6 @@ def main() -> None:
         render_mode="human",
         camera_name=args.camera_name,
     )
-    if args.hidden_goal:
-        from safe_rl.envs.hidden_goal_wrapper import HiddenGoalWrapper
-
-        env = HiddenGoalWrapper(env)
 
     task = get_task(env)
     agent = task.agent

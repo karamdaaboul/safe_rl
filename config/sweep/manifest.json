@@ -1,0 +1,230 @@
+{
+  "generated": "20260822",
+  "iters": 60000,
+  "runs": [
+    {
+      "name": "pointgoal2_a2_s2",
+      "arm": "a2",
+      "env_slug": "pointgoal2",
+      "env_id": "SafetyPointGoal2-v0",
+      "seed": 2,
+      "config": "config/sweep/pointgoal2_a2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointgoal2_c2_s2",
+      "arm": "c2",
+      "env_slug": "pointgoal2",
+      "env_id": "SafetyPointGoal2-v0",
+      "seed": 2,
+      "config": "config/sweep/pointgoal2_c2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "cargoal1_a2_s2",
+      "arm": "a2",
+      "env_slug": "cargoal1",
+      "env_id": "SafetyCarGoal1-v0",
+      "seed": 2,
+      "config": "config/sweep/cargoal1_a2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "cargoal1_c2_s2",
+      "arm": "c2",
+      "env_slug": "cargoal1",
+      "env_id": "SafetyCarGoal1-v0",
+      "seed": 2,
+      "config": "config/sweep/cargoal1_c2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointbutton1_a2_s2",
+      "arm": "a2",
+      "env_slug": "pointbutton1",
+      "env_id": "SafetyPointButton1-v0",
+      "seed": 2,
+      "config": "config/sweep/pointbutton1_a2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointbutton1_c2_s2",
+      "arm": "c2",
+      "env_slug": "pointbutton1",
+      "env_id": "SafetyPointButton1-v0",
+      "seed": 2,
+      "config": "config/sweep/pointbutton1_c2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointpush1_a2_s2",
+      "arm": "a2",
+      "env_slug": "pointpush1",
+      "env_id": "SafetyPointPush1-v0",
+      "seed": 2,
+      "config": "config/sweep/pointpush1_a2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointpush1_c2_s2",
+      "arm": "c2",
+      "env_slug": "pointpush1",
+      "env_id": "SafetyPointPush1-v0",
+      "seed": 2,
+      "config": "config/sweep/pointpush1_c2_s2.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointgoal2_a2_s3",
+      "arm": "a2",
+      "env_slug": "pointgoal2",
+      "env_id": "SafetyPointGoal2-v0",
+      "seed": 3,
+      "config": "config/sweep/pointgoal2_a2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointgoal2_c2_s3",
+      "arm": "c2",
+      "env_slug": "pointgoal2",
+      "env_id": "SafetyPointGoal2-v0",
+      "seed": 3,
+      "config": "config/sweep/pointgoal2_c2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointgoal2_a2_s4",
+      "arm": "a2",
+      "env_slug": "pointgoal2",
+      "env_id": "SafetyPointGoal2-v0",
+      "seed": 4,
+      "config": "config/sweep/pointgoal2_a2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointgoal2_c2_s4",
+      "arm": "c2",
+      "env_slug": "pointgoal2",
+      "env_id": "SafetyPointGoal2-v0",
+      "seed": 4,
+      "config": "config/sweep/pointgoal2_c2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "cargoal1_a2_s3",
+      "arm": "a2",
+      "env_slug": "cargoal1",
+      "env_id": "SafetyCarGoal1-v0",
+      "seed": 3,
+      "config": "config/sweep/cargoal1_a2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "cargoal1_c2_s3",
+      "arm": "c2",
+      "env_slug": "cargoal1",
+      "env_id": "SafetyCarGoal1-v0",
+      "seed": 3,
+      "config": "config/sweep/cargoal1_c2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "cargoal1_a2_s4",
+      "arm": "a2",
+      "env_slug": "cargoal1",
+      "env_id": "SafetyCarGoal1-v0",
+      "seed": 4,
+      "config": "config/sweep/cargoal1_a2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "cargoal1_c2_s4",
+      "arm": "c2",
+      "env_slug": "cargoal1",
+      "env_id": "SafetyCarGoal1-v0",
+      "seed": 4,
+      "config": "config/sweep/cargoal1_c2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointbutton1_a2_s3",
+      "arm": "a2",
+      "env_slug": "pointbutton1",
+      "env_id": "SafetyPointButton1-v0",
+      "seed": 3,
+      "config": "config/sweep/pointbutton1_a2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointbutton1_c2_s3",
+      "arm": "c2",
+      "env_slug": "pointbutton1",
+      "env_id": "SafetyPointButton1-v0",
+      "seed": 3,
+      "config": "config/sweep/pointbutton1_c2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointbutton1_a2_s4",
+      "arm": "a2",
+      "env_slug": "pointbutton1",
+      "env_id": "SafetyPointButton1-v0",
+      "seed": 4,
+      "config": "config/sweep/pointbutton1_a2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointbutton1_c2_s4",
+      "arm": "c2",
+      "env_slug": "pointbutton1",
+      "env_id": "SafetyPointButton1-v0",
+      "seed": 4,
+      "config": "config/sweep/pointbutton1_c2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointpush1_a2_s3",
+      "arm": "a2",
+      "env_slug": "pointpush1",
+      "env_id": "SafetyPointPush1-v0",
+      "seed": 3,
+      "config": "config/sweep/pointpush1_a2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointpush1_c2_s3",
+      "arm": "c2",
+      "env_slug": "pointpush1",
+      "env_id": "SafetyPointPush1-v0",
+      "seed": 3,
+      "config": "config/sweep/pointpush1_c2_s3.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointpush1_a2_s4",
+      "arm": "a2",
+      "env_slug": "pointpush1",
+      "env_id": "SafetyPointPush1-v0",
+      "seed": 4,
+      "config": "config/sweep/pointpush1_a2_s4.yaml",
+      "queued": true
+    },
+    {
+      "name": "pointpush1_c2_s4",
+      "arm": "c2",
+      "env_slug": "pointpush1",
+      "env_id": "SafetyPointPush1-v0",
+      "seed": 4,
+      "config": "config/sweep/pointpush1_c2_s4.yaml",
+      "queued": true
+    }
+  ],
+  "skipped_have_already": [
+    "pointgoal1_a2_s2",
+    "pointgoal1_a2_s3",
+    "pointgoal1_a2_s4",
+    "pointgoal1_c2_s2",
+    "pointgoal1_c2_s3",
+    "pointgoal1_c2_s4"
+  ]
+}

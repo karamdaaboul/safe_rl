@@ -1,0 +1,99 @@
+# MPO-DIME — MPO with a DIME/TruDi diffusion actor (path-space M-step).
+# Same off-policy EM skeleton as config/safety_gymnasium_mpo.yaml: SAC twin critics +
+# replay buffer, E-step = convex temperature dual over exp(Q/eta) weights. The Gaussian
+# weighted-MLE M-step is replaced by a weighted PATH log-likelihood of the target
+# actor's SDE trajectories, and the decoupled mean/cov KL pair by a single path-space
+# KL(pi_old || pi_theta) budget (sum of per-step Gaussian transition KLs).
+
+algorithm:
+  class_name: MPODIME
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+
+  # -- MPO E-step (identical machinery to MPO)
+  # Each candidate costs diff_steps sequential control-net forwards, so the E-step
+  # bill is N * T forwards at batch N*256; 20 (Acme's value) instead of 64 keeps it sane.
+  sample_action_num: 20
+  dual_constraint: 0.1
+  estep_use_target_critic: true
+  estep_q_reduction: mean
+
+  # -- M-step (path-space)
+  # Single scalar KL budget over the whole denoising chain. REPPODIME's desired_kl is
+  # 0.1 against a hard-synced anchor; the Polyak-averaged target here moves slower, so
+  # the per-update budget is tighter.
+  kl_path_constraint: 0.05
+  alpha_path_scale: 1.0
+  alpha_path_max: 100.0
+  # "simplified" = squared mean-difference over 2*sigma_old^2 (reference-exact form).
+  # REQUIRED if diffusion.learn_friction or learn_dt is true: "full" — the simplified
+  # form does not constrain the transition-noise scale (noise-collapse risk).
+  kl_form: simplified
+  mstep_iteration_num: 5
+
+policy:
+  class_name: MPODIMEActorCritic
+  critic_type: standard      # SAC twin critics (the MPO contract), not REPPO's
+  critic_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+  diffusion:                 # reference reppo_dime block; v0 freezes all SDE parameters
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: false    # v0: frozen so sigma_k is theta-independent and the
+    learn_dt: false          #     simplified KL is exact; flip on only with kl_form: full
+    per_step_dt: false
+    learn_prior: false       # MPODIME rejects true (path-MLE drops the prior term)
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 256           # 512 in the mjlab reference; 256 matches the MPO nets here
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-8    # fresh policy == prior SDE -> kl_path starts at exactly 0
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  experiment_name: safety_gymnasium_mpo_dime
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

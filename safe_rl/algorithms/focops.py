@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import List, Optional
 
-from safe_rl.modules import ActorCritic
+from safe_rl.modules import ActorCriticCost
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -20,7 +20,7 @@ class FOCOPS:
     Lagrange multiplier ν updated by gradient ascent on the cost-violation.
     """
 
-    policy: ActorCritic
+    policy: ActorCriticCost
 
     def __init__(
         self,
@@ -341,7 +341,7 @@ class FOCOPS:
                 l2_term = torch.tensor(0.0, device=self.device)
                 for param in self.policy.critic.parameters():
                     l2_term = l2_term + param.pow(2).sum()
-                if hasattr(self.policy, "cost_critic"):
+                if getattr(self.policy, "cost_critic", None) is not None:
                     for param in self.policy.cost_critic.parameters():
                         l2_term = l2_term + param.pow(2).sum()
                 total_loss = total_loss + self.l2_reg * l2_term
@@ -411,8 +411,8 @@ class FOCOPS:
                 offset += numel
 
     def _validate_and_fix_cost_critic(self):
-        if not hasattr(self.policy, "cost_critic"):
-            raise ValueError("ActorCritic must have a cost_critic attribute for FOCOPS algorithm")
+        if getattr(self.policy, "cost_critic", None) is None:
+            raise ValueError("FOCOPS requires a policy with a cost_critic; use ActorCriticCost")
 
         last_layer = None
         for module in reversed(list(self.policy.cost_critic.modules())):
@@ -426,5 +426,5 @@ class FOCOPS:
         current_outputs = last_layer.out_features
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but FOCOPS expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
-            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with the num_costs parameter.")
+            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")

@@ -1,0 +1,102 @@
+# REPPO-DIME on mjlab Humanoid-Flat — the paper's OWN headline task.
+#
+# TruDi Table 2 (Humanoid, 50M steps): PPO 0.1+-3.7, REPPO 29.6+-7.2,
+# DIME 15.6+-9.4, TruDi 34.8+-3.0 -- i.e. TruDi ~1.18x REPPO. Running our port
+# here tests the +26.5% Ant win on a second task, on the exact domain the paper
+# reports, against a Gaussian baseline we already own (v24: 99.2 det @4096 envs,
+# ckpt iter100 -- note different env count, so re-measure same-protocol).
+#
+# MATCHED to config/mjlab_humanoid_reppo_v24.yaml where the TASK dictates it:
+#   critic support [-25, 300] / 541 atoms (Humanoid returns are much larger than
+#   Ant's -- using Ant's [-20,150]/301 would clip badly), reward_scale 10,
+#   128 steps/env, 381 iterations (1024 x 128 x 381 = 50M steps).
+# DIME-native where the POLICY CLASS dictates it (path-space KL scale, ELBO
+#   pseudo-entropy scale): desired_kl 0.1, target_entropy -4.0,
+#   init_alpha_temp/kl 0.01, kl_action_rep 1, dime_kl_mode forward.
+# compile_score_net: true -- validated state_dict-safe; big win when the update
+#   dominates wall-clock.
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: REPPODIME
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.1
+  kl_clip_mode: clipped
+  kl_action_rep: 1
+  dime_kl_mode: forward
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: -4.0
+  dual_optim_mode: actor
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas:
+  - 0.9
+  - 0.999
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  aux_loss_mult: 1.0
+  reward_scale: 10.0
+  num_learning_epochs: 4
+  num_mini_batches: 128
+policy:
+  class_name: DIMEActorCritic
+  critic_type: reference
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  diffusion:
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: true
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 512
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-08
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  critic_kwargs:
+    num_atoms: 541
+    v_min: -25.0
+    v_max: 300.0
+    hidden_dim: 512
+    encoder_layers: 2
+    head_layers: 2
+    pred_layers: 2
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9
+  # compile_score_net MUST stay false on the mjlab path (torch 2.10): mjlab's
+  # configure_torch_backends() sets TF32 through the NEW api on torch>=2.9, while
+  # inductor's pad_mm pass reads the LEGACY getter (torch._C._get_cublas_allow_tf32),
+  # and torch raises "mix of the legacy and new APIs" -> BackendCompilerFailed at
+  # the first compiled forward. Verified 2026-08-06 (run z21hc3wh died before iter 1).
+  # It works fine on the ManiSkill path (different script, torch 2.11).
+  compile_score_net: false
+runner:
+  num_steps_per_env: 128
+  max_iterations: 381
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_humanoid_reppodime
+  run_name: ''
+  logger: wandb
+  wandb_project: mjlab

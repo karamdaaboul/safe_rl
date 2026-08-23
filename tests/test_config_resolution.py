@@ -19,6 +19,7 @@ SAFE_ALGORITHMS = {
     "PCPO",
     "PCRPO",
     "PPOL_PID",
+    "RCPPO",
     "SafeSAC",
 }
 

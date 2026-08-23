@@ -1,0 +1,68 @@
+# PPO on Unitree-Go2-Flat, BUDGET-MATCHED to the REPPO runs.
+#
+# Every REPPO-vs-PPO number so far carried a 5x budget caveat: PPO's baseline
+# (go2_ppo_4096, model_1999) trained 4096 envs x 24 steps x 2000 iters = 196.6M
+# env steps, while every REPPO arm used 1024 x 128 x 300 = 39.3M. This config
+# removes that confound.
+#
+#   1024 envs x 24 steps x 1600 iters = 39,321,600 steps
+#   REPPO:      1024 envs x 128 steps x  300 iters = 39,321,600 steps
+#
+# Env count is matched to REPPO's 1024 as well as the total, so the two see the
+# same data volume AND the same parallelism. Note this differs from the PPO
+# baseline's tuned 4096 envs: per-update batch drops 98304 -> 24576, which is a
+# real change to PPO's regime. The alternative (4096 envs x 400 iters) matches
+# total steps while keeping PPO's tuned batch -- worth running as a second arm
+# if this one underperforms its own 196M baseline by more than the budget alone
+# would explain.
+#
+# Algorithm/policy blocks are verbatim from the mjlab task-tuned PPO used for
+# the 196M baseline, so the ONLY deliberate differences are env count and iters.
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: PPO                  # stripped from params/agent.yaml by the runner
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.01
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+  rnd_cfg: null
+  symmetry_cfg: null
+policy:
+  class_name: ActorCritic          # stripped from params/agent.yaml by the runner
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims:
+    - 512
+    - 256
+    - 128
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims:
+    - 512
+    - 256
+    - 128
+    activation: elu
+runner:
+  num_steps_per_env: 24
+  max_iterations: 1600
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: mjlab_go2_ppo_budgetmatched
+  run_name: ''
+  logger: tensorboard
+  wandb_project: mjlab

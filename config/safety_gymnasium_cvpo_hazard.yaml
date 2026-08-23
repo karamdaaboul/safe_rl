@@ -1,0 +1,114 @@
+# CVPO — Constrained Variational Policy Optimization (Liu et al., ICML 2022)
+# Off-policy EM safe-RL. Reuses the SafeSAC twin reward critics + cost critic + replay
+# buffer; the actor update is the CVPO E-step (per-batch convex dual over eta, lambda ->
+# non-parametric weights) + M-step (weighted MLE under decoupled mean/cov KL trust regions).
+# Chosen over PID-Lagrangian methods because the cost multiplier is re-solved per batch,
+# avoiding the "wait for the multiplier to catch up" oscillation that pins penalty methods
+# on the reward/cost frontier (see codex/distributional-cost-critic.md).
+
+algorithm:
+  class_name: CVPO
+  # -- Discount and target update
+  gamma: 0.99
+  # Cost-critic fix arm. The 1-step cost target at gamma=0.99 on a sparse binary cost
+  # gives a per-sample learning signal ~36x smaller than the per-sample noise, and the
+  # critic settles into a near-constant, level-deficient solution (measured on the
+  # original arm: calibration slope 0.07 against a true cost-to-go range 0-38, level
+  # ~0.6x Bellman-consistent). n-step targets carry n real cost samples per update and
+  # contract the level error by gamma^n per backup instead of gamma.
+  # NOTE: n_step is a buffer-wide setting, so this changes the REWARD critic's horizon too.
+  # It is read from the `runner:` block below (OffPolicyRunner forwards it into the
+  # algorithm); setting it here under `algorithm:` is silently ignored.
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # matched to the improved arm
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 0.1       # ORIGINAL pre-fix caps (this arm reproduces the old behaviour)
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint
+  cost_limits: [25.0]       # episodic cost limit; can be overridden via --cost_limits
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  # Graded-lambda controller instead of the per-batch joint dual solve. The joint solve is
+  # bang-bang (lambda snaps to a bound) once the sampled action set can't reach qc_thres; the
+  # graded controller integrates the violation for a stable, regulating multiplier.
+  # See codex/cvpo-negative-result.md.
+  lambda_mode: grad         # "grad" (recommended) or "dual" (original per-batch joint SLSQP)
+  lambda_lr: 0.03           # step size for the graded-lambda controller
+  lambda_max: 4.0           # sized from measured E-step scale: median std_a(Q_r)/std_a(Q_c) = 0.78,
+                            # so lambda~0.8 balances reward and cost in the exponent; 100 made cost 128x reward.
+
+  # -- Hazard-stratified replay (this arm's only change vs criticfix_lam4)
+  # Mean per-step cost on SafetyPointGoal1 is 0.034, so ~3.4% of stored transitions carry
+  # any cost at all. The cost critic's Bellman residual measures mean +0.010 against std
+  # 0.356 -- 36:1 against -- and it settles into a near-constant solution (calibration
+  # slope 0.165 against a target of 1.0). Holding the cost critic's batch at 25% hazard is
+  # a ~7x upsample of the informative transitions; per-transition importance weights
+  # (N_c/N)/(B_c/B) restore the uniform-replay objective, so only the estimator variance
+  # changes, not what it converges to. See codex/cvpo-cost-critic-investigation.md.
+  #
+  # The cost critic draws its OWN stratified batch. The reward critic, E-step, eta dual,
+  # lambda controller and M-step keep the uniform batch -- they all take plain means over
+  # the sampled states and a stratified batch would bias eqc, and hence lambda.
+  #
+  # Do not set this to 1.0: the weights are deliberately not normalized to max 1, so an
+  # all-hazard batch would scale every gradient by N_h/N ~ 0.03.
+  #
+  # CAVEAT with n_step: 10 below -- the stratum is "this window STARTS on a hazard". A
+  # window whose cost fires 2 steps in is classified safe despite a positive aggregated
+  # cost, so hazard-containing windows are under-selected by roughly a factor of n.
+  hazard_fraction: 0.25
+
+policy:
+  class_name: SafeSACActorCritic
+  activation: relu
+  actor_hidden_dims: [256, 256]
+  critic_hidden_dims: [256, 256]
+  log_std_min: -20
+  log_std_max: 2
+  num_costs: 1
+  # Cost is non-negative, so Q_c is too; the linear head emitted negatives on 2.2% of
+  # states, concentrated in low-cost ones (3.1% in the lowest MC bin vs 0.2% in the top).
+  cost_critic_nonneg: true
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step targets for BOTH reward and cost critics
+  experiment_name: safety_gymnasium_cvpo_hazard
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

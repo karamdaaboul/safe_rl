@@ -159,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--video", action="store_true", help="Record the first evaluation rollout to mp4.")
     parser.add_argument("--video_length", type=int, default=1000, help="Recorded video length in steps.")
+    parser.add_argument(
+        "--video_res",
+        type=str,
+        default="720p",
+        choices=["480p", "720p", "1080p"],
+        help=(
+            "Recording resolution. VideoRecorder buffers EVERY frame in RAM before "
+            "encoding, so this sets the memory cost directly: 1080p is 6.2 MB/frame "
+            "(6.2 GB for a 1000-step episode), 720p 2.8 GB, 480p 0.9 GB. 1080p renders "
+            "get OOM-killed on this box whenever another job is resident."
+        ),
+    )
     parser.add_argument("--video_dir", type=str, default=None, help="Directory to store recorded evaluation videos.")
     parser.add_argument(
         "--video_decim",
@@ -182,6 +194,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
+    parser.add_argument(
+        "--cmd_script",
+        type=str,
+        default=None,
+        help=(
+            "Drive the velocity command from a fixed script instead of the env's random "
+            "resampling, so different policies are given the IDENTICAL task (the same "
+            "--seed does NOT achieve this: the command RNG interleaves with other "
+            "randomized events). Format: 'STEPS:vx,vy,wz;STEPS:vx,vy,wz;...', e.g. "
+            "'200:1.0,0,0;200:0,0,1.0'. The last segment repeats if the episode is longer."
+        ),
+    )
     parser.add_argument(
         "--dump_traj",
         type=str,
@@ -287,10 +311,12 @@ def main() -> None:
     interactive = not args.headless and not args.video
     env_render_mode = "rgb_array" if args.video else None
     if args.video:
-        # Match the upstream play script's quality knobs, but use a larger default
-        # automatically so evaluation recordings are easier to inspect.
-        env_cfg.viewer.width = 1920
-        env_cfg.viewer.height = 1080
+        # Resolution drives the RAM cost of recording (see --video_res). 720p is the
+        # default: legible for inspection at ~45% of 1080p's frame buffer.
+        _res = {"480p": (640, 480), "720p": (1280, 720), "1080p": (1920, 1080)}[args.video_res]
+        env_cfg.viewer.width, env_cfg.viewer.height = _res
+        print(f"[INFO] recording at {_res[0]}x{_res[1]} "
+              f"(~{_res[0]*_res[1]*3*args.video_length/1e9:.2f} GB of frame buffer)")
 
     # Match training: build a ManagerBasedSafeRlEnv (cost manager active) for
     # cfgs that carry a cost cfg, so eval reports cost/constraint metrics.
@@ -417,6 +443,47 @@ def main() -> None:
         traj_mgr = cmd_mgr
     elif args.dump_traj:
         print("[WARN] --dump_traj: no twist/base_velocity command term; trace disabled.")
+    # Scripted command schedule: expand "STEPS:vx,vy,wz;..." into a per-step table.
+    cmd_script: torch.Tensor | None = None
+    if args.cmd_script:
+        if traj_cmd_term is None:
+            raise ValueError("--cmd_script requires a twist/base_velocity command term.")
+        segments = []
+        for chunk in args.cmd_script.split(";"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            steps_str, vec_str = chunk.split(":")
+            vec = [float(x) for x in vec_str.split(",")]
+            if len(vec) != 3:
+                raise ValueError(f"--cmd_script segment '{chunk}' must give exactly vx,vy,wz")
+            segments.append((int(steps_str), vec))
+        if not segments:
+            raise ValueError("--cmd_script parsed to zero segments")
+        table = []
+        for n_steps, vec in segments:
+            table.extend([vec] * n_steps)
+        cmd_script = torch.tensor(table, dtype=torch.float32, device=runner.device)
+        cmd_term_obj = traj_mgr._terms[traj_cmd_term]
+        if not hasattr(cmd_term_obj, "vel_command_b"):
+            raise ValueError(
+                f"--cmd_script: command term '{traj_cmd_term}' has no vel_command_b buffer to override."
+            )
+        print(f"[INFO] scripted commands: {len(segments)} segments, {len(table)} steps")
+
+    def apply_cmd_script(idx: int) -> None:
+        """Overwrite the command buffer so every policy is given the same task.
+
+        Runs after env.step, so a scheduled change reaches the observation one step
+        late — irrelevant for segments hundreds of steps long, and identical for
+        every policy being compared.
+        """
+        if cmd_script is None:
+            return
+        row = cmd_script[min(idx, len(cmd_script) - 1)]
+        buf = cmd_term_obj.vel_command_b
+        buf[:] = row.to(buf.device)
+
     track_err_sum = torch.zeros(vec_env.num_envs, device=runner.device)
     track_yaw_sum = torch.zeros(vec_env.num_envs, device=runner.device)
     ep_track_err: list[float] = []
@@ -460,17 +527,22 @@ def main() -> None:
 
         if traj_cmd_term is not None:
             with torch.inference_mode():
+                apply_cmd_script(step_idx - 1)
                 cmd_all = traj_mgr.get_command(traj_cmd_term)
                 lin_all = traj_robot.data.root_link_lin_vel_b
                 ang_all = traj_robot.data.root_link_ang_vel_b
                 track_err_sum += torch.norm(cmd_all[:, :2] - lin_all[:, :2], dim=-1).to(runner.device)
                 track_yaw_sum += torch.abs(cmd_all[:, 2] - ang_all[:, 2]).to(runner.device)
                 if args.dump_traj:
+                    # Actions are also recorded, per dimension, so the same trace
+                    # supports action-distribution comparisons across policies.
+                    act0 = actions[0].detach().float().cpu().tolist()
                     traj_rows.append(
                         (
                             float(step_idx),
                             float(cmd_all[0][0]), float(cmd_all[0][1]), float(cmd_all[0][2]),
                             float(lin_all[0][0]), float(lin_all[0][1]), float(ang_all[0][2]),
+                            *[float(a) for a in act0],
                         )
                     )
 
@@ -601,7 +673,10 @@ def main() -> None:
         out_path = Path(args.dump_traj).expanduser().resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w") as handle:
-            handle.write("step,cmd_vx,cmd_vy,cmd_wz,vx,vy,wz\n")
+            n_act = max(len(row) for row in traj_rows) - 7
+            cols = ["step", "cmd_vx", "cmd_vy", "cmd_wz", "vx", "vy", "wz"]
+            cols += [f"a{i}" for i in range(n_act)]
+            handle.write(",".join(cols) + "\n")
             for row in traj_rows:
                 handle.write(",".join(f"{v:.6f}" for v in row) + "\n")
         print(f"[INFO] wrote {len(traj_rows)} trajectory rows to {out_path}")

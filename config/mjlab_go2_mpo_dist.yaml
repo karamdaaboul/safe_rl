@@ -1,0 +1,82 @@
+# DMPO-style MPO on Unitree-Go2-Flat (velocity tracking, D=12 actuators).
+# Derived from the humanoid DMPO config; env-specific numbers taken from the REPPO/PPO
+# Go2 work (config/mjlab_go2_reppo_v24.yaml): gamma 0.99; REPPO measured discounted
+# returns ~46 at reward_scale 10 => unscaled Q ~ 4.6, so C51 support [-5, 20] gives
+# ~4x headroom against HL-Gauss edge clipping. Per-dim KL budgets = joint 0.01 / 1e-4
+# divided by the 12 action dims.
+runner_class_name: OffPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: MPO
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 4
+  max_grad_norm: 1.0
+
+  # -- MPO E-step
+  sample_action_num: 64
+  dual_constraint: 0.1
+  estep_use_target_critic: true    # (4)
+  estep_q_reduction: mean          # (4)
+
+  # -- MPO M-step
+  kl_mean_constraint: 0.00083333    # = 0.01 / 12 Go2 action dims
+  kl_var_constraint: 0.0000083333   # = 1e-4 / 12 Go2 action dims
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 10.0             # (2) 100x the baseline cap
+  alpha_var_max: 1000.0            # (2) 100x the baseline cap
+  mstep_iteration_num: 5
+  # Target actor: plain Polyak (default). The hard periodic copy doubles early learning
+  # speed but cost final policy quality in the 3-seed paired Humanoid-Flat ablation
+  # (deterministic eval 55.1+-7.3 vs 67.0+-8.5 for Polyak, Polyak ahead on all 3 seeds).
+  per_dim_constraining: true       # (1)
+  decoupled_mstep: true            # (3)
+
+policy:
+  class_name: SACActorCritic
+  actor_type: stochastic
+  critic_type: distributional
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -5.0
+    v_max: 20.0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+
+runner:
+  num_steps_per_env: 1
+  max_iterations: 30000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 2500
+  empirical_normalization: false
+  experiment_name: mjlab_go2_mpo_dist
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  log_interval: 100
+  n_step: 3
+  reward_normalization: false

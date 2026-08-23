@@ -7,7 +7,7 @@ import torch.nn as nn
 from typing import List, Optional, Dict, Any, Tuple
 
 from safe_rl.algorithms.ppo import PPO
-from safe_rl.modules import ActorCritic
+from safe_rl.modules import ActorCriticCost
 from safe_rl.storage import RolloutStorageCMDP
 
 
@@ -34,11 +34,11 @@ class PPOL_PID(PPO):
     - PID output directly sets lambda (not accumulated)
     - Normalized surrogate: (adv_r - λ * adv_c) / (1 + λ)
     """
-    policy: ActorCritic
+    policy: ActorCriticCost
 
     def __init__(
         self,
-        policy: ActorCritic,
+        policy: ActorCriticCost,
         num_learning_epochs: int = 1,
         num_mini_batches: int = 1,
         clip_param: float = 0.2,
@@ -497,14 +497,10 @@ class PPOL_PID(PPO):
             "integral_errors": self.pid_i,  # Alias for runner compatibility
         }
 
-    def get_lagrangian_info(self) -> Dict[str, Any]:
-        """Get Lagrangian multiplier information for logging (legacy method)."""
-        return self.get_penalty_info()
-
     def _validate_and_fix_cost_critic(self) -> None:
         """Validate cost critic output dimensions."""
-        if not hasattr(self.policy, 'cost_critic'):
-            raise ValueError("ActorCritic must have a cost_critic attribute for PPOL-PID algorithm")
+        if getattr(self.policy, "cost_critic", None) is None:
+            raise ValueError("PPOL-PID requires a policy with a cost_critic; use ActorCriticCost")
 
         # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.
         if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
@@ -523,5 +519,5 @@ class PPOL_PID(PPO):
         
         if current_outputs != self.num_costs:
             print(f"WARNING: Cost critic outputs {current_outputs} values but PPOL-PID expects {self.num_costs}.")
-            print("This mismatch will cause runtime errors. Please configure ActorCritic with num_costs parameter.")
-            print(f"Example: ActorCritic(..., num_costs={self.num_costs})")
+            print("This mismatch will cause runtime errors. Please configure ActorCriticCost with the num_costs parameter.")
+            print(f"Example: ActorCriticCost(..., num_costs={self.num_costs})")

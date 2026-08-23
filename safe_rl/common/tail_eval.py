@@ -59,11 +59,23 @@ def episode_cost_stats(
     # (deliberate, for hidden-goal/MAML per-task adaptation), so a deterministic policy makes
     # every parallel env run the SAME trajectory. Counting those as independent episodes
     # inflates n by num_envs and silently produces falsely tight SEMs and degenerate tails --
-    # observed: 24 "episodes" that were 3 distinct ones repeated 8 times. Surfacing the count
-    # turns a silent statistical error into a visible one.
+    # observed: 24 "episodes" that were 3 distinct ones repeated 8 times.
+    #
+    # Count distinctness on the (cost, reward) PAIR, not the cost alone. Episodic cost is a
+    # sum of binary contact penalties, so it is integer-valued and repeats legitimately: 50
+    # genuinely different episodes routinely yield only ~24-32 distinct costs, which tripped
+    # the n/2 threshold and reported a seed-sharing failure that had not happened. Reward is
+    # continuous, so a repeated trajectory collides in both coordinates while merely-equal
+    # costs do not.
+    _r = np.asarray(list(rewards), dtype=np.float64) if rewards is not None else None
+    if _r is not None and _r.size == c.size:
+        pairs = np.stack([np.round(c, 9), np.round(_r, 9)], axis=1)
+        n_distinct = int(np.unique(pairs, axis=0).shape[0])
+    else:
+        n_distinct = int(np.unique(np.round(c, 9)).size)
     out: dict = {
         "n_episodes": int(c.size),
-        "n_distinct": int(np.unique(np.round(c, 9)).size),
+        "n_distinct": n_distinct,
         "cost_limit": float(cost_limit),
         "cost_mean": float(c.mean()),
         "cost_std": float(c.std(ddof=1)) if c.size > 1 else 0.0,
@@ -115,9 +127,9 @@ def format_summary(stats: dict) -> str:
     """One-line human-readable summary for logs."""
     dup = ""
     if stats.get("n_distinct", stats["n_episodes"]) < max(2, stats["n_episodes"] // 2):
-        dup = (f"  [WARNING: only {stats['n_distinct']} distinct cost values among "
-               f"{stats['n_episodes']} episodes -- parallel envs may share a seed, so the "
-               f"effective sample size is far below n]")
+        dup = (f"  [WARNING: only {stats['n_distinct']} distinct episodes among "
+               f"{stats['n_episodes']} -- parallel envs may share a seed (the vec env tiles "
+               f"one seed across sub-envs), so the effective sample size is far below n]")
     return (
         f"n={stats['n_episodes']} "
         f"reward {stats['reward_mean']:.2f}+-{stats['reward_sem']:.2f} | "

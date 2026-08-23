@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from safe_rl.common.fh_cost import quantile_cvar, quantile_var
 from safe_rl.networks import MLP, SimbaV2, build_obs_encoder
 from safe_rl.utils import resolve_nn_activation
 
@@ -328,6 +329,7 @@ class ReferenceREPPOCritic(nn.Module):
         activation: str = "swish",
         norm: str = "rmsnorm",
         prior_scale: float = 40.9,
+        predict_reward: bool = False,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -344,6 +346,12 @@ class ReferenceREPPOCritic(nn.Module):
         self.v_max = v_max
         self.hidden_dim = hidden_dim
         self.prior_scale = float(prior_scale)
+        # JAX reference (`networks/jax_models.py:312-323`) makes the prediction head
+        # emit hidden_dim + 1 values: slot 0 is a one-step reward prediction, slots
+        # 1: are the predicted next-state features. Off by default so every existing
+        # config (and its checkpoints) keeps the hidden_dim-wide head it was
+        # trained with; the DMC paper-parity arm turns it on.
+        self.predict_reward = bool(predict_reward)
         self.register_buffer("q_support", torch.linspace(v_min, v_max, num_atoms))
 
         act = resolve_nn_activation(activation)
@@ -362,7 +370,8 @@ class ReferenceREPPOCritic(nn.Module):
         self.feature_module = fcnn(num_obs + num_actions, hidden_dim, encoder_layers)
         # input_activation=True on both heads (reference)
         self.critic_module = nn.Sequential(act, fcnn(hidden_dim, num_atoms, head_layers))
-        self.pred_module = nn.Sequential(act, fcnn(hidden_dim, hidden_dim, pred_layers))
+        pred_out = hidden_dim + 1 if self.predict_reward else hidden_dim
+        self.pred_module = nn.Sequential(act, fcnn(hidden_dim, pred_out, pred_layers))
 
         # Learnable zero prior: softmax(logits) starts at hl_gauss(0) => E[Q] ~ 0.
         delta_z = (v_max - v_min) / (num_atoms - 1)
@@ -376,7 +385,18 @@ class ReferenceREPPOCritic(nn.Module):
         return self.feature_module(torch.cat([obs, actions], dim=-1))
 
     def predict_features(self, features: torch.Tensor) -> torch.Tensor:
-        return self.pred_module(features)
+        pred = self.pred_module(features)
+        return pred[..., 1:] if self.predict_reward else pred
+
+    def predict_features_reward(self, features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the prediction head into (next-state features, reward), reference order.
+
+        Reference: ``pred_rew = pred[..., :1]``, ``pred_features = pred[..., 1:]``.
+        """
+        if not self.predict_reward:
+            raise RuntimeError("predict_features_reward requires predict_reward=True on the critic")
+        pred = self.pred_module(features)
+        return pred[..., 1:], pred[..., :1]
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         return self.critic_module(self.features(obs, actions)) + self.prior_scale * self.zero_dist
@@ -542,6 +562,30 @@ class DistributionalCritic(nn.Module):
         idx = idx.clamp(max=self.num_atoms - 1)
         return self.q_support[idx.squeeze(-1)]
 
+    def risk_value(self, dist: torch.Tensor, level: float) -> torch.Tensor:
+        """Distorted expectation: the mean over a tail fraction ``|level|`` of the return.
+
+        Follows the distortion-measure form of DPPO (Schneider et al., arXiv:2309.14246),
+        where a single scalar sweeps risk-seeking to risk-averse and the neutral setting is
+        the plain mean rather than a special case:
+
+        * ``level`` in ``(0, 1)`` -- mean of the WORST (highest) ``level`` fraction.
+          Pessimistic about cost, i.e. risk-averse.
+        * ``|level| == 1``        -- the whole distribution, i.e. ``get_value``.
+        * ``level`` in ``(-1, 0)`` -- mean of the BEST (lowest) ``|level|`` fraction.
+          Optimistic about cost, i.e. risk-seeking.
+
+        Prefer this to :meth:`get_quantile`: a single quantile reads one atom, so on a
+        discrete support it is coarse and jumps between atoms, while a tail mean uses every
+        atom beyond the cut.
+        """
+        frac = abs(float(level))
+        if frac >= 1.0:
+            return self.get_value(dist)
+        upper = level > 0
+        alpha = (1.0 - frac) if upper else frac
+        return self.get_cvar(dist, min(max(alpha, 0.0), 1.0 - 1e-6), upper=upper)
+
     def get_cvar(self, dist: torch.Tensor, alpha: float, upper: bool = True) -> torch.Tensor:
         """Conditional Value-at-Risk of the return distribution.
 
@@ -608,3 +652,212 @@ class DistributionalCritic(nn.Module):
             0, (upper + offset).view(-1), (next_dist * (b - lower.float())).view(-1)
         )
         return proj_dist
+
+
+def quantile_huber_loss(
+    theta: torch.Tensor,  # [batch, N] predicted quantiles
+    target: torch.Tensor,  # [batch, M] detached target samples
+    tau_hat: torch.Tensor,  # [N] midpoint quantile fractions
+    kappa: float = 1.0,
+    target_weights: torch.Tensor | None = None,  # [batch, M], rows sum to 1
+) -> torch.Tensor:
+    """Quantile Huber loss (Dabney et al. 2018, QR-DQN), reduced per sample.
+
+    Returns shape ``[batch]``, NOT a scalar: the cost channel multiplies it by the
+    hazard-stratified importance weights before reducing, so the caller owns the final
+    ``.mean()``. Reduction over the pair axes follows the paper -- mean over the M target
+    samples, sum over the N predicted quantiles.
+
+    The asymmetric weight ``|tau_hat - 1{u < 0}|`` is evaluated on ``u.detach()``: the
+    indicator is a selector, not a differentiable function of theta, and letting a gradient
+    through it would be a bug (the loss is piecewise-linear in that mask).
+    """
+    if kappa <= 0.0:
+        raise ValueError(f"kappa must be positive, got {kappa}.")
+    u = target.unsqueeze(1) - theta.unsqueeze(2)  # [batch, N, M]
+    abs_u = u.abs()
+    huber = torch.where(abs_u <= kappa, 0.5 * u.pow(2), kappa * (abs_u - 0.5 * kappa))
+    weight = (tau_hat.view(1, -1, 1) - (u.detach() < 0).float()).abs()
+    per_pair = weight * huber / kappa  # [batch, N, M]
+    if target_weights is None:
+        return per_pair.mean(dim=2).sum(dim=1)
+    # Weighted target samples. Needed for a TD(lambda) target distribution, which is a
+    # MIXTURE over n-step returns with geometric weights -- the atoms are not equally
+    # weighted, so the plain mean over M would silently flatten the mixture into a uniform
+    # one and discard the lambda weighting entirely.
+    if target_weights.shape != target.shape:
+        raise ValueError(f"target_weights {tuple(target_weights.shape)} must match target {tuple(target.shape)}")
+    w = target_weights.unsqueeze(1)  # [batch, 1, M]
+    return (per_pair * w).sum(dim=2).sum(dim=1)
+
+
+class QuantileCritic(nn.Module):
+    """QR-DQN style critic: N learned quantile locations ``theta_k(s, a)``.
+
+    Where :class:`DistributionalCritic` fixes the atom *positions* and learns their
+    probabilities, this fixes the probabilities (``1/N`` each, at midpoint fractions
+    ``tau_hat``) and learns the positions. That is the point of the swap: the cost return on
+    SafetyPointGoal1 is zero-inflated, so a fixed support spends most of its atoms on a value
+    that carries no information and can still saturate at the upper edge.
+
+    Interface-compatible with :class:`DistributionalCritic` where CVPO touches it:
+    ``forward`` returns the distribution representation and ``get_value`` the scalar mean.
+    ``get_dist`` is the identity -- for a quantile critic the forward output already IS the
+    distribution -- which is what lets ``SafeActorCritic._scalar_q`` scalarize both critic
+    types through the same call.
+    """
+
+    def __init__(
+        self,
+        num_obs: int,
+        num_actions: int,
+        n_quantiles: int = 64,
+        kappa: float = 1.0,
+        nonneg: bool = False,
+        tqc_drop: int = 0,
+        network_type: str = "mlp",
+        network_kwargs: dict[str, Any] | None = None,
+        encoder_type: str = "none",
+        encoder_kwargs: dict[str, Any] | None = None,
+        device: str = "cpu",
+    ):
+        super().__init__()
+
+        if n_quantiles < 1:
+            raise ValueError(f"n_quantiles must be >= 1, got {n_quantiles}.")
+        if kappa <= 0.0:
+            raise ValueError(f"kappa must be positive, got {kappa}.")
+        # TQC-style truncation of the top quantiles is deliberately out of scope for Phase 1;
+        # the key exists so a config can declare it, and the assert stops it being set by
+        # accident and silently doing nothing.
+        if int(tqc_drop) != 0:
+            raise ValueError(f"tqc_drop must be 0 in this phase, got {tqc_drop}.")
+
+        self.num_obs = num_obs
+        self.num_actions = num_actions
+        self.n_quantiles = int(n_quantiles)
+        self.kappa = float(kappa)
+        self.nonneg = bool(nonneg)
+        self.tqc_drop = 0
+        self._device = device
+
+        # Midpoint fractions (2i+1)/2N. Registered as a buffer so it follows the module to
+        # the GPU and survives deepcopy into the target network, exactly like `q_support`.
+        self.register_buffer(
+            "tau_hat", (torch.arange(self.n_quantiles, dtype=torch.float32) + 0.5) / self.n_quantiles
+        )
+
+        self.obs_encoder = build_obs_encoder(encoder_type, num_obs, encoder_kwargs)
+        encoded_obs = self.obs_encoder.output_dim if self.obs_encoder is not None else num_obs
+
+        if network_kwargs is None:
+            raise ValueError("`network_kwargs` is not allowed to be None")
+        if network_type == "mlp":
+            self.network = MLP(input_dim=encoded_obs + num_actions, output_dim=self.n_quantiles, **network_kwargs)
+        elif network_type == "simba":
+            self.network = SimbaV2(input_dim=encoded_obs + num_actions, output_dim=self.n_quantiles, **network_kwargs)
+        else:
+            raise ValueError(f"Unkown network type: {network_type}, must be 'mlp' or 'simba'")
+
+    def _encode(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        if self.obs_encoder is not None:
+            obs = self.obs_encoder(obs)
+        return torch.cat([obs, actions], dim=-1)
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """Sorted quantile locations, shape ``[..., n_quantiles]``.
+
+        ``softplus`` under ``nonneg`` is the quantile analogue of the categorical cost
+        critic's one-sided support (``v_min=0``): it makes a negative ``Q_c`` structurally
+        impossible rather than merely unlikely.
+
+        The sort is mandatory, not cosmetic. Nothing constrains the head to emit monotone
+        outputs, and crossed quantiles corrupt every statistic read off them. Sorting is
+        differentiable w.r.t. the values (it only permutes them), so no special handling of
+        the backward pass is needed.
+        """
+        theta = self.network(self._encode(obs, actions))
+        if self.nonneg:
+            theta = F.softplus(theta)
+        return theta.sort(dim=-1).values
+
+    def get_dist(self, theta: torch.Tensor) -> torch.Tensor:
+        """Identity. The forward output already is the distribution representation."""
+        return theta
+
+    def get_value(self, theta: torch.Tensor) -> torch.Tensor:
+        """Risk-neutral mean. Each quantile carries equal mass ``1/N``."""
+        return theta.mean(dim=-1)
+
+    def zero_frac(self, theta: torch.Tensor, threshold: float = 0.05) -> torch.Tensor:
+        """Fraction of the represented mass below ``threshold`` (zero-inflation diagnostic)."""
+        return (theta < threshold).to(theta.dtype).mean(dim=-1)
+
+    def spread(self, theta: torch.Tensor, lo: float = 0.1, hi: float = 0.9) -> torch.Tensor:
+        """``q_hi - q_lo`` of the represented distribution, by nearest tau_hat."""
+        lo_i = int(torch.searchsorted(self.tau_hat, torch.tensor(lo, device=self.tau_hat.device)).clamp(
+            max=self.n_quantiles - 1
+        ))
+        hi_i = int(torch.searchsorted(self.tau_hat, torch.tensor(hi, device=self.tau_hat.device)).clamp(
+            max=self.n_quantiles - 1
+        ))
+        return theta[..., hi_i] - theta[..., lo_i]
+
+    # -- Risk surface. Mirrors :class:`DistributionalCritic`'s semantics exactly, specialised to
+    # equal mass ``1/N`` per location, so a config can swap the critic representation without
+    # changing what ``cost_constraint_mode: cvar`` means.
+    def get_cdf(self, theta: torch.Tensor) -> torch.Tensor:
+        """Cumulative mass through each sorted location: ``(k + 1) / N``, independent of ``theta``.
+
+        Present for interface parity with :class:`DistributionalCritic`. For a quantile critic
+        the CDF *values* are fixed by construction and it is the support that is learned, which
+        is the exact dual of the categorical case.
+        """
+        step = 1.0 / self.n_quantiles
+        return (self.tau_hat + 0.5 * step).expand_as(theta)
+
+    def get_quantile(self, dist: torch.Tensor, alpha: float) -> torch.Tensor:
+        """Value-at-Risk: the smallest location whose cumulative mass reaches ``alpha``.
+
+        Each location carries mass ``1/N`` and ``forward`` returns them sorted, so the index is
+        available in closed form -- ``ceil(alpha * N) - 1`` -- with no search. Contrast
+        :meth:`DistributionalCritic.get_quantile`, which must ``searchsorted`` a learned CDF
+        over a fixed support.
+        """
+        return quantile_var(dist, alpha)
+
+    def get_cvar(self, dist: torch.Tensor, alpha: float, upper: bool = True) -> torch.Tensor:
+        """Conditional Value-at-Risk of the represented distribution.
+
+        ``upper=True`` (the cost convention) returns ``E[Z | Z >= VaR_alpha]``, the mean of the
+        worst ``1 - alpha`` fraction. ``upper=False`` gives the lower tail, which is the
+        risk-averse direction for a *reward*.
+
+        The tail-mass accounting is the same as :meth:`DistributionalCritic.get_cvar`: take
+        exactly ``tail`` of probability from the requested end, **splitting the boundary
+        location** rather than rounding to whole atoms -- otherwise ``alpha=0.9`` at ``N=64``
+        would silently mean ``6/64 = 0.094`` or ``7/64 = 0.109``.
+
+        The weights depend only on ``alpha`` and ``N``, never on ``dist``, so the statistic is
+        *linear* in the learned locations. That is the property that makes it safe to put inside
+        the E-step exponent: the gradient reaches every location in the tail undistorted.
+        """
+        return quantile_cvar(dist, alpha, upper=upper)
+
+    def risk_value(self, dist: torch.Tensor, level: float) -> torch.Tensor:
+        """Distorted expectation: the mean over a tail fraction ``|level|`` of the return.
+
+        Identical distortion convention to :meth:`DistributionalCritic.risk_value` (DPPO,
+        Schneider et al., arXiv:2309.14246), so a risk level transfers between critic types:
+
+        * ``level`` in ``(0, 1)``  -- mean of the WORST (highest) ``level`` fraction; risk-averse
+          about cost.
+        * ``|level| == 1``         -- the whole distribution, i.e. :meth:`get_value`.
+        * ``level`` in ``(-1, 0)`` -- mean of the BEST (lowest) ``|level|`` fraction; risk-seeking.
+        """
+        frac = abs(float(level))
+        if frac >= 1.0:
+            return self.get_value(dist)
+        upper = level > 0
+        alpha = (1.0 - frac) if upper else frac
+        return self.get_cvar(dist, min(max(alpha, 0.0), 1.0 - 1e-6), upper=upper)

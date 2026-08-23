@@ -1,0 +1,107 @@
+# COST-CRITIC QUALITY ARM: q_window
+#
+# Longer TD(lambda) window: 64 -> 256.
+# Ground truth (20 states x 16 actions, real simulator) says an action's effect on cost builds over
+# 250-900 steps: best-of-16 cuts real cost by 7.6% at h=100, 27.9% at h=250, 75.1% at h=900. A
+# 64-step window therefore carries only a fraction of the signal the critic needs to rank actions.
+# Length matched to 20k so it is probe-comparable with s2b's model_20000.pt.
+# Everything else is byte-identical to safety_gymnasium_fhdcmpo_s2b_tdlambda_goal1.yaml.
+algorithm:
+  class_name: FHDCMPO
+  gamma: 0.99
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+  sample_action_num: 64
+  dual_constraint: 0.1
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 8.0
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+  cost_limits:
+  - 25.0
+  cost_horizon: 1000
+  qc_thres: 25.0
+  qc_thres_adapt: false
+  cost_n_step: 256
+  cost_td_lambda: 0.98
+  fh_risk_mode: mean
+  fh_alpha: 0.9
+  fh_kappa: 1.0
+  fh_kappa_warmup: 5000
+  fh_kappa_ramp: 15000
+  lambda_source: episodic
+  lambda_mode: grad
+  lambda_update: pid
+  lambda_kp: 0.12
+  lambda_kd: 0.5
+  lambda_anti_windup: true
+  lambda_init: 0.0
+  lambda_episodic_warmup: 5
+  lambda_lr: 0.05
+  lambda_max: 1.8
+policy:
+  class_name: SafeActorCritic
+  critic_type: quantile
+  cost_critic_type: quantile
+  num_costs: 1
+  actor_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: false
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims:
+      - 256
+      - 256
+      activation: relu
+  cost_critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: true
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims:
+      - 256
+      - 256
+      activation: relu
+env:
+  kwargs:
+    horizon_feature: true
+    budget_feature: false
+runner:
+  num_steps_per_env: 4
+  max_iterations: 20000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10
+  experiment_name: safety_gymnasium_fhdcmpo_q_window
+  run_name: ''
+  logger: tensorboard
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+runner_class_name: OffPolicyRunner
+seed: 1

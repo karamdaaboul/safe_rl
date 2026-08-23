@@ -101,6 +101,11 @@ class OnPolicyRunnerCfg:
     wandb_entity: str | None = None
     wandb_dir: str | None = None
     run_name: str = ""
+    # Optional wandb tags, so mjlab runs can be filtered in the UI the same way the
+    # ManiSkill ones are. This dataclass REJECTS unknown keys (asdict(Cfg(**runner_cfg))
+    # raises TypeError), so a config carrying `wandb_tags` kills the run at startup
+    # unless the field exists here. Defaults to None -> no tags, as before.
+    wandb_tags: list[str] | None = None
 
 
 class _YamlDumper(yaml.SafeDumper):

@@ -1,0 +1,68 @@
+# MPO — Maximum a Posteriori Policy Optimization (Abdolmaleki et al., ICLR 2018)
+# Off-policy EM actor-critic. Reuses the SAC twin reward critics + replay buffer; the
+# actor update is the MPO E-step (per-batch convex dual over the temperature eta ->
+# non-parametric weights) + M-step (weighted MLE under decoupled mean/cov KL trust
+# regions). Unconstrained sibling of CVPO (see config/safety_gymnasium_cvpo.yaml);
+# exploration comes from the E-step KL trust region, so SAC entropy is disabled.
+
+algorithm:
+  class_name: MPO
+  # -- Discount and target update
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # gradient updates per training iteration (UTD ~0.5 at 16 envs)
+  max_grad_norm: 1.0
+
+  # -- MPO E-step
+  sample_action_num: 64     # candidate actions sampled per state (Acme/RL-X use 20)
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- MPO M-step (decoupled KL trust regions)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 10.0     # ONLY change vs baseline: 100x cap
+  alpha_var_max: 1000.0
+  mstep_iteration_num: 5
+
+policy:
+  class_name: SACActorCritic  # unconstrained — no cost critic
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 300000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  experiment_name: safety_gymnasium_mpo_caps
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 250
+
+runner_class_name: OffPolicyRunner
+seed: 1

@@ -1,0 +1,170 @@
+# FH-DCMPO — Finite-Horizon Distributional Constrained MPO, SafetyCarGoal1-v0.
+#
+# Clone of safety_gymnasium_qrdmpo_cargoal1.yaml with the finite-horizon distributional cost
+# constraint substituted in. Everything not listed below is byte-identical to that arm on purpose
+# -- the comparison is only interpretable if the cost formulation is the sole difference.
+#
+# Arms to beat on CarGoal1 (50-episode deterministic eval, budget 25, both single-seed so treat
+# differences under ~3 as noise):
+#   DMPO (C51)  reward 33.24  cost 24.84  CVaR_0.9  79.4  46.0% of episodes over budget
+#   QR-DMPO     reward 32.30  cost 28.68  CVaR_0.9 121.2  34.0% over budget
+#
+# WHAT CHANGED, and why each one is load-bearing:
+#
+#  1. `env.kwargs.horizon_feature: true` -- appends u = (T-t)/T to the observation. Without it
+#     the undiscounted cost-to-go is not a function of (s, a) and the regression has no fixed
+#     point. This changes the observation dimension, so checkpoints from other arms will not load.
+#
+#  2. `qc_thres: 25.0` -- the threshold IS the cost limit. No qc_scale. The discounted arms had to
+#     map 25 into cost-Q space through a per-task scalar (0.0764 on PointGoal1, 0.09198 on
+#     CarGoal1); getting it wrong moved the real budget 20-31% with no visible symptom. Note that
+#     THIS FILE IS NOW IDENTICAL TO THE PointGoal1 ONE apart from the experiment name. Under the
+#     old scheme the two tasks needed different qc_scale values, and running one task's value on
+#     the other silently tightened the budget by 20%. That entire failure mode is gone.
+#
+#  3. `fh_*` -- the conservatism statistic rho = E[Z_c] + kappa*(CVaR_alpha[Z_c] - E[Z_c]).
+#     kappa ramps 0 -> 1 so the constraint starts satisfiable. Jumping straight to CVaR_0.9 is
+#     what killed the earlier attempt: it sat 4.48x above the threshold from iteration 0, lambda
+#     pinned at its cap for 13k of 15k iterations, and the E-step degenerated to "minimise cost,
+#     ignore reward" (codex/why-mean-beat-cvar-on-pointgoal1.md).
+#
+#  4. The lambda gains are UNCHANGED from the qrdmpo arm, which is not obvious and was measured
+#     rather than assumed -- see the block above the controller settings below. rho_c is ~13x
+#     larger than Q_c in LEVEL, but lambda's balance point depends on the ratio of action
+#     SPREADS, and those are comparable. A first draft rescaled every gain by 1/13 and capped
+#     lambda below its own balance point; the S0 smoke caught it.
+#
+# Not set, deliberately: `init_at_random_ep_len`. It would desynchronize the envs so a single
+# collection step spans several u values, but this script does not plumb it, and it is not needed
+# -- `empirical_normalization: false` here (so nothing normalizes the u column away) and uniform
+# replay over a 1M buffer already covers every u.
+
+algorithm:
+  class_name: FHDCMPO
+
+  # -- Discount and target update. gamma is the REWARD discount; the cost channel is
+  # undiscounted (gamma_c = 1) and that is not configurable -- it is what the algorithm is.
+  gamma: 0.99
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64
+  dual_constraint: 0.1
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 8.0
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint, in TRUE episodic units
+  cost_limits: [25.0]
+  cost_horizon: 1000        # T, for reporting only -- no longer a scale factor
+  qc_thres: 25.0            # == cost_limit. Set explicitly so a future default change cannot
+                            # silently reintroduce a qc_scale conversion.
+  qc_thres_adapt: false
+
+  # -- The finite-horizon distributional statistic
+  fh_risk_mode: cvar        # mean | cvar | evt   (S1 uses `mean`: finite horizon, no tail)
+  fh_alpha: 0.9             # constrain the worst 10% of the episodic-cost distribution
+  fh_kappa: 1.0             # ramp target: 1.0 = pure CVaR_0.9
+  fh_kappa_warmup: 5000     # E-step updates at kappa=0 while the cost critic levels out
+  fh_kappa_ramp: 15000      # then linear to fh_kappa over this many updates
+
+  # -- Lambda controller. MEASURED, not estimated (S0 smoke, 2026-08-17, 2k iters, seed 1):
+  #      std_a(Q_r) = 0.2385, std_a(rho_c) = 0.2883  ->  lambda_balanced = 0.88
+  # An earlier draft divided every gain by ~13 on the theory that lambda's balance point falls with
+  # 1/qc_scale because rho_c is ~13x larger than Q_c. THAT WAS WRONG, and the smoke caught it. Only
+  # DIFFERENCES across candidate actions survive the per-state softmax, so lambda's balance point is
+  # set by std_a(Q_r)/std_a(rho_c) -- a ratio of *spreads*, not of *levels*. The spreads turn out to
+  # be comparable (0.24 vs 0.29), so the QR-DMPO gains carry over essentially unchanged.
+  # With lambda_max = 0.35 the cap sat BELOW the balance point, so the cost term could never perturb
+  # the softmax enough for the constraint to bind -- it would have looked like "the method is weak".
+  # 4.0 leaves ~4.5x headroom above 0.88. Re-check `balanced` as std_a(Q_r) grows during training.
+  lambda_source: episodic   # delta from realized J_c, normalized by the limit
+  lambda_mode: grad         # eta from the dual solve; lambda from the controller
+  lambda_update: pid
+  lambda_kp: 0.25
+  lambda_kd: 0.5
+  lambda_anti_windup: true
+  lambda_init: 0.0
+  lambda_episodic_warmup: 5
+  lambda_lr: 0.1            # = Ki
+  lambda_max: 4.0           # ~4.5x the measured balance point 0.88
+
+policy:
+  class_name: SafeActorCritic
+  critic_type: quantile
+  # Quantile cost critic is REQUIRED, not a choice: the categorical head hard-clips its support
+  # at v_max (50.0 by default) and undiscounted episodic costs run well past that. FHDCMPO raises
+  # if this is anything else.
+  cost_critic_type: quantile
+  num_costs: 1
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: false
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+  cost_critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: true            # cost is non-negative; softplus makes a negative rho structurally
+                            # impossible rather than merely unlikely
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+
+env:
+  kwargs:
+    horizon_feature: true   # append u = (T - t)/T
+    budget_feature: false   # Sauté-style remaining budget; its own ablation, off by default
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step. The cost window is summed UNDISCOUNTED
+                            # (ReplayStorage cost_gamma=1.0, set by the algorithm) -- with
+                            # gamma_c=1 there is no contraction, so value information has to
+                            # propagate from the u=0 boundary and n=10 is what makes that
+                            # tractable. n_step: 1 would work but propagate 10x slower.
+  experiment_name: safety_gymnasium_fhdcmpo_cargoal1
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

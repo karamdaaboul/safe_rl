@@ -74,9 +74,9 @@ def test_replay_storage_adds_and_samples_expected_shapes() -> None:
 
 
 def test_actor_critic_action_value_and_cost_shapes() -> None:
-    from safe_rl.modules import ActorCritic
+    from safe_rl.modules import ActorCriticCost
 
-    policy = ActorCritic(
+    policy = ActorCriticCost(
         num_actor_obs=3,
         num_critic_obs=5,
         num_actions=2,
@@ -146,9 +146,9 @@ def test_categorical_cost_critic_two_hot_encoding_and_decoding() -> None:
 
 
 def test_actor_critic_categorical_cost_critic_wiring() -> None:
-    from safe_rl.modules import ActorCritic
+    from safe_rl.modules import ActorCriticCost
 
-    policy = ActorCritic(
+    policy = ActorCriticCost(
         num_actor_obs=3,
         num_critic_obs=5,
         num_actions=2,
@@ -171,3 +171,34 @@ def test_actor_critic_categorical_cost_critic_wiring() -> None:
     assert costs.shape == (4, 1)
     # Distributional path caches per-cost logits for the P3O cross-entropy loss.
     assert policy._cost_logits.shape == (4, 1, 11)
+
+
+def test_actor_critic_cost_requires_positive_num_costs() -> None:
+    from safe_rl.modules import ActorCriticCost
+
+    with pytest.raises(ValueError, match="num_costs"):
+        ActorCriticCost(
+            num_actor_obs=3,
+            num_critic_obs=5,
+            num_actions=2,
+            num_costs=0,
+            actor_kwargs={"hidden_dims": [8], "activation": "elu"},
+            critic_kwargs={"hidden_dims": [8], "activation": "elu"},
+        )
+
+
+def test_plain_actor_critic_has_no_cost_critic() -> None:
+    """The base class is reward-only: safe RL algorithms must reject it rather than
+    silently proceed with a None cost head (the pre-split failure mode)."""
+    from safe_rl.modules import ActorCritic
+
+    policy = ActorCritic(
+        num_actor_obs=3,
+        num_critic_obs=5,
+        num_actions=2,
+        actor_kwargs={"hidden_dims": [8], "activation": "elu"},
+        critic_kwargs={"hidden_dims": [8], "activation": "elu"},
+    )
+
+    assert not hasattr(policy, "cost_critic")
+    assert not hasattr(policy, "evaluate_cost")

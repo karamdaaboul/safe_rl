@@ -1,0 +1,131 @@
+diff --git a/config/safety_gymnasium_cmaml_p3o.yaml b/config/safety_gymnasium_cmaml_p3o.yaml
+index c9ae5d0..e6b29d6 100644
+--- a/config/safety_gymnasium_cmaml_p3o.yaml
++++ b/config/safety_gymnasium_cmaml_p3o.yaml
+@@ -1,5 +1,14 @@
++# Environment construction (merged with CLI flags by train_safety_gymnasium.py;
++# --no_hidden_goal overrides). hidden_goal is REQUIRED for meta-learning: it
++# removes goal_lidar from the observation so the goal is a latent task variable,
++# not a goal-conditioned input.
++env:
++  hidden_goal: true
++  hidden_goal_continue: false
++
+ algorithm:
+   class_name: P3O
++  cost_limits: [15.0]       # inner P3O constraint; aligned with meta.cost_limit
+   # training parameters copied from PPO for closer comparison
+   normalize_advantage_per_mini_batch: false
+   value_loss_coef: 1.0
+@@ -60,6 +69,10 @@ meta:
+   meta_cost_protect_std: true # Fix A: keep exploration std out of the cost step (only reshape the mean)
+   eta_deadband: true        # only run the cost step while meta_policy_cost > limit (stop eroding reward once safe)
+   seed_pool: [0, 1, 3, 4, 5, 7, 8, 14, 16, 18, 19, 22, 23, 24, 25, 26, 30, 34, 35, 38]
++  # Held-out tasks for the adaptation eval (scripts/eval/eval_cmaml_adaptation.py).
++  # Must stay disjoint from seed_pool — enforced at runner construction.
++  held_out_seeds: [2, 6, 9, 10, 11, 12, 13, 15, 17, 20]
++  # allow_goal_obs: true    # explicit goal-conditioned ABLATION (bypasses the hidden-goal guard)
+ 
+ runner:
+   num_steps_per_env: 2048
+diff --git a/safe_rl/envs/hidden_goal_wrapper.py b/safe_rl/envs/hidden_goal_wrapper.py
+index e8b711b..27683fb 100644
+--- a/safe_rl/envs/hidden_goal_wrapper.py
++++ b/safe_rl/envs/hidden_goal_wrapper.py
+@@ -76,3 +76,8 @@ class HiddenGoalWrapper(gymnasium.Wrapper):
+         # Safety-Gymnasium returns a 6-tuple (obs, reward, COST, terminated,
+         # truncated, info) — pass it through unchanged (cost channel preserved).
+         return self.env.step(action)
++
++    def obs_space_keys(self) -> list[str]:
++        """Observation keys of the underlying task, callable across async workers
++        via ``vector_env.call`` so the vec env can verify goal-blindness."""
++        return list(self.env.unwrapped.task.obs_info.obs_space_dict.spaces.keys())
+diff --git a/safe_rl/runners/meta_on_policy_runner.py b/safe_rl/runners/meta_on_policy_runner.py
+index e35d8fa..143e9e0 100644
+--- a/safe_rl/runners/meta_on_policy_runner.py
++++ b/safe_rl/runners/meta_on_policy_runner.py
+@@ -38,6 +38,9 @@ class MetaOnPolicyRunner(OnPolicyRunner):
+     """
+ 
+     def __init__(self, env, train_cfg: dict, log_dir: str | None = None, device="cpu"):
++        meta_cfg = train_cfg.get("meta", {}) or {}
++        self._validate_hidden_goal(env, meta_cfg)
++
+         super().__init__(env, train_cfg, log_dir=log_dir, device=device)
+ 
+         if not isinstance(self.alg, P3O):
+@@ -46,7 +49,6 @@ class MetaOnPolicyRunner(OnPolicyRunner):
+                 f"got {type(self.alg).__name__}."
+             )
+ 
+-        meta_cfg = train_cfg.get("meta", {}) or {}
+         self.inner_steps = int(meta_cfg.get("inner_steps", 3))
+         self.num_tasks = int(meta_cfg.get("num_tasks", 20))
+         self.meta_lr = float(meta_cfg.get("meta_lr", 0.5))
+@@ -56,6 +58,11 @@ class MetaOnPolicyRunner(OnPolicyRunner):
+         # Defaults to meta_lr -> identical to the old single-rate Reptile update.
+         self.meta_lr_head = float(meta_cfg.get("meta_lr_head", self.meta_lr))
+         self.seed_pool = list(meta_cfg.get("seed_pool", list(range(self.num_tasks))))
++        # Held-out tasks reserved for the adaptation eval protocol — never trained on.
++        self.held_out_seeds = list(meta_cfg.get("held_out_seeds", []))
++        overlap = set(self.seed_pool) & set(self.held_out_seeds)
++        if overlap:
++            raise ValueError(f"meta.held_out_seeds overlap meta.seed_pool: {sorted(overlap)}")
+ 
+         # Global cost-critic training (sec. 7.4)
+         self.cost_critic_epochs = int(meta_cfg.get("cost_critic_epochs", 8))
+@@ -125,6 +132,44 @@ class MetaOnPolicyRunner(OnPolicyRunner):
+         self._init_kappa = list(getattr(self.alg, "kappa", []))
+         self._init_lr = float(getattr(self.alg, "learning_rate"))
+ 
++    @staticmethod
++    def _validate_hidden_goal(env, meta_cfg: dict) -> None:
++        """Refuse to meta-train on a goal-observing env unless explicitly opted out.
++
++        With the goal in the observation the 'tasks' are not latent and cMAML
++        collapses to goal-conditioned RL; `meta.allow_goal_obs: true` is the
++        explicit escape hatch for that ablation.
++        """
++        if bool(meta_cfg.get("allow_goal_obs", False)):
++            print("[cMAML] WARNING: meta.allow_goal_obs=true — goal-conditioned ABLATION mode, not meta-learning.")
++            return
++        if not bool(getattr(env, "hidden_goal", False)):
++            raise ValueError(
++                "MetaOnPolicyRunner requires a hidden-goal environment (goal position absent from the "
++                "observation); otherwise 'meta-learning' collapses to goal-conditioned RL. Enable "
++                "`env: hidden_goal: true` in the config (or pass --hidden_goal), or set "
++                "`meta: allow_goal_obs: true` for an explicit ablation."
++            )
++
++    def load(self, path: str, load_optimizer: bool = True):
++        """Load a checkpoint and re-sync the meta-parameter snapshots.
++
++        Checkpoints hold the meta-parameters (`learn` restores them into the live
++        policy before saving), but the snapshots in `meta_actor_params` /
++        `meta_cost_params` are taken at construction — without this re-sync,
++        `_load_meta_into_policy()` would clobber the loaded weights with the
++        stale random init. The reward-critic init (`value_init_params`)
++        deliberately stays fresh: it is re-initialized per task by design.
++        """
++        infos = super().load(path, load_optimizer)
++        with torch.no_grad():
++            for name, p in self.alg.policy.named_parameters():
++                if name in self.meta_actor_params:
++                    self.meta_actor_params[name].copy_(p.detach())
++                elif name in self.meta_cost_params:
++                    self.meta_cost_params[name].copy_(p.detach())
++        return infos
++
+     # ----- inner/outer-loop helpers -------------------------------------------------
+ 
+     def _load_meta_into_policy(self) -> None:
+@@ -564,7 +609,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
+                 if it % self.save_interval == 0:
+                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
+ 
+-            if it == start_iter and not self.disable_logs:
++            if self.log_dir is not None and it == start_iter and not self.disable_logs:
+                 git_file_paths = store_code_state(self.log_dir, self.git_status_repos)
+                 if self.logger_type == "wandb" and git_file_paths:
+                     for path in git_file_paths:

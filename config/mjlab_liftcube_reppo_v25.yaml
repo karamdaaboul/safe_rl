@@ -1,0 +1,152 @@
+# REPPO v25 — first config tuned FOR Mjlab-Lift-Cube-Yam rather than inherited
+# from locomotion. v24 (Ant/Go2 settings) is a hard failure here, so this is a
+# deliberate MULTI-lever departure from the repo's one-lever-at-a-time cadence:
+# there is no point bisecting levers around a 0% baseline.
+#
+# ===========================================================================
+# WHAT v24 DID, MEASURED (1024 envs, wandb liftcube_v24_probe /
+# liftcube_v24_support_probe; PPO arm liftcube_ppo_probe):
+#
+#   arm            per-env steps   episode_success   object_height   pos_error
+#   PPO (mjlab cfg)      20,496          0.795           0.253         0.067
+#   REPPO v24            25,088          0.000           0.020         0.347
+#
+# REPPO v24 learned REACHING and nothing else: Episode_Reward/lift plateaued at
+# ~1.03 (= reaching ~1.0 with bringing ~0), object_height never left the 0.020
+# spawn height, and episode_success read exactly 0.0000 for 200 consecutive
+# logged iterations. Its internals were all HEALTHY — frac_targets_clipped
+# 0.0000, q_bias 0.02, entropy exactly on target, KL inside the bound — which
+# is what makes the failure diagnostic rather than mysterious.
+#
+# ROOT CAUSE (mechanical, not statistical). The YAM gripper travels
+# 0.0396 m total (left_finger range -0.00205..0.037524), but its action scale is
+# YAM_ACTION_SCALE["left_finger"] = 0.0866 m, so tanh output +/-1 spans 2.19x the
+# entire travel and only |a| < 0.457 is meaningful. v24's entropy dual PINNED the
+# action noise at sigma ~0.49 (entropy converged to -3.6 against target
+# -0.5 * 7 = -3.5) — i.e. the exploration noise alone is WIDER than the gripper's
+# whole controllable band, so the gripper is slammed fully open/closed at random
+# every control step at 50 Hz. Grasping is not merely unlikely, it is
+# unreachable. The PPO baseline sits just under the band at sigma 0.39-0.42 and
+# has no entropy floor pushing it back up. (joint6 is oversaturated the same way,
+# scale 5.52 vs range +/-2.09.)
+#
+# ===========================================================================
+# LEVERS MOVED (all four, with the measurement that justifies each):
+#
+#  1. target_entropy -0.5 -> -1.0 per action dim (total -3.5 -> -7.0). THE fix.
+#     Empirical anchor: -0.5/dim held sigma at 0.49; each unit of per-dim entropy
+#     scales sigma by ~e^-1, so -1.0/dim targets sigma ~0.18 — decisively inside
+#     the 0.457 gripper band while still exploring more coarsely than a
+#     deterministic policy. -1.0/dim is also the standard SAC convention.
+#
+#  2. init_alpha_temp 1.0 -> 0.1. compute_returns folds the entropy bonus into
+#     the reward at full weight AFTER reward_scale (safe_rl/algorithms/reppo.py
+#     :391,413). With alpha starting at 1.0 the alpha*H term dominated the return
+#     and drove frac_targets_clipped to 0.99 around iteration 5. v24 absorbed
+#     that because its support was 170 wide; the narrowed support below cannot,
+#     so the transient has to be removed at the source rather than padded around.
+#
+#  3. Value support [-20, 150] @ 301 -> [-40, 100] @ 281 (bin 0.500, vs Ant v24's
+#     0.567 and v23's 0.400 — inside the validated band).
+#       * v_max: measured steady-state returns were 18-26, and the ceiling for a
+#         policy that ACTUALLY lifts is reward_scale * dt/(1-gamma) * sum(w_i) =
+#         20 * (2 + 1) = 60. 100 leaves headroom without wasting 60% of the
+#         support the way 150 did.
+#       * v_min: at a NEGATIVE entropy target the alpha*H term is a penalty, not
+#         a bonus (-logpi ~ -7.0), so the floor now has to absorb ~16.8*alpha*7.
+#         -40 covers it. Note the v24 floor scare did NOT materialise: the
+#         joint_vel_hinge penalty rate held at ~-0.026 across all three
+#         curriculum stages (-0.01 -> -0.1 -> -1.0, firing at iterations 102 and
+#         196) because the policy adapts as the weight rises. -150 was measured
+#         to be unnecessary.
+#
+#  4. desired_kl 0.1 -> 0.03. Lift-cube is a precision task and the PPO arm that
+#     solves it runs desired_kl 0.01. 0.03 keeps REPPO's "clipped" gate but stops
+#     it taking locomotion-sized policy steps near a grasp.
+#
+# UNCHANGED and deliberately so: reward_scale 10.0 (returns 18-26 is already a
+# healthy scale), the reference critic architecture, RMSNorm/swish, single critic,
+# plain Adam at 3e-4, aux_loss_mult 1.0, num_steps_per_env 128.
+#
+# WHAT TO WATCH — the pass/fail signal is NOT reward:
+#   Mean episode Metrics/lift_height/episode_success   must leave 0.0000
+#   Metrics/lift_height/object_height                  must leave the 0.020 spawn
+#   Mean action noise std                              should fall toward ~0.18
+#   frac_targets_clipped                               must stay < 0.05 (the
+#     narrowed support is the risk this config takes)
+# If success stays at 0 while sigma does drop below 0.2, the gripper-noise
+# hypothesis is falsified and the next suspect is the pathwise dQ/da signal
+# never seeing a successful grasp in the buffer — a bootstrap problem that
+# entropy tuning cannot fix.
+#
+# NOTE: pass --experiment_name explicitly; load_safe_rl_yaml pops and discards
+# the YAML's experiment_name, so logs otherwise land under mjlab's yam_lift_cube/.
+# ===========================================================================
+runner_class_name: OnPolicyRunner
+seed: 1
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL constraint
+  desired_kl: 0.03            # was 0.1 (PPO baseline uses 0.01); precision task
+  kl_clip_mode: clipped
+  # -- learned dual variables
+  init_alpha_temp: 0.1            # was 1.0 — kills the alpha*H return transient
+  init_alpha_kl: 0.01             # reference kl_start
+  target_entropy: -1.0            # was -0.5/dim; THE lever, see header
+  # -- optimizers (reference: plain Adam, one lr, no weight decay)
+  optimizer_class: adam
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 0.5
+  # -- reference-faithful REPPO components
+  aux_loss_mult: 1.0
+  reward_scale: 10.0              # inherited from Ant; see header
+  # -- training
+  num_learning_epochs: 4
+  num_mini_batches: 128
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: stochastic
+  critic_type: reference          # encoder/head-split critic (their Critic)
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  min_std: 0.0                    # reference actor_min_std
+  squash: tanh
+  actor_kwargs:
+    network_type: mlp
+    hidden_dims: [512, 512]       # reference: 3-layer FCNN @ 512 incl. output
+    activation: swish
+    use_layer_norm: true
+    norm_type: rmsnorm            # reference uses RMSNorm
+    log_std_squash: clamp         # reference: plain exp(log_std), unbounded
+    log_std_min: -10.0
+    log_std_max: 2.0
+    init_noise_std: 1.0
+  critic_kwargs:
+    num_atoms: 281                # [-40,100] at bin width 0.500
+    v_min: -40.0                  # alpha*H is a PENALTY at negative entropy target
+    v_max: 100.0                  # success ceiling ~= 20*(2+1) = 60, plus headroom
+    hidden_dim: 512
+    encoder_layers: 2             # reference num_critic_encoder_layers
+    head_layers: 2                # reference num_critic_head_layers
+    pred_layers: 2                # reference num_critic_pred_layers
+    activation: swish
+    norm: rmsnorm
+    prior_scale: 40.9             # reference: logits + 40.9 * hl_gauss(0)
+
+runner:
+  num_steps_per_env: 128
+  max_iterations: 300             # probe default; JUWELS passes this explicitly
+  empirical_normalization: false
+  save_interval: 50
+  experiment_name: mjlab_liftcube_reppo_v25
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

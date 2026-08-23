@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from safe_rl.algorithms.sac import SAC
+from safe_rl.modules.critic import quantile_huber_loss
 from safe_rl.modules.safe_sac_actor_critic import SafeSACActorCritic
 from safe_rl.utils.torch_utils import resolve_optimizer
 
@@ -52,6 +53,9 @@ class SafeSAC(SAC):
         optimizer: str = "adam",
         weight_decay: float = 0.0,
         betas: tuple[float, float] = (0.9, 0.999),
+        cost_loss_scale_norm: bool = False,   # scale-free quantile cost loss (see _update_cost_critic_quantile)
+        cost_loss_scale_momentum: float = 0.99,
+        cost_critic_updates_per_step: int = 1,
         device: str = "cpu",
         **kwargs,
     ):
@@ -91,6 +95,10 @@ class SafeSAC(SAC):
         self.num_costs = len(cost_limits)
         # Hazard-stratified replay diagnostics, refreshed each cost-critic update.
         self._last_replay_info: dict[str, float] = {}
+        # Cost-critic representation diagnostics (mean Q_c, zero-mass fraction, q90-q10
+        # spread), refreshed each cost-critic update. Empty for a scalar cost critic, which
+        # has no distribution to describe.
+        self._last_cost_critic_diag: dict[str, float] = {}
         if hasattr(policy, 'num_costs') and policy.num_costs != self.num_costs:
             print(f"WARNING: Policy num_costs ({policy.num_costs}) doesn't match cost_limits ({self.num_costs})")
 
@@ -128,6 +136,16 @@ class SafeSAC(SAC):
         cost_critic_params = []
         for critic in policy.cost_critics:
             cost_critic_params.extend(list(critic.parameters()))
+        # Cost-critic gradient steps per actor step. 1 (default) is the historical behaviour:
+        # one cost-critic update per reward-critic update per actor update. Raising it gives the
+        # cost critic more gradient steps -- each on its OWN fresh batch -- against an unchanged
+        # actor and reward critic, which is the only way to test critic lag without also changing
+        # the policy's update rate.
+        self.cost_critic_updates_per_step = max(1, int(cost_critic_updates_per_step))
+        self.cost_loss_scale_norm = bool(cost_loss_scale_norm)
+        self.cost_loss_scale_momentum = float(cost_loss_scale_momentum)
+        self._cost_scale_ema: float | None = None   # running scale of the cost-critic targets
+
         self.cost_critic_optimizer = optimizer_cls(
             cost_critic_params, lr=cost_critic_lr, weight_decay=weight_decay, betas=betas
         )
@@ -143,6 +161,8 @@ class SafeSAC(SAC):
         critic_obs: torch.Tensor | None = None,
         next_critic_obs: torch.Tensor | None = None,
         bootstrap: torch.Tensor | None = None,
+        behavior_log_prob: torch.Tensor | None = None,
+        policy_version: torch.Tensor | None = None,
     ) -> None:
         """Store a transition in the replay buffer, including its cost.
 
@@ -156,6 +176,10 @@ class SafeSAC(SAC):
             critic_obs: Optional critic observations.
             next_critic_obs: Optional next critic observations.
             bootstrap: Optional timeout flag (1 = truncation) for the bootstrap channel.
+            behavior_log_prob: Optional ``log pi_behavior(a|s)`` of the stored action at
+                collection time (off-policy mismatch diagnostic; runner flag
+                ``store_behavior_logprob``).
+            policy_version: Optional collection-time policy stamp (learning iteration).
         """
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
@@ -172,6 +196,10 @@ class SafeSAC(SAC):
             extras["next_critic_observations"] = next_critic_obs
         if bootstrap is not None:
             extras["bootstrap"] = bootstrap.view(-1, 1) if bootstrap.dim() == 1 else bootstrap
+        if behavior_log_prob is not None:
+            extras["behavior_log_prob"] = behavior_log_prob.view(-1, 1)
+        if policy_version is not None:
+            extras["policy_version"] = policy_version.view(-1, 1)
         self.storage.add(obs, action, reward, done, next_obs, **extras)
 
     def _format_costs_tensor(self, costs: torch.Tensor) -> torch.Tensor:
@@ -285,6 +313,49 @@ class SafeSAC(SAC):
         lambda controller and the M-step -- all of which take plain means over the
         sampled states and would be biased by a stratified batch.
         """
+        losses: list[float] = []
+        for rep in range(self.cost_critic_updates_per_step):
+            if rep > 0:
+                # Every extra pass draws its own batch: the point of a higher ratio is more
+                # independent data per actor step, not more passes over the same one. The reward
+                # critic and the actor do NOT see these batches, so their update count is unchanged.
+                batch = self.storage.sample(self.batch_size)
+                obs = batch["observations"]
+                critic_obs = batch.get("critic_observations", obs)
+                actions = batch["actions"]
+                dones = batch["dones"]
+                next_obs = batch["next_observations"]
+                next_critic_obs = batch.get("next_critic_observations", next_obs)
+                bootstrap = batch.get("bootstrap")
+                effective_n_steps = batch.get("effective_n_steps")
+                obs, critic_obs, next_obs, next_critic_obs = self._normalize_obs_tensors(
+                    obs, critic_obs, next_obs, next_critic_obs, obs_normalizer, critic_obs_normalizer
+                )
+            losses.append(
+                self._one_cost_critic_update(
+                    batch, obs, critic_obs, actions, dones, next_obs, next_critic_obs,
+                    bootstrap, effective_n_steps, obs_normalizer, critic_obs_normalizer,
+                )
+            )
+        return {"cost_critic": sum(losses) / len(losses)}
+
+    def _one_cost_critic_update(
+        self,
+        batch: dict[str, torch.Tensor],
+        obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
+        effective_n_steps: torch.Tensor | None = None,
+        obs_normalizer=None,
+        critic_obs_normalizer=None,
+    ) -> float:
+        """One cost-critic gradient step. Split out of :meth:`_update_extra_critics` so the
+        update can be repeated ``cost_critic_updates_per_step`` times without duplicating the
+        hazard-stratified sampling or the TD(lambda) window plumbing."""
         cost_is_weights = None
         if self.hazard_fraction > 0.0 and self.storage is not None:
             cost_batch = self.storage.sample(self.batch_size, stratified=True)
@@ -310,12 +381,21 @@ class SafeSAC(SAC):
 
         if costs is None:
             costs = torch.zeros(actions.shape[0], self.num_costs, device=self.device)
-        cost_critic_loss = self._update_cost_critic(
+        # TD(lambda) cost window, present only when ReplayStorage was given `cost_n_step`.
+        # Forwarded as **extras so no existing algorithm's signature changes.
+        src = cost_batch if self.hazard_fraction > 0.0 else batch
+        window_keys = (
+            "cost_window_returns", "cost_window_next_obs", "cost_window_mask",
+            # Diagnostic extras (present only with ReplayStorage(cost_window_extras=True)).
+            "cost_window_actions", "cost_window_obs", "cost_window_alive",
+            "cost_window_age", "cost_window_blp", "cost_window_version",
+        )
+        window = {k: src[k] for k in window_keys if k in src}
+        return self._update_cost_critic(
             obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs,
             bootstrap=bootstrap, effective_n_steps=effective_n_steps,
-            cost_is_weights=cost_is_weights,
+            cost_is_weights=cost_is_weights, **window,
         )
-        return {"cost_critic": cost_critic_loss}
 
     def _update_cost_critic(
         self,
@@ -329,6 +409,9 @@ class SafeSAC(SAC):
         bootstrap: torch.Tensor | None = None,
         effective_n_steps: torch.Tensor | None = None,
         cost_is_weights: torch.Tensor | None = None,
+        # TD(lambda) cost window (FH-DCMPO only). Accepted here so the dispatcher can forward
+        # it to a subclass that wants it; the scalar and categorical paths simply ignore it.
+        **window_extras: torch.Tensor,
     ) -> float:
         """Update cost Q-networks.
 
@@ -351,6 +434,13 @@ class SafeSAC(SAC):
         Returns:
             Cost critic loss value.
         """
+        if getattr(self.policy, "is_quantile_cost_critic", False):
+            return self._update_cost_critic_quantile(
+                obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs,
+                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                cost_is_weights=cost_is_weights, **window_extras,
+            )
+
         if getattr(self.policy, "is_distributional_cost_critic", False):
             return self._update_cost_critic_distributional(
                 obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs,
@@ -364,8 +454,8 @@ class SafeSAC(SAC):
 
             # Cost Bellman backup: Q_c_target = c + γ^n * mask * Q_c_target.
             # No entropy term for cost critics.
-            mask = self._bootstrap_mask(dones, bootstrap)
-            discount = self._bootstrap_discount(effective_n_steps)
+            mask = self._cost_bootstrap_mask(dones, bootstrap)
+            discount = self._cost_bootstrap_discount(effective_n_steps)
             target_cost_q = costs + discount * mask * cost_q_target
 
         cost_q = self.policy.evaluate_cost_q(critic_obs, actions)
@@ -411,8 +501,8 @@ class SafeSAC(SAC):
         cost is the unsafe direction, and the cost channel uses a single critic by default).
         """
         costs = costs.squeeze(-1)  # [batch, 1] -> [batch]; distributional cost critic is single-constraint
-        bootstrap_mask = self._bootstrap_mask(dones, bootstrap).squeeze(-1)
-        discount = self._bootstrap_discount(effective_n_steps)
+        bootstrap_mask = self._cost_bootstrap_mask(dones, bootstrap).squeeze(-1)
+        discount = self._cost_bootstrap_discount(effective_n_steps)
         if isinstance(discount, torch.Tensor):
             discount = discount.reshape(-1)
 
@@ -437,6 +527,20 @@ class SafeSAC(SAC):
             logits = critic(obs_normalized, actions)
             per_sample_cost_loss = -torch.sum(target_dist * F.log_softmax(logits, dim=-1), dim=-1)
             cost_critic_loss = cost_critic_loss + (weights * per_sample_cost_loss).mean()
+            # Same three diagnostics as the quantile path, read off the categorical
+            # representation so the two arms are directly comparable. Read-only under
+            # no_grad: no parameter, optimizer or RNG state is touched.
+            if i == 0:
+                with torch.no_grad():
+                    pred_dist = critic.get_dist(logits)
+                    zero_mask = (critic.q_support < 0.05).to(pred_dist.dtype)
+                    self._last_cost_critic_diag = {
+                        "critic_cost_mean_Q": float(critic.get_value(pred_dist).mean()),
+                        "critic_cost_zero_frac": float((pred_dist * zero_mask).sum(dim=-1).mean()),
+                        "critic_cost_spread": float(
+                            (critic.get_quantile(pred_dist, 0.9) - critic.get_quantile(pred_dist, 0.1)).mean()
+                        ),
+                    }
             # Feed the CVaR recalibration buffer (CVPO item 2): the PIT of the predicted
             # distribution evaluated at the realized n-step cost target. Entirely inert
             # unless a recalibrator exists, i.e. unless recalibrate_cvar is on.
@@ -446,6 +550,131 @@ class SafeSAC(SAC):
                     next_q = tgt.get_value(tgt.get_dist(tgt(next_obs_norm, next_actions)))
                     realized = costs + discount * bootstrap_mask * next_q
                     self._record_pit(critic.get_dist(logits), realized, critic)
+
+        self.cost_critic_optimizer.zero_grad()
+        cost_critic_loss.backward()
+        cost_critic_params = []
+        for critic in self.policy.cost_critics:
+            cost_critic_params.extend(list(critic.parameters()))
+        nn.utils.clip_grad_norm_(cost_critic_params, self.max_grad_norm)
+        self.cost_critic_optimizer.step()
+
+        return cost_critic_loss.item()
+
+    def _cost_loss_scale(self, target_theta: torch.Tensor) -> float:
+        """Running scale of the cost-critic targets, used to make the quantile loss scale-free.
+
+        EMA of the batch standard deviation, detached and floored. Measured offline on frozen
+        checkpoints: SD of discounted cost-to-go is 4.52 (PointGoal1) / 5.11 (CarGoal1), and
+        normalising by it takes the clipped-gradient fraction from 0.54-0.61 down to ~0.15.
+        A float (not a tensor) so it can never carry gradient into the target.
+        """
+        with torch.no_grad():
+            batch = float(target_theta.std().item())
+        if not (batch == batch) or batch in (float('inf'), float('-inf')) or batch <= 0.0:
+            return max(self._cost_scale_ema or 1.0, 1e-3)
+        m = self.cost_loss_scale_momentum
+        self._cost_scale_ema = batch if self._cost_scale_ema is None else m * self._cost_scale_ema + (1 - m) * batch
+        return max(self._cost_scale_ema, 1e-3)
+
+    def _cost_bootstrap_mask(self, dones: torch.Tensor, bootstrap: torch.Tensor | None) -> torch.Tensor:
+        """Bootstrap mask for the **cost** channel.
+
+        Delegates to the shared :meth:`SAC._bootstrap_mask`, so behaviour is unchanged for every
+        existing algorithm. Separate hook because the two channels disagree about what an episode
+        boundary *is*: for an infinite-horizon discounted objective a time-limit truncation is an
+        artifact of the simulator and you should keep bootstrapping through it, whereas for a
+        finite-horizon objective the boundary is real and the value past it is zero by definition.
+        FH-DCMPO overrides this.
+        """
+        return self._bootstrap_mask(dones, bootstrap)
+
+    def _cost_bootstrap_discount(self, effective_n_steps: torch.Tensor | None) -> torch.Tensor | float:
+        """Discount at the bootstrap step for the **cost** channel.
+
+        Delegates to the shared :meth:`SAC._bootstrap_discount`, so behaviour is unchanged for
+        every existing algorithm. It exists as a separate hook because the reward and cost
+        channels do not have to share a discount: FH-DCMPO's cost critic is undiscounted
+        (``gamma_c = 1``) because the benchmark constrains an *undiscounted episodic* cost sum,
+        while its reward critic stays at ``gamma = 0.99``. Overriding this one method is the whole
+        change on the critic side.
+        """
+        return self._bootstrap_discount(effective_n_steps)
+
+    def _update_cost_critic_quantile(
+        self,
+        obs: torch.Tensor,
+        critic_obs: torch.Tensor,
+        actions: torch.Tensor,
+        costs: torch.Tensor,
+        dones: torch.Tensor,
+        next_obs: torch.Tensor,
+        next_critic_obs: torch.Tensor,
+        bootstrap: torch.Tensor | None = None,
+        effective_n_steps: torch.Tensor | None = None,
+        cost_is_weights: torch.Tensor | None = None,
+    ) -> float:
+        """Quantile (QR-DQN) cost-critic update.
+
+        Same two departures from the reward channel as the categorical version: no entropy
+        term, and no min-over-twins (understating cost is the unsafe direction, and the cost
+        channel runs a single critic by default).
+        """
+        costs = costs.squeeze(-1)  # single-constraint, as in the categorical path
+        bootstrap_mask = self._cost_bootstrap_mask(dones, bootstrap).squeeze(-1)
+        discount = self._cost_bootstrap_discount(effective_n_steps)
+        if isinstance(discount, torch.Tensor):
+            discount = discount.reshape(-1)
+        disc = discount.unsqueeze(-1) if isinstance(discount, torch.Tensor) else discount
+
+        with torch.no_grad():
+            next_actions, _ = self.policy.sample_with_log_prob(next_obs)
+            next_obs_norm = self.policy.critic_obs_normalizer(next_critic_obs)
+            target_thetas = [
+                costs.unsqueeze(-1) + disc * bootstrap_mask.unsqueeze(-1) * target(next_obs_norm, next_actions)
+                for target in self.policy.cost_critic_targets
+            ]
+
+        obs_normalized = self.policy.critic_obs_normalizer(critic_obs)
+        # Per-transition weights from hazard-stratified replay; [batch] to match the
+        # per-sample quantile loss, and 1.0 when stratification is off.
+        weights = 1.0 if cost_is_weights is None else cost_is_weights.view(-1)
+        cost_critic_loss = 0.0
+        for i, (critic, target_theta) in enumerate(zip(self.policy.cost_critics, target_thetas)):
+            theta = critic(obs_normalized, actions)
+            if self.cost_loss_scale_norm:
+                # Scale-free quantile loss. The per-sample gradient magnitude is
+                #     g(u) = w * min(|u| / kappa, 1),   u = target - theta
+                # so every error larger than kappa contributes the SAME constant push.
+                # Measured on both tasks: 54-61% of per-quantile errors are in that clipped
+                # regime (mean g ~0.8), i.e. a state wrong by 15 pushes no harder than one
+                # wrong by 1.5, and the critic has no incentive to fix the badly-wrong states
+                # first. Dividing the errors by their running scale s restores proportionality
+                # (clipped fraction drops to ~0.15 at s = sigma ~ 4.5-5.1).
+                #
+                # Raising kappa does NOT do this: it shrinks |u|/kappa but divides the slope
+                # by kappa, cancelling. Tested -- kappa=5 made cost 16.2 -> 28.4. See
+                # codex/qr-dmpo-math.md 1.3.
+                #
+                # The loss is multiplied back by s so its magnitude (and the effective
+                # learning rate) is unchanged; the ONLY thing this alters is the relative
+                # weighting across samples, which is what Adam does not already normalise.
+                # The critic's OUTPUT stays in raw cost-Q units, so qc_thres, the E-step and
+                # every downstream statistic are untouched.
+                s = self._cost_loss_scale(target_theta)
+                per_sample_cost_loss = s * quantile_huber_loss(
+                    theta / s, target_theta / s, critic.tau_hat, critic.kappa
+                )
+            else:
+                per_sample_cost_loss = quantile_huber_loss(theta, target_theta, critic.tau_hat, critic.kappa)
+            cost_critic_loss = cost_critic_loss + (weights * per_sample_cost_loss).mean()
+            if i == 0:
+                with torch.no_grad():
+                    self._last_cost_critic_diag = {
+                        "critic_cost_mean_Q": float(critic.get_value(theta).mean()),
+                        "critic_cost_zero_frac": float(critic.zero_frac(theta).mean()),
+                        "critic_cost_spread": float(critic.spread(theta).mean()),
+                    }
 
         self.cost_critic_optimizer.zero_grad()
         cost_critic_loss.backward()

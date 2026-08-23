@@ -13,14 +13,19 @@ from safe_rl.algorithms.pcpo import PCPO
 from safe_rl.algorithms.p3o import P3O
 from safe_rl.algorithms.pcrpo import PCRPO
 from safe_rl.algorithms.ppol_pid import PPOL_PID
+from safe_rl.algorithms.rcppo import RCPPO
 from safe_rl.algorithms.cup import CUP
 from safe_rl.algorithms.focops import FOCOPS
 from safe_rl.algorithms.fppo import FPPO
 from safe_rl.algorithms.reppo import REPPO
+from safe_rl.algorithms.reppo_dime import REPPODIME
 from safe_rl.envs import VecEnv
 from safe_rl.modules import (
     ActorCritic,
+    ActorCriticCost,
+    ActorCriticReachQ,
     ActorCriticRecurrent,
+    DIMEActorCritic,
     EmpiricalNormalization,
     REPPOActorCritic,
     StudentTeacher,
@@ -47,10 +52,14 @@ class OnPolicyRunner:
             self.training_type = "rl"
         elif self.alg_cfg["class_name"] == "REPPO":
             self.training_type = "rl"  # REPPO is on-policy reward-only RL
+        elif self.alg_cfg["class_name"] == "REPPODIME":
+            self.training_type = "rl"  # REPPO with a DIME diffusion actor
         elif self.alg_cfg["class_name"] == "P3O":
             self.training_type = "saferl"  # P3O is also RL but with cost constraints
         elif self.alg_cfg["class_name"] == "PPOL_PID":
             self.training_type = "saferl"  # PPOL_PID is also safe RL with cost constraints
+        elif self.alg_cfg["class_name"] == "RCPPO":
+            self.training_type = "saferl"  # RCPPO is safe RL with a reachability (HJ) safety-value constraint
         elif self.alg_cfg["class_name"] == "CUP":
             self.training_type = "saferl"  # CUP is safe RL with two-phase constraint projection
         elif self.alg_cfg["class_name"] == "PCRPO":
@@ -94,8 +103,19 @@ class OnPolicyRunner:
         policy_class_name = self.policy_cfg.pop("class_name")
 
         # Safe RL algorithms: validate cost_limits and inject num_costs into policy kwargs
-        # so ActorCritic builds a cost_critic of the right width.
-        if self.alg_cfg["class_name"] in ["P3O", "PPOL_PID", "CUP", "PCRPO", "CPO", "PCPO", "FPPO", "FOCOPS"]:
+        # so ActorCriticCost builds a cost_critic of the right width.
+        is_saferl_alg = self.alg_cfg["class_name"] in [
+            "P3O",
+            "PPOL_PID",
+            "RCPPO",
+            "CUP",
+            "PCRPO",
+            "CPO",
+            "PCPO",
+            "FPPO",
+            "FOCOPS",
+        ]
+        if is_saferl_alg:
             if "cost_limits" not in self.alg_cfg or self.alg_cfg["cost_limits"] is None:
                 if hasattr(self.env, "cost_limits") and self.env.cost_limits is not None:
                     self.alg_cfg["cost_limits"] = self.env.cost_limits
@@ -108,6 +128,17 @@ class OnPolicyRunner:
             self.policy_cfg["num_costs"] = len(self.alg_cfg["cost_limits"])
 
         policy_class = eval(policy_class_name)
+
+        # Safe RL needs a cost critic; plain ActorCritic is reward-only and would fail later with
+        # an obscure AttributeError deep in the algorithm's update. Fail here, naming the fix.
+        if is_saferl_alg and not issubclass(policy_class, ActorCriticCost):
+            raise ValueError(
+                f"Safe RL algorithm {self.alg_cfg['class_name']} requires a policy with a cost critic, "
+                f"but 'policy.class_name' is {policy_class_name!r}, which has none. "
+                "Set 'policy.class_name: ActorCriticCost' in the config "
+                "(or ActorCriticReachQ for RCPPO, which extends it)."
+            )
+
         policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
@@ -141,12 +172,38 @@ class OnPolicyRunner:
         # store training configuration
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
+        # Log the x-axis in ENV STEPS instead of iterations (see log()). Off by
+        # default so existing runs/dashboards are untouched; enabled in the
+        # ManiSkill comparison configs so our curves align with the reference's.
+        self._log_env_steps = bool(self.cfg.get("log_env_steps", False))
+        # Mirror episode stats + periodic eval under the TruDi reference's metric
+        # names (train/return, train/episode_len, eval/success_ode_100, ...) so our
+        # runs and theirs overlay. Their headline number is eval/success_ode_100 —
+        # a periodic DETERMINISTIC (ODE) evaluation, which we otherwise never run.
+        self._trudi_schema = bool(self.cfg.get("algorithm", {}).get("trudi_wandb_schema", False))
+        self._eval_interval = int(self.cfg.get("eval_interval", 0))
+        self._eval_episodes = int(self.cfg.get("eval_episodes", 100))
+        # Which eval passes to run. Default keeps both (historical behaviour). Set to
+        # ["ode"] when only the deterministic number is compared: on fixed-length
+        # 1000-step envs each pass costs ~num_envs * max_episode_length env steps, so
+        # dropping the unused SDE pass halves a cost that is comparable to the whole
+        # training budget.
+        self._eval_modes = tuple(self.cfg.get("eval_modes", ("ode", "sde")))
+        for _m in self._eval_modes:
+            if _m not in ("ode", "sde"):
+                raise ValueError(f"eval_modes entries must be 'ode' or 'sde'; got {_m!r}")
+        # Set when an eval pass raises, so a run with a broken eval is distinguishable
+        # from one that simply never evaluated (the blanket except below otherwise
+        # makes those two look identical to any downstream analysis).
+        self._eval_failed = False
+        self._pseudo_terminal_warned = False
         self.empirical_normalization = self.cfg["empirical_normalization"]
+        obs_clip = self.cfg.get("obs_normalization_clip", None)
         if self.empirical_normalization:
-            self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8).to(self.device)
-            self.privileged_obs_normalizer = EmpiricalNormalization(shape=[num_privileged_obs], until=1.0e8).to(
-                self.device
-            )
+            self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8, clip=obs_clip).to(self.device)
+            self.privileged_obs_normalizer = EmpiricalNormalization(
+                shape=[num_privileged_obs], until=1.0e8, clip=obs_clip
+            ).to(self.device)
         else:
             self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
             self.privileged_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
@@ -171,6 +228,23 @@ class OnPolicyRunner:
                 d_min=cbf_cfg.get("d_min", 0.35),
                 v_scale=cbf_cfg.get("v_scale", 1.0),
                 max_iter=cbf_cfg.get("max_iter", 5),
+                device=self.device,
+            )
+
+        # Reachability safety filter (optional — enabled via cfg["reach_filter"]["enabled"]).
+        # Queries the policy's learned Q_h head (ActorCriticReachQ/RCPPO), so unlike the CBF
+        # filter it needs no privileged state or known dynamics.
+        reach_cfg = self.cfg.get("reach_filter", None)
+        self.reach_filter = None
+        if reach_cfg and reach_cfg.get("enabled", False):
+            from safe_rl.filters import ReachabilitySafetyFilter
+            self.reach_filter = ReachabilitySafetyFilter(
+                policy=self.alg.policy,
+                threshold=reach_cfg.get("threshold", 0.0),
+                num_candidates=reach_cfg.get("num_candidates", 16),
+                mode=reach_cfg.get("mode", "switch"),
+                blend_temp=reach_cfg.get("blend_temp", 0.5),
+                perturb_std=reach_cfg.get("perturb_std", 0.4),
                 device=self.device,
             )
 
@@ -215,10 +289,8 @@ class OnPolicyRunner:
             )
 
         # start learning
-        obs, extras = self.env.get_observations()
-        privileged_obs = extras["observations"].get(self.privileged_obs_type, obs)
-        obs, privileged_obs = obs.to(self.device), privileged_obs.to(self.device)
         self.train_mode()  # switch to train mode (for dropout for example)
+        obs, privileged_obs = self._fetch_normalized_observations()
 
         # Book keeping
         ep_infos = []
@@ -266,6 +338,9 @@ class OnPolicyRunner:
                     # Apply CBF action filter if enabled
                     if self.cbf_filter is not None:
                         actions = self.cbf_filter.filter(actions, self.env)
+                    # Apply learned reachability safety filter if enabled
+                    if self.reach_filter is not None:
+                        actions = self.reach_filter.filter(actions, privileged_obs)
                     # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
@@ -276,6 +351,16 @@ class OnPolicyRunner:
                         # Support both "cost" (singular) and "costs" (plural) keys
                         costs = infos.get("costs", infos.get("cost", torch.zeros_like(rewards)))
                         costs = costs.to(self.device)
+                    # No pseudo-terminal channel on-policy: fail rather than silently drop it.
+                    if "pseudo_terminated" in infos and not self._pseudo_terminal_warned:
+                        self._pseudo_terminal_warned = True
+                        raise NotImplementedError(
+                            "The env publishes infos['pseudo_terminated'] (goal_pseudo_terminal is on) "
+                            f"but {type(self.alg).__name__} does not consume it, so the goal-respawn "
+                            "value boundary would be ignored. Use an off-policy runner, or turn "
+                            "goal_pseudo_terminal off."
+                        )
+
                     # perform normalization
                     obs = self.obs_normalizer(obs)
                     if self.privileged_obs_type is not None:
@@ -318,7 +403,17 @@ class OnPolicyRunner:
                         cur_episode_length += 1
                         # Clear data for completed episodes
                         # -- common
-                        new_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)  # Flatten to 1D
+                        # An episode ends on `dones` OR on a timeout. Envs that use the
+                        # partial-reset convention (e.g. ManiSkillVecEnv) report
+                        # dones=False ALWAYS and signal episode ends only through
+                        # infos["time_outs"], so keying purely on `dones` left the
+                        # reward/length buffers permanently empty and suppressed every
+                        # episode statistic (no train/return, no train/episode_len).
+                        _ep_end = dones > 0
+                        _touts = infos.get("time_outs") if isinstance(infos, dict) else None
+                        if _touts is not None:
+                            _ep_end = _ep_end | (_touts.to(_ep_end.device).view(_ep_end.shape) > 0)
+                        new_ids = _ep_end.nonzero(as_tuple=False).squeeze(-1)  # Flatten to 1D
                         rewbuffer.extend(cur_reward_sum[new_ids].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
@@ -371,6 +466,11 @@ class OnPolicyRunner:
             if self.log_dir is not None and not self.disable_logs: 
                 # Log information
                 self.log(locals())
+                # Periodic ODE/SDE evaluation (TruDi-style); no-op unless eval_interval > 0
+                if self._eval_interval > 0 and it % self._eval_interval == 0:
+                    _fresh = self._periodic_eval(self.tot_timesteps if self._log_env_steps else it)
+                    if _fresh is not None:
+                        obs, privileged_obs = _fresh
                 # Save model
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
@@ -390,6 +490,108 @@ class OnPolicyRunner:
         if self.log_dir is not None and not self.disable_logs:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
+    @torch.inference_mode()
+    def _periodic_eval(self, it: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Deterministic (ODE) and stochastic (SDE) evaluation, TruDi-style.
+
+        The reference evaluates periodically with BOTH policies and reports
+        `eval/success_ode_100` — its headline metric (0.498 on PickCube) — while its
+        stochastic `train/success` stays at ~0.005. Without this hook our runs have
+        no comparable number at all, which is why the ODE result had to be measured
+        offline from checkpoints one at a time.
+
+        Enabled by `eval_interval > 0` in the runner config; a no-op otherwise, so
+        existing configs are unaffected.
+        """
+        policy = self.alg.policy
+        was_training = policy.training
+        policy.eval()
+        # Prefer a dedicated eval env when the wrapper provides one. ManiSkill's
+        # reference eval env is built with reconfiguration_freq=1, i.e. it resamples
+        # assets/layout each reset; the TRAINING env does not. Evaluating on the
+        # training env would therefore skip exactly the generalization that tasks like
+        # PickSingleYCB-v1 exist to measure, and inflate our number against a reference
+        # that reconfigured. Built lazily by the wrapper, so runs that never eval pay
+        # nothing.
+        eval_env = getattr(self.env, "eval_env", None) or self.env
+        shares_train_env = eval_env is self.env
+        try:
+            modes = [("ode", True)] if self._eval_modes == ("ode",) else \
+                    [("", False)] if self._eval_modes == ("sde",) else \
+                    [("ode", True), ("", False)]
+            for tag, deterministic in modes:
+                obs, _ = eval_env.reset()
+                n = eval_env.num_envs
+                ret = torch.zeros(n, device=self.device)
+                succ = torch.zeros(n, dtype=torch.bool, device=self.device)
+                rets, lens, hits, eps = [], [], 0, 0
+                steps = int(getattr(eval_env, "max_episode_length", 200))
+                cur_len = torch.zeros(n, device=self.device)
+                for _ in range(steps * max(1, self._eval_episodes // max(n, 1)) + steps):
+                    act = policy.act_inference(obs) if deterministic else policy.act(obs)
+                    obs, rew, dones, infos = eval_env.step(act)
+                    # GPU env wrappers (ManiSkill) return INFERENCE tensors; any
+                    # in-place accumulation onto them raises "Inplace update to
+                    # inference tensor outside InferenceMode". Clone to plain
+                    # tensors and accumulate out-of-place.
+                    rew = rew.view(-1).clone()
+                    dones = dones.view(-1).clone()
+                    ret = ret + rew
+                    cur_len = cur_len + 1
+                    if isinstance(infos, dict) and infos.get("success_flag") is not None:
+                        succ = succ | infos["success_flag"].view(-1).bool().clone()
+                    fin = dones > 0
+                    touts = infos.get("time_outs") if isinstance(infos, dict) else None
+                    if touts is not None:
+                        fin = fin | (touts.view(-1).clone() > 0)
+                    if fin.any():
+                        rets += ret[fin].tolist()
+                        lens += cur_len[fin].tolist()
+                        hits += int(succ[fin].sum())
+                        eps += int(fin.sum())
+                        keep = ~fin
+                        ret = ret * keep
+                        cur_len = cur_len * keep
+                        succ = succ & keep
+                    if eps >= self._eval_episodes:
+                        break
+                if eps == 0:
+                    continue
+                suffix = "_ode_100" if deterministic else ""
+                self.writer.add_scalar(f"eval/success{suffix}", hits / eps, it)
+                self.writer.add_scalar(f"eval/episode_return{suffix}", sum(rets) / len(rets), it)
+                self.writer.add_scalar(f"eval/episode_length{suffix}", sum(lens) / len(lens), it)
+                print(f"  [eval{suffix or '_sde'}] episodes={eps} "
+                      f"success={hits / eps:.4f} return={sum(rets) / len(rets):.3f}")
+        except Exception as exc:  # noqa: BLE001 — eval must never kill a training run
+            self._eval_failed = True
+            print(f"[eval][FAIL] skipped ({type(exc).__name__}: {exc})")
+        finally:
+            if was_training:
+                policy.train()
+
+        # A dedicated eval env leaves the training env untouched, so the runner's
+        # cached observation is still valid — re-fetching would only disturb it.
+        if not shares_train_env:
+            return None
+
+        # Otherwise this eval ran on the TRAINING env, leaving it in a state that no
+        # longer matches the runner's cached `obs`; collection would resume by stepping
+        # with an action computed from a stale observation. Hand the true current
+        # observation back instead.
+        return self._fetch_normalized_observations()
+
+    def _fetch_normalized_observations(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Current observations, normalized as the rollout loop normalizes every step."""
+        obs, extras = self.env.get_observations()
+        obs = self.obs_normalizer(obs.to(self.device))
+        if self.privileged_obs_type is None:
+            return obs, obs
+        privileged_obs = self.privileged_obs_normalizer(
+            extras["observations"][self.privileged_obs_type].to(self.device)
+        )
+        return obs, privileged_obs
+
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         # Compute the collection size
         collection_size = self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
@@ -397,6 +599,14 @@ class OnPolicyRunner:
         self.tot_timesteps += collection_size
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
+
+        # X-axis unit. Default (False) keeps the historical ITERATION index, so every
+        # existing run and dashboard is unaffected. With `log_env_steps: true` the
+        # x-axis becomes ENV STEPS, matching the TruDi reference (their wandb `_step`
+        # is env steps: 393216, 786432, ...). Without this, our 381-iteration run
+        # collapses into the first few pixels of theirs on a shared chart — the two
+        # axes differ by num_envs*num_steps_per_env = 131072x.
+        locs["it"] = self.tot_timesteps if self._log_env_steps else locs["it"]
 
         # -- Episode info
         ep_string = ""
@@ -426,7 +636,12 @@ class OnPolicyRunner:
 
         # -- Losses
         for key, value in locs["loss_dict"].items():
-            self.writer.add_scalar(f"Loss/{key}", value, locs["it"])
+            # A key that already carries its own namespace (contains "/") is logged
+            # verbatim, so an algorithm can emit metrics under a foreign schema --
+            # e.g. REPPODIME mirrors the TruDi reference's `actor/kl`, `critic/qf_loss`
+            # names so our runs and theirs overlay directly in wandb. Everything else
+            # keeps the historical "Loss/" prefix.
+            self.writer.add_scalar(key if "/" in key else f"Loss/{key}", value, locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
 
         # -- Policy
@@ -438,6 +653,11 @@ class OnPolicyRunner:
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
         if self.cbf_filter is not None:
             self.writer.add_scalar("CBF/solve_time_ms", self.cbf_filter.last_solve_ms, locs["it"])
+        if self.reach_filter is not None:
+            self.writer.add_scalar("ReachFilter/solve_time_ms", self.reach_filter.last_solve_ms, locs["it"])
+            self.writer.add_scalar(
+                "ReachFilter/intervention_frac", self.reach_filter.last_intervention_frac, locs["it"]
+            )
 
         # -- Training
         if len(locs["rewbuffer"]) > 0:
@@ -509,6 +729,10 @@ class OnPolicyRunner:
             # everything else
             self.writer.add_scalar("Train/episode_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
+            if self._trudi_schema:
+                # Mirror under the TruDi reference's names so the curves overlay.
+                self.writer.add_scalar("train/return", statistics.mean(locs["rewbuffer"]), locs["it"])
+                self.writer.add_scalar("train/episode_len", statistics.mean(locs["lenbuffer"]), locs["it"])
             if self.logger_type != "wandb":  # wandb does not support non-integer x-axis logging
                 self.writer.add_scalar("Train/mean_reward/time", statistics.mean(locs["rewbuffer"]), self.tot_time)
                 self.writer.add_scalar(
@@ -609,6 +833,10 @@ class OnPolicyRunner:
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        # -- Algorithm-owned state the dicts above miss (REPPO: duals + critic/alpha
+        # optimizers). Absent for algorithms that do not define it.
+        if hasattr(self.alg, "extra_state_dict"):
+            saved_dict["alg_extra_state"] = self.alg.extra_state_dict()
         # -- Save RND model if used
         if self.alg.rnd:
             saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
@@ -651,6 +879,9 @@ class OnPolicyRunner:
             # -- RND optimizer if used
             if self.alg.rnd:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+        # -- algorithm-owned extra state (see save)
+        if resumed_training and hasattr(self.alg, "load_extra_state"):
+            self.alg.load_extra_state(loaded_dict.get("alg_extra_state", {}))
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]

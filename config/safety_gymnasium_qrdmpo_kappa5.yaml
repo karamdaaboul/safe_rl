@@ -1,0 +1,139 @@
+# QR-DMPO — CVPO/DMPO with a QUANTILE (QR-DQN) critic instead of C51.
+#
+# Phase 1 of the distributional-critic comparison. This file is a clone of
+# safety_gymnasium_dmpo_pid_goal1.yaml with EXACTLY ONE change: the critic representation.
+# Every algorithm hyperparameter, the n-step horizon, tau, the learning rates and the PID
+# lambda controller are byte-identical to the C51 arm on purpose — the comparison is only
+# interpretable if the critic is the sole difference.
+#
+# Why swap the representation at all: the cost return here is zero-inflated (~57% of the mass
+# sits on zero), so C51's fixed 101-atom support over [0, 50] spends most of its resolution on
+# a value that carries no information, and can still saturate at the upper edge. QR-DQN fixes
+# the probabilities (1/N each) and learns the atom POSITIONS, putting resolution where the
+# mass actually is.
+
+algorithm:
+  class_name: CVPO
+  # -- Discount and target update
+  gamma: 0.99
+  # Cost-critic fix arm. The 1-step cost target at gamma=0.99 on a sparse binary cost
+  # gives a per-sample learning signal ~36x smaller than the per-sample noise, and the
+  # critic settles into a near-constant, level-deficient solution (measured on the
+  # original arm: calibration slope 0.07 against a true cost-to-go range 0-38, level
+  # ~0.6x Bellman-consistent). n-step targets carry n real cost samples per update and
+  # contract the level error by gamma^n per backup instead of gamma.
+  # NOTE: n_step is a buffer-wide setting, so this changes the REWARD critic's horizon too.
+  # It is read from the `runner:` block below (OffPolicyRunner forwards it into the
+  # algorithm); setting it here under `algorithm:` is silently ignored.
+  tau: 0.005
+
+  # -- Learning rates
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  cost_critic_lr: 0.0003
+
+  # -- Training
+  batch_size: 256
+  num_updates_per_step: 2   # matched to the improved arm
+  max_grad_norm: 1.0
+
+  # -- CVPO E-step
+  sample_action_num: 64     # candidate actions sampled per state
+  dual_constraint: 0.1      # E-step KL bound (eps in the dual)
+
+  # -- CVPO M-step (decoupled KL trust regions, MPO-style)
+  kl_mean_constraint: 0.01
+  kl_var_constraint: 0.0001
+  alpha_mean_scale: 1.0
+  alpha_var_scale: 100.0
+  alpha_mean_max: 8.0       # FSRL-equivalent: its 0.5 acts on an MLE term scaled by 1/K (K=16).
+  alpha_var_max: 10.0
+  mstep_iteration_num: 5
+
+  # -- Cost constraint
+  cost_limits: [25.0]       # episodic cost limit; can be overridden via --cost_limits
+  cost_horizon: 1000        # episode length used to scale the episodic limit into cost-Q space
+  # Both fixes at once: critic-side (n-step + non-negative head) and units-side.
+  qc_scale_source: measured
+  qc_scale_measured: 0.0764
+  qc_scale_probe: >-
+    scratchpad/probe_runs/cvpo_orig_115723_m29999_seed1_n200_calib.jsonl
+    (200 episodes, seed 1, checkpoint CVPO/20260803_115723/model_29999.pt,
+    G_c(s0) mean 3.550 / J_c mean 46.475)
+  qc_thres_adapt: false
+  # Graded-lambda controller instead of the per-batch joint dual solve. The joint solve is
+  # bang-bang (lambda snaps to a bound) once the sampled action set can't reach qc_thres; the
+  # graded controller integrates the violation for a stable, regulating multiplier.
+  # See codex/cvpo-negative-result.md.
+  lambda_source: episodic   # lambda from realized J_c, not from Q_c's level
+  lambda_mode: grad         # eta from the dual solve; lambda from the controller below
+  lambda_update: pid        # Kp + integral + Kd, anti-windup at the bounds
+  lambda_kp: 0.25           # immediate response: 0.25 * delta(~2.2 early) = 0.55
+  lambda_kd: 0.5            # damping; meaningful now the controller steps once per measurement
+  lambda_anti_windup: true  # freeze the integral while saturated so lambda can come back down
+  lambda_init: 0.0          # start unconstrained and let the controller integrate up
+  lambda_episodic_warmup: 5 # real cost reports before engaging; the runner's 0.0 fallback is discarded
+  lambda_lr: 0.1            # = Ki. ~240 controller steps per run, so 0.03 was too slow to engage.
+  lambda_max: 4.0           # ~ the measured std_a(Qr)/std_a(Qc) balance point
+
+policy:
+  class_name: SafeActorCritic   # quantile reward critics + a quantile cost critic
+  # THE ONLY DIFFERENCE FROM THE C51 ARM. `quantile` -> QuantileCritic; `distributional` ->
+  # DistributionalCritic (C51). The C51 path is untouched and remains the baseline.
+  critic_type: quantile
+  cost_critic_type: quantile
+  num_costs: 1
+  actor_kwargs:
+    hidden_dims: [256, 256]
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    # 64 quantiles is the QR-DQN default. Note this is NOT matched to C51's 101 atoms: the
+    # two numbers do not mean the same thing (learned positions vs learned probabilities on
+    # a fixed grid), and matching them would trade the standard setting for a false symmetry.
+    n_quantiles: 64
+    kappa: 1.0              # Huber threshold, in return units
+    nonneg: false           # reward returns are signed
+    tqc_drop: 0             # TQC-style top-quantile truncation is Phase 2; must stay 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+  cost_critic_kwargs:
+    # `nonneg: true` is the quantile analogue of the C51 cost critic's one-sided support
+    # (v_min=0): cost is non-negative, so a softplus head makes a negative Q_c structurally
+    # impossible. That property is what the repo credits for the constraint-satisfaction
+    # improvement, so it is preserved rather than re-derived. Set false to ablate it.
+    n_quantiles: 64
+    kappa: 5.0   # measured: with kappa=1, 99% of quantile errors on targets >10 sit in the
+                 # LINEAR regime with mean |u| ~15, so the gradient is capped at 1 while the
+                 # error is 15x that. kappa=5 gives the tail a 5x stronger signal.
+    nonneg: true
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims: [256, 256]
+      activation: relu
+
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10                # in-buffer n-step targets for BOTH reward and cost critics
+  experiment_name: safety_gymnasium_qrdmpo_kappa5
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+
+runner_class_name: OffPolicyRunner
+seed: 1

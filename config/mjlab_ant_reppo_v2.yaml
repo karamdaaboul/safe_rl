@@ -1,0 +1,71 @@
+# NOTE (twin-critic removal): this config originally used twin critics with a
+# min-reduction. REPPO is now single-critic, matching the reference, so this
+# arm's twin-min pessimism is NO LONGER REPRODUCIBLE from this file.
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# REPPO v2 for mjlab Ant-Flat. v1 (config/mjlab_ant_reppo.yaml) escaped the
+# stand-still optimum and learned to walk (reward -6 -> +10 peak), but the
+# sustained-high entropy target (0.5/dim -> std ~0.4) made it noisy and
+# capped/oscillating, so PPO's task-tuned baseline stayed well ahead.
+#
+# v2 keeps the strong INITIAL exploration (init_noise_std 1.0) to escape the
+# trap, but lowers the entropy TARGET so the dual anneals std toward ~0.24 for
+# exploitation, and gives the critic more fitting per rollout:
+#   - target_entropy 0.5 -> 0.0 /dim     (std settles ~0.24, not ~0.4)
+#   - num_learning_epochs 4 -> 6         (faster critic warmup)
+# Everything else (and the 1024-env x 64-step x 1500-iter budget) is kept
+# identical to v1 / the PPO baseline so the wandb curves overlay 1:1.
+# ===========================================================================
+
+algorithm:
+  class_name: REPPO
+  # -- returns
+  gamma: 0.99
+  lam: 0.95
+  # -- KL constraint
+  desired_kl: 0.1
+  # -- learned dual variables
+  init_alpha_temp: 0.01
+  init_alpha_kl: 0.01
+  target_entropy: 0.0     # per action-dim; multiplied by num_actions internally
+  # -- optimizers
+  learning_rate: 0.0003
+  alpha_lr: 0.0003
+  max_grad_norm: 1.0
+  # -- target networks (Polyak)
+  # -- training
+  num_learning_epochs: 6
+  num_mini_batches: 8
+
+policy:
+  class_name: REPPOActorCritic
+  actor_type: gaussian
+  critic_type: distributional
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 512, 512]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: log
+  critic_kwargs:
+    num_atoms: 151
+    v_min: -20.0
+    v_max: 100.0
+    network_type: mlp
+    network_kwargs:
+      hidden_dims: [1024, 1024, 1024]
+      activation: elu
+      layer_norm: true
+
+runner:
+  num_steps_per_env: 64
+  max_iterations: 1500
+  empirical_normalization: false
+  save_interval: 250
+  experiment_name: mjlab_ant_reppo_v2
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab

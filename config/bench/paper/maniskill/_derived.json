@@ -1,0 +1,42 @@
+{
+  "LiftPegUpright-v1": {
+    "gamma": 0.8,
+    "max_episode_steps": 50,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "PegInsertionSide-v1": {
+    "gamma": 0.9,
+    "max_episode_steps": 100,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "PickSingleYCB-v1": {
+    "gamma": 0.8,
+    "max_episode_steps": 50,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "PokeCube-v1": {
+    "gamma": 0.8,
+    "max_episode_steps": 50,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "PullCube-v1": {
+    "gamma": 0.8,
+    "max_episode_steps": 50,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "RollBall-v1": {
+    "gamma": 0.875,
+    "max_episode_steps": 80,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "UnitreeG1PlaceAppleInBowl-v1": {
+    "gamma": 0.9,
+    "max_episode_steps": 100,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  },
+  "UnitreeG1TransportBox-v1": {
+    "gamma": 0.9,
+    "max_episode_steps": 100,
+    "source": "mani_skill.utils.registration.REGISTERED_ENVS[task].max_episode_steps"
+  }
+}

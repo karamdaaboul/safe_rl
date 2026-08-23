@@ -1,0 +1,83 @@
+algorithm:
+  class_name: RCPPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.02
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 40.0
+  learning_rate: 0.0003
+  num_learning_epochs: 40
+  num_mini_batches: 4
+  schedule: adaptive
+  gamma_h: 0.999
+  cost_margin: 0.0
+  cost_limits:
+  - 0.1
+  train_reach_q: true
+  reach_q_lr: 0.001
+  reach_q_loss_coef: 1.0
+  lagrangian_pid:
+  - 0.05
+  - 0.005
+  - 0.1
+  lambda_init:
+  - 0.001
+  lambda_max: 100.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: false
+  rnd_cfg: null
+  symmetry_cfg: null
+policy:
+  class_name: ActorCriticReachQ
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims:
+    - 128
+    - 128
+    - 128
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims:
+    - 128
+    - 128
+    - 128
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    - 256
+    activation: elu
+  reach_critic_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    - 256
+    activation: elu
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 150
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: rcppo_diag_C_gammaH
+  run_name: ''
+  logger: tensorboard
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+runner_class_name: OnPolicyRunner
+seed: 1

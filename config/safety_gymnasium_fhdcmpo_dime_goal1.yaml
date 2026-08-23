@@ -1,0 +1,134 @@
+# FH-DCMPO-DIME — constrained finite-horizon E-step + DIFFUSION (denoising) M-step.
+#
+# CLAUDE.md's M3, for the finite-horizon constrained method. Two halves, each taken unchanged:
+#   * E-step  from safety_gymnasium_fhdcmpo_s1b_mean_goal1.yaml (our best Gaussian arm):
+#     undiscounted episodic cost critic, qc_thres = 25 with no qc_scale, retuned lambda gains.
+#   * M-step  from safety_gymnasium_mpo_dime.yaml: DIME/TruDi denoiser, weighted path-MLE under a
+#     PATH-SPACE KL trust region (kl_path_constraint), not an action-space one.
+#
+# TWO DISTINCT KL BUDGETS, and conflating them is CLAUDE.md rule 2:
+#   dual_constraint     eps  = 0.1   -- q vs pi_old, INSIDE the E-step dual
+#   kl_path_constraint  beta = 0.05  -- pi_theta vs pi_old, in PATH space, in the M-step
+#
+# The cost critic is consulted BY VALUE only, at the final actions of the sampled chains. No
+# gradient is ever chained from a cost critic back through the denoising steps (rule 3); the
+# safety signal reaches the policy through the E-step's scalar weights.
+#
+# SEQUENCING CAVEAT: CLAUDE.md gates M3 on M2 passing, and the Gaussian arms have not yet reached
+# the QR-DMPO baseline (best 38% budget violations vs 26%). Read any diffusion-vs-Gaussian
+# difference as suggestive until that closes; the Gaussian arm is the control.
+#
+# COST: each E-step candidate is diff_steps sequential score-net forwards, so sample_action_num is
+# 20 here rather than the Gaussian arm's 64. That is a real difference between the arms.
+algorithm:
+  class_name: FHDCMPODIME
+  gamma: 0.99
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  batch_size: 256
+  num_updates_per_step: 2
+  max_grad_norm: 1.0
+  sample_action_num: 20
+  dual_constraint: 0.1
+  estep_use_target_critic: true
+  estep_q_reduction: mean
+  kl_path_constraint: 0.05
+  alpha_path_scale: 1.0
+  alpha_path_max: 100.0
+  kl_form: simplified
+  mstep_iteration_num: 5
+  cost_limits:
+  - 25.0
+  cost_horizon: 1000
+  qc_thres: 25.0
+  qc_thres_adapt: false
+  fh_risk_mode: mean
+  fh_alpha: 0.9
+  fh_kappa: 1.0
+  fh_kappa_warmup: 5000
+  fh_kappa_ramp: 15000
+  lambda_source: episodic
+  lambda_mode: grad
+  lambda_update: pid
+  lambda_kp: 0.12
+  lambda_kd: 0.5
+  lambda_anti_windup: true
+  lambda_init: 0.0
+  lambda_episodic_warmup: 5
+  lambda_lr: 0.05
+  lambda_max: 1.8
+  cost_critic_lr: 0.0003
+policy:
+  class_name: SafeMPODIMEActorCritic
+  critic_type: standard
+  critic_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+  diffusion:
+    diff_steps: 8
+    init_std: 2.5
+    friction: 1.0
+    per_dim_friction: true
+    learn_friction: false
+    learn_dt: false
+    per_step_dt: false
+    learn_prior: false
+    learn_forward: true
+    learn_backward: false
+    dt_schedule:
+      type: cosine
+      min: 0.001
+      s: 0.008
+      pow: 2
+    score_model:
+      num_layers: 3
+      num_hid: 256
+      num_time_hid: 32
+      num_time_out: 16
+      outer_clip: 10000.0
+      inner_clip: 100.0
+      weight_init: 1.0e-08
+      bias_init: 0.0
+      layer_norm: true
+      layer_norm_type: LayerNorm
+  num_costs: 1
+  num_cost_critics: 1
+  cost_critic_kwargs:
+    n_quantiles: 64
+    kappa: 1.0
+    nonneg: true
+    tqc_drop: 0
+    network_kwargs:
+      hidden_dims:
+      - 256
+      - 256
+      activation: relu
+env:
+  kwargs:
+    horizon_feature: true
+    budget_feature: false
+runner:
+  num_steps_per_env: 4
+  max_iterations: 100000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 5000
+  empirical_normalization: false
+  n_step: 10
+  experiment_name: safety_gymnasium_fhdcmpo_dime_goal1
+  run_name: ''
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+  log_interval: 1000
+runner_class_name: OffPolicyRunner
+seed: 1

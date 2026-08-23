@@ -1,0 +1,71 @@
+algorithm:
+  class_name: PPOL_PID
+  # Hyperparameters matched to FSRL's tuned ppol_cfg.py MujocoBaseCfg
+  # (cost_limit 25). Only the gains/epochs/clip/lr differ from the sibling config.
+  # training parameters
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 0.25     # FSRL vf_coef
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.02
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 0.5        # FSRL default; ours was 40.0 (effectively unclipped)
+  learning_rate: 0.0005     # FSRL lr
+  num_learning_epochs: 4    # FSRL repeat_per_collect=4; ours was 40
+  num_mini_batches: 4
+  schedule: adaptive
+
+  # PPOL-PID specific parameters (aligned with OmniSafe CPPOPID)
+  lagrangian_pid: [0.05, 0.0005, 0.1]  # FSRL ppol_cfg default (Kp, Ki, Kd). Ours used Ki=0.01,
+                                       # 20x larger, and lambda wound up to 82.5/100 and never released.
+  lambda_init: [0.001]
+  lambda_max: 100.0
+  pid_delta_p_ema_alpha: 0.95
+  pid_delta_d_ema_alpha: 0.95
+  pid_d_delay: 10
+  sum_norm: true
+  diff_norm: false
+
+  # Cost critic loss
+  cost_loss_coef: 1.0
+  use_clipped_cost_loss: true
+
+  # Disable extra features by default
+  rnd_cfg: null
+  symmetry_cfg: null
+
+policy:
+  class_name: ActorCriticCost
+  actor_type: gaussian
+  critic_type: standard
+  actor_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [128, 128, 128]
+    activation: elu
+  cost_critic_kwargs:
+    hidden_dims: [256, 256, 256]  # preserved from legacy default (cost_critic_hidden_dims was unset)
+    activation: elu
+
+runner:
+  num_steps_per_env: 2048
+  max_iterations: 500
+  empirical_normalization: false
+  save_interval: 100
+  experiment_name: safety_gymnasium_ppol_pid_fsrl
+  run_name: ""
+  logger: wandb
+  wandb_project: SafeRL
+  wandb_entity: uqerh-kit
+  load_run: -1
+  resume_path: null
+  checkpoint: -1
+
+runner_class_name: OnPolicyRunner
+seed: 1
+

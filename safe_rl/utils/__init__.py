@@ -1,5 +1,7 @@
 """Helper functions."""
 
+from .console import configure as configure_console_logging
+from .console import get_logger
 from .logger import Logger
 from .n_step_return import NStepReturnAggregator
 from .torch_utils import (
@@ -11,10 +13,10 @@ from .torch_utils import (
     trainable_parameters,
 )
 from .utils import (
+    TensorAverageMeterDict,
     resolve_nn_activation,
     split_and_pad_trajectories,
     store_code_state,
     string_to_callable,
-    TensorAverageMeterDict,
     unpad_trajectories,
 )
