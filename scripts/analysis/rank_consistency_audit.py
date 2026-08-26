@@ -89,6 +89,12 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
+# Single-threaded on purpose. The nets are 256x256 MLPs evaluated one state at a time, so torch's
+# intra-op threads buy nothing, and MuJoCo -- the actual bottleneck -- is single-threaded anyway.
+# Measured: with the default thread pool, five concurrent cells each consumed ~3.2 cores on a
+# 16-core box and made no progress in 74 minutes; the time went to thread contention, not work.
+torch.set_num_threads(1)
+
 import safety_gymnasium  # noqa: E402
 
 import safe_rl.modules as sr_modules  # noqa: E402
@@ -289,17 +295,32 @@ def act_stochastic(policy, obs_t: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def sample_actions(policy, obs_t: torch.Tensor, n: int, gen: torch.Generator) -> torch.Tensor:
-    """N actions the way the E-step draws them: pre-tanh Normal(mean, std), then squash.
+def sample_actions(policy, obs_t: torch.Tensor, n: int, gen: torch.Generator,
+                   proposal: str = "policy") -> torch.Tensor:
+    """N candidate actions. ``policy`` reproduces the E-step's own proposal.
 
     Mirrors `MPO._estep_sample` (mpo.py:239-260) with estep_sample_std_scale == 1.0, asserted in
     preflight. Uses `policy.actor` rather than the algorithm's `actor_target`, which no
     checkpoint persists; the two differ only by the Polyak/hard target lag.
+
+    The wider proposals exist to separate "actions do not matter" from "this policy only ever
+    proposes near-identical actions". ``uniform`` ignores the policy entirely and covers the
+    action box, which is the strongest available test for a real action effect.
     """
+    a_b, a_c = policy.actor.action_b, policy.actor.action_c
+    if proposal == "uniform":
+        # Uniform over the action box: a_b +- a_c is exactly the reachable range of the squash.
+        u = torch.rand((n, a_c.numel() if a_c.dim() else obs_t.shape[-1]), generator=gen,
+                       device=obs_t.device)
+        return a_b + a_c * (2.0 * u - 1.0)
     mean, log_std = policy.actor(obs_t)
     std = log_std.exp()
+    if proposal == "policy_std_x3":
+        std = std * 3.0
+    elif proposal != "policy":
+        raise SystemExit(f"unknown --proposal {proposal}")
     x = mean + std * torch.randn((n, mean.shape[-1]), generator=gen, device=mean.device)
-    return policy.actor.action_b + policy.actor.action_c * torch.tanh(x)
+    return a_b + a_c * torch.tanh(x)
 
 
 @torch.no_grad()
@@ -407,7 +428,8 @@ def collect_states(env, policy, sim, n_states: int, skip: int, horizon: int,
 
 
 def rollout_branch(env, policy, sim, snap: dict, action: np.ndarray, t0: int,
-                   horizon: int, device: str, seed: int) -> tuple[float, int, bool]:
+                   horizon: int, device: str, seed: int,
+                   max_steps: int | None = None) -> tuple[float, int, bool]:
     """Restore, take `action`, then follow pi to episode end. Returns (undiscounted cost, len, ended).
 
     The reseed is what makes reps independent: `_SimState.restore` puts the task RNG back to the
@@ -425,6 +447,8 @@ def rollout_branch(env, policy, sim, snap: dict, action: np.ndarray, t0: int,
     t += 1
     steps += 1
     while not (term or trunc):
+        if max_steps is not None and steps >= max_steps:
+            break
         obs_t = _obs_with_u(obs_raw, t, horizon, device)
         a = act_stochastic(policy, obs_t).cpu().numpy().reshape(-1)
         obs_raw, _rw, c, term, trunc, _i = env.step(a)
@@ -435,10 +459,17 @@ def rollout_branch(env, policy, sim, snap: dict, action: np.ndarray, t0: int,
 
 
 def audit_state(env, policy, sim, st: dict, n_actions: int, reps: int, horizon: int,
-                device: str, gen: torch.Generator, base_seed: int) -> dict:
-    """Predicted vs Monte-Carlo cost-to-go for N actions at one state, with a noise ceiling."""
+                device: str, gen: torch.Generator, base_seed: int,
+                proposal: str = "policy", max_steps: int | None = None) -> dict:
+    """Predicted vs Monte-Carlo cost for N actions at one state, with a noise ceiling.
+
+    NOTE on `max_steps`: capping the rollout makes the MC a truncated H-step cost sum, which is
+    NOT what Q_c predicts (cost-to-go to episode end). At H < full, `rho_critic` therefore is not
+    a critic-quality number -- it compares two different quantities. `rho_ceiling` and the
+    variance decomposition remain valid at any H, because both are MC-vs-MC.
+    """
     obs_t = _obs_with_u(st["obs_raw"], st["t"], horizon, device)
-    actions = sample_actions(policy, obs_t, n_actions, gen)
+    actions = sample_actions(policy, obs_t, n_actions, gen, proposal)
     predicted, zero_frac = cost_readout(policy, obs_t, actions)
     q_r = reward_readout(policy, obs_t, actions)
 
@@ -451,7 +482,7 @@ def audit_state(env, policy, sim, st: dict, n_actions: int, reps: int, horizon: 
         rep_seed = (base_seed + 7919 * st["t"] + 104729 * rep) % (2**31 - 1)
         for i in range(n_actions):
             total, steps, term = rollout_branch(
-                env, policy, sim, st["snap"], a_np[i], st["t"], horizon, device, rep_seed
+                env, policy, sim, st["snap"], a_np[i], st["t"], horizon, device, rep_seed, max_steps
             )
             mc[rep, i], lens[rep, i] = total, steps
             terminated += int(term)
@@ -460,8 +491,18 @@ def audit_state(env, policy, sim, st: dict, n_actions: int, reps: int, horizon: 
     mc_mean = mc.mean(axis=0)
     rho_c = spearman(predicted, mc_mean)
     rho_ceil = mean_pairwise_spearman(mc)
+    # Unbiased split of the across-action variance. Under "the action has no effect",
+    # var over action-means == sigma_noise^2 / R; the excess over that is the action effect.
+    noise_var = float(mc.var(axis=0, ddof=1).mean()) if reps > 1 else float("nan")
+    across_var = float(mc_mean.var(ddof=1))
+    excess = across_var - noise_var / reps
     return {
         "t": int(st["t"]),
+        "action_std_per_dim": a_np.std(axis=0).tolist(),
+        "across_action_var": across_var,
+        "noise_var": noise_var,
+        "excess_var": excess,
+        "excess_share": excess / across_var if across_var > 1e-12 else float("nan"),
         "rho_critic": rho_c,
         "rho_ceiling": rho_ceil,
         "std_a_qc": float(np.std(predicted)),
@@ -507,11 +548,23 @@ def main() -> None:
     ap.add_argument("--restore-tol", type=float, default=1e-6)
     ap.add_argument("--ceiling-floor", type=float, default=0.05,
                     help="|rho_ceiling| below this -> rho_normalized is NaN, not a huge number")
+    ap.add_argument("--horizon", default="full",
+                    help="MC rollout cap in steps, or 'full' for episode end. Only 'full' matches "
+                         "what Q_c predicts; shorter H makes rho_critic non-comparable (ceiling "
+                         "and excess stay valid).")
+    ap.add_argument("--proposal", default="policy",
+                    choices=("policy", "policy_std_x3", "uniform"),
+                    help="candidate-action distribution; wider ones test whether a narrow policy "
+                         "proposal is what hides the action effect")
+    ap.add_argument("--tag", default="", help="suffix for the output filename")
     ap.add_argument("--out_dir", default="outputs/rank_audit")
     args = ap.parse_args()
 
     if args.reps < 2:
         raise SystemExit("--reps must be >= 2: with one rollout there is no noise ceiling")
+    max_steps = None if str(args.horizon).lower() == "full" else int(args.horizon)
+    if max_steps is not None and max_steps < 1:
+        raise SystemExit("--horizon must be >= 1 or 'full'")
 
     t_start = time.time()
     torch.manual_seed(args.seed)
@@ -551,7 +604,7 @@ def main() -> None:
     rows = []
     for k, st in enumerate(states, 1):
         row = audit_state(env, policy, sim, st, args.actions, args.reps, horizon,
-                          args.device, gen, args.seed)
+                          args.device, gen, args.seed, args.proposal, max_steps)
         ceil = row["rho_ceiling"]
         row["rho_normalized"] = (row["rho_critic"] / ceil
                                  if np.isfinite(ceil) and abs(ceil) >= args.ceiling_floor
@@ -571,6 +624,17 @@ def main() -> None:
         "cell": args.cell, "env_id": args.env_id, "checkpoint": args.checkpoint,
         "iter": blob.get("iter"), "seed": args.seed, "states": len(rows),
         "actions": args.actions, "reps": args.reps, "horizon": horizon,
+        "mc_horizon": args.horizon, "proposal": args.proposal,
+        "rho_critic_comparable": max_steps is None,
+        "action_std_per_dim": np.mean([r["action_std_per_dim"] for r in rows], axis=0).tolist(),
+        "excess_var": {
+            "mean": float(np.mean([r["excess_var"] for r in rows])),
+            "median": float(np.median([r["excess_var"] for r in rows])),
+            "deciles": np.percentile([r["excess_var"] for r in rows],
+                                     [10, 20, 30, 40, 50, 60, 70, 80, 90]).tolist(),
+            "frac_positive": float(np.mean([r["excess_var"] > 0 for r in rows])),
+        },
+        "excess_share_median": float(np.nanmedian([r["excess_share"] for r in rows])),
         "wall_clock_s": round(time.time() - t_start, 1),
         "restore_roundtrip_maxdiff": d,
         "rho_critic": {"median": med_c, "q25": lo_c, "q75": hi_c},
@@ -585,7 +649,8 @@ def main() -> None:
         "buckets": bucket_rows(rows, args.skip, args.t_hi),
         "facts": facts,
     }
-    out = REPO / args.out_dir / f"{args.cell}.json"
+    name = args.cell if not args.tag else f"{args.cell}__{args.tag}"
+    out = REPO / args.out_dir / f"{name}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"summary": summary, "per_state": rows}, indent=1, default=float) + "\n")
 
@@ -594,6 +659,13 @@ def main() -> None:
           f"rho_normalized {med_n:+.3f} [{lo_n:+.3f}, {hi_n:+.3f}]")
     print(f"    std_a(Qc) {summary['mean_std_a_qc']:.4f}  zero_frac {summary['mean_zero_frac']:.3f}  "
           f"mc_len {summary['mean_mc_len']:.0f}  {summary['wall_clock_s']:.0f}s")
+    ev = summary["excess_var"]
+    print(f"    H={args.horizon} proposal={args.proposal}  excess mean={ev['mean']:+.2f} "
+          f"median={ev['median']:+.2f} frac>0={ev['frac_positive']:.0%}  "
+          f"action_std/dim={np.round(summary['action_std_per_dim'], 4).tolist()}")
+    if max_steps is not None:
+        print("    NOTE: H < full -> rho_critic compares Q_c (episode-end) against a truncated "
+              "MC; read ceiling/excess, not rho_critic.")
     for b in summary["buckets"]:
         print(f"    t[{b['t_lo']:4d},{b['t_hi']:4d}) n={b['n']:3d}  rho_c={b['rho_critic_med']:+.3f}  "
               f"ceil={b['rho_ceiling_med']:+.3f}  norm={b['rho_normalized_med']:+.3f}")
