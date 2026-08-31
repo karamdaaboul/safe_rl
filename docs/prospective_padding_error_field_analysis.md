@@ -102,7 +102,9 @@ Committed **after** the contaminated k=16 return, C5 Q-spread amplitudes, \(\sig
 
 ---
 
-## Amendment A — Probe 0 code-convention audit (2026-08-31)
+## Amendment A.0 — SUPERSEDED (audited wrong branch): Probe 0 on the torch re-implementation (2026-08-31)
+
+> **Superseded by Amendment A below.** This audit was performed on `safe_rl/algorithms/reppo.py` — the local torch re-implementation (pathwise-only, M=1, no E-step) — which is **not** the code that produced the padded runs. Its statements are correct for that codebase and are retained unedited for provenance only; no probe may cite them.
 
 Audited commit: `5371715` (branch `fhdcmpo-multienv-sweep`); every cited file verified unmodified in the working tree at audit time (`git diff --stat HEAD` empty for all three). Audited operator: the REPPO actor update, `safe_rl/algorithms/reppo.py`.
 
@@ -119,3 +121,24 @@ Audited commit: `5371715` (branch `fhdcmpo-multienv-sweep`); every cited file ve
 **Recordables.** \(M=1\) action sample per state in the actor loss (the 16 belong to the KL estimator only); no \(\varepsilon_E\) exists — the trust-region bound is `desired_kl` (0.1 in the v24-lineage paper-bench configs, hard-gate "clipped" mode `reppo.py:899-901`); \(\Sigma\) is diagonal in code (`Normal(mean, std)`, `stochastic_actor_critic_base.py:138-150`); the function evaluated is the **live** critic's categorical-head mean — `evaluate_q` → `critic.get_value(critic.get_dist(logits))` (`safe_rl/modules/reppo_actor_critic.py:159-161`) — with no target network (REPPO has none).
 
 **Formula consequences.** No amendment to the proposition is required: its self-check 6 already scopes eqs (11)–(20) to the stated Gaussian estimator, and answer 2 resolves that scoping — the ZO formulas apply only to estimators the probes construct themselves (whitened Gaussian \(u\), sample-mean baseline, per-state fresh iid draws, exactly eq. (13)'s \(\hat a_M\)); the pathwise formulas (proposition Sec. 2) apply to the training operator directly, composed with the tanh Jacobian at the post-tanh evaluation point per answer 1. Eqs (13)–(14) themselves are machine-verified in `scripts/analysis/verify_wasted_step_moments.py` (max cov residual 2.6e-3 at M=2 shrinking to 1.6e-4 at M=32; the variant dropping \(-(M-2)aa^\top\) rejected by 60–90× at M=8/32).
+
+
+---
+
+## Amendment A — Probe 0 code-convention audit (2026-08-31, corrected: training fork `reppo_original`)
+
+Audited commit: `3b96deb` (branch `main`) of `~/workspaces/reppo_original` — the JAX fork that produced the padded runs. Provenance: `pad16_B_s*.log` carry `actor_update_mode: weighted_mle`, `estep_num_samples: 32`, `eps_e: 0.5`, `action_pad: 16`, `mstep_decoupled: false`, `actor_kl_clip_mode: clipped` (arm B = weighted-MLE + single KL clip), were started 2026-08-30 21:52 — after `3b96deb` (2026-08-30 15:52) — and export into the `*_weighted_mle_pad16_*` namespace that `3b96deb` itself introduced. Both audited files (`src/jaxrl/reppo.py`, `src/networks/jax_models.py`) verified unmodified in the fork's working tree at audit time (its only diffs touch `src/env_utils/jax_wrappers.py`, `src/torchrl/envs.py`).
+
+1. **Coordinates.** `3b96deb` — pathwise arm `src/jaxrl/reppo.py:641-644`: \(Q_\phi\) sees the **post-tanh** action from the distrax tanh-Normal (`src/networks/jax_models.py:525`), **unclipped**; weighted-MLE arm `src/jaxrl/reppo.py:669,705`: the \(\pi_{old}\) samples are clipped to \(\pm(1-10^{-4})\) at line 669 **before** the critic call, so in arm B \(Q_\phi\) is evaluated on **clipped post-tanh** actions and the same clipped array feeds every log-prob — in this arm the clip is part of \(F(u)\), not only of the log-probability.
+
+2. **Weight centering.** `3b96deb` — `src/jaxrl/reppo.py:134-155,708-711`: **raw self-normalized softmax** weights \(w_i=\mathrm{softmax}(q_i/\eta)\) in \(\text{objective}=-\sum_i w_i\log\pi_\theta(a_i)\), with no centering, no baseline, no antithetic pairing — **the \(\bar u\) noise term of proposition eq. (23) is live** and must be measured in Probes 2 and 4.
+
+3. **Sampling.** `3b96deb` — `src/jaxrl/reppo.py:666-668` with key flow `src/jaxrl/reppo.py:915,925-927,933-938`: the \((M{=}32,B,d)\) proposal draws are iid Gaussian within one call, **but** the seed `key` is a closure constant over the minibatch `lax.scan` — every minibatch of an epoch reuses the **same** key (fresh key per epoch only), that key also seeds the arm's SAC-style sample (line 641), and the E-step actions are reused (never re-sampled) for the KL estimator and the critic alike — so the independence behind eqs (5)/(14) holds across epochs and offline redraws, **not** across minibatches within an epoch.
+
+4. **Temperature.** `3b96deb` — `src/networks/jax_models.py:377,409-413` (mirrored at `507,539-543`) + `src/jaxrl/reppo.py:156-172,700,716`: \(\eta\) is a **single learned scalar shared across the whole batch** (per-batch, never per-state), softplus-parameterized and clipped to \([\eta_{min},\eta_{max}]\), updated by **one gradient step per minibatch** on the standard MPO dual \(g(\eta)=\eta\,\varepsilon_E+\eta\,\mathrm{mean}_j\,\mathrm{LSE}_i(q_{ji}/\eta)\) over the same \(M{=}32\) samples (max pulled out; \(q\) detached) — a gradient-tracked dual, **not** solved to optimality per iteration — detached inside the weights and **deterministic at probe time** (a stored checkpoint parameter).
+
+5. **Direction law.** `3b96deb` — `src/networks/jax_models.py:523-525` + `src/jaxrl/reppo.py:666-668`: **Gaussian** — full-action proposals from \(\pi_{old}\)'s diagonal tanh-Normal, equivalently \(y=\mu_{old}+\sigma_{old}\odot u,\ u\sim\mathcal N(0,I)\) (the decoupled path draws \(u\) explicitly, `src/jaxrl/reppo.py:729-731`, unused in arm B); no unit-sphere or fixed-norm direction sampling exists.
+
+**Recordables.** \(M=32\) (`estep_num_samples`); \(\varepsilon_E=0.5\) (`eps_e`); \(\Sigma\) diagonal and state-dependent (`loc, log_std` head split, \(\sigma=e^{\log\sigma}+\text{min\_std}\) with `actor_min_std: 0.0` in the padded runs, `src/networks/jax_models.py:523-524`); the Q head is the **live** critic's categorical (HL-Gauss) mean — \(\mathrm{softmax}(\text{logits})\cdot\mathrm{linspace}(v_{min}{=}0,v_{max}{=}150)\) (`src/networks/jax_models.py:305-310`); the local name `critic_target_model` (`src/jaxrl/reppo.py:630-633`) is merged from the live `train_state.critic.params` — there is no target critic — while the actor target is a true \(\pi_{old}\) snapshot refreshed once per learn step (`src/jaxrl/reppo.py:560-567`).
+
+**Formula consequences.** Answer 2 activates the ZO/weighted-MLE track with the \(\bar u\) term live (measure it in Probes 2/4); answer 3 restricts eq. (14)'s repeated-batch use to across-epoch or offline re-drawn batches; answer 1 puts the \(\pm(1-10^{-4})\) clip inside \(F(u)\) for arm B (relevant where \(\sigma\) saturates \(|\tanh y|\to1\)); answer 4 means offline weight replication must read the checkpoint \(\eta\) verbatim rather than re-solving any dual; answer 5 and the diagonal \(\Sigma\) leave the whitened-coordinate mapping of the proposition's Sec. 1 unchanged.
