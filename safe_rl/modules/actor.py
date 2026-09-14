@@ -8,6 +8,13 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
+from safe_rl.modules.action_bounds import (
+    fill_missing_action_bound_buffers,
+    register_action_bound_buffers,
+    resolve_action_bounds,
+    squash_unit,
+    sync_scaled_flag,
+)
 from safe_rl.networks import MLP, SimbaV2, build_obs_encoder
 from safe_rl.utils import resolve_nn_activation
 
@@ -68,6 +75,9 @@ class DeterministicActor(nn.Module):
         network_kwargs: dict[str, Any] | None = None,
         encoder_type: str = "none",
         encoder_kwargs: dict[str, Any] | None = None,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -103,22 +113,54 @@ class DeterministicActor(nn.Module):
         init_scales = torch.empty(num_envs, 1).uniform_(self.noise_std_min, self.noise_std_max)
         self.register_buffer("noise_scales", init_scales)
 
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        # Per-joint action box a = b + c * tanh(u) (see safe_rl.modules.action_bounds).
+        # Unset bounds give b=0/c=1, i.e. the plain tanh actor.
+        b, c, _ = resolve_action_bounds(
+            num_actions, action_low=action_low, action_high=action_high, action_bounds=action_bounds
+        )
+        register_action_bound_buffers(self, b, c)
+
+    def _unit(self, obs: torch.Tensor) -> torch.Tensor:
+        """tanh output in [-1, 1] before the action box is applied."""
         if self.obs_encoder is not None:
             obs = self.obs_encoder(obs)
         return torch.tanh(self.network(obs))
 
+    def squash(self, u: torch.Tensor) -> torch.Tensor:
+        """Map a pre-squash value onto the action box: ``b + c * tanh(u)``."""
+        return squash_unit(self, u)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        unit = self._unit(obs)
+        if not self.scaled_actions:
+            return unit
+        return self.action_b + self.action_c * unit
+
     def act(self, obs: torch.Tensor) -> torch.Tensor:
-        """Return tanh-bounded actions with per-env Gaussian exploration noise added."""
-        actions = self.forward(obs)
+        """Return box-bounded actions with per-env Gaussian exploration noise added.
+
+        The noise is applied in the unit tanh space and clipped there, so ``noise_std_*``
+        keep meaning "fraction of each joint's range": a joint with half-width ``c_j``
+        gets noise of std ``noise_std * c_j`` in action units.
+        """
+        unit = self._unit(obs)
         if self.has_exploration_noise and self.training:
-            noise = torch.randn_like(actions) * self.noise_scales[: actions.shape[0]]
-            actions = (actions + noise).clamp(-1.0, 1.0)
-        return actions
+            noise = torch.randn_like(unit) * self.noise_scales[: unit.shape[0]]
+            unit = (unit + noise).clamp(-1.0, 1.0)
+        if not self.scaled_actions:
+            return unit
+        return self.action_b + self.action_c * unit
 
     def act_inference(self, obs: torch.Tensor) -> torch.Tensor:
-        """Return the deterministic tanh-bounded action without added noise."""
+        """Return the deterministic box-bounded action without added noise."""
         return self.forward(obs)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints written before the action box existed carry no bound buffers:
+        # keep the configured box. A checkpoint that carries one pins it.
+        fill_missing_action_bound_buffers(self, state_dict, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        sync_scaled_flag(self)
 
     def as_onnx(self, pre_normalizer: nn.Module | None = None, actor_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
         """Return an ONNX-exportable wrapper: pre_normalizer → actor_normalizer → network."""
@@ -219,6 +261,7 @@ class StochasticActor(nn.Module):
         norm_type: str = "layernorm",
         action_low: list[float] | None = None,
         action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         network_type: str = "mlp",
         network_kwargs: dict[str, Any] | None = None,
         encoder_type: str = "none",
@@ -314,25 +357,23 @@ class StochasticActor(nn.Module):
 
         # Per-joint bounded action scaling: a = b + c * tanh(x), with the matching
         # -sum(log c_j) Jacobian term in the log-prob. When bounds are unset, b=0/c=1
-        # reduces exactly to plain tanh squashing in [-1, 1].
-        self.scaled_actions = action_low is not None and action_high is not None
-        if self.scaled_actions:
-            low = torch.as_tensor(action_low, dtype=torch.float32)
-            high = torch.as_tensor(action_high, dtype=torch.float32)
-            if low.shape != (num_actions,) or high.shape != (num_actions,):
-                raise ValueError(
-                    f"action_low/action_high must have length num_actions={num_actions}, "
-                    f"got {tuple(low.shape)} / {tuple(high.shape)}."
-                )
-            action_b = 0.5 * (high + low)
-            action_c = 0.5 * (high - low)
-        else:
-            action_b = torch.zeros(num_actions)
-            action_c = torch.ones(num_actions)
-        self.register_buffer("action_b", action_b)
-        self.register_buffer("action_c", action_c)
-        # Scalar -sum(log c_j); c is clamped so a zero-range joint can't produce -inf.
-        self.register_buffer("neg_log_action_scale", -action_c.clamp_min(1e-8).log().sum())
+        # reduces exactly to plain tanh squashing in [-1, 1]. Shared helper so every
+        # bounded actor (SAC, FastTD3, REPPO, DIME) resolves the same spellings.
+        b, c, _ = resolve_action_bounds(
+            num_actions, action_low=action_low, action_high=action_high, action_bounds=action_bounds
+        )
+        register_action_bound_buffers(self, b, c)
+
+    def squash(self, u: torch.Tensor) -> torch.Tensor:
+        """Map a pre-squash value onto the action box: ``b + c * tanh(u)``."""
+        return squash_unit(self, u)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Legacy checkpoints (before the bound buffers) keep the configured box; a
+        # checkpoint that carries buffers pins its own box.
+        fill_missing_action_bound_buffers(self, state_dict, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        sync_scaled_flag(self)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.obs_encoder is not None:
@@ -418,13 +459,15 @@ class _OnnxDeterministicActor(nn.Module):
         self.obs_encoder = deepcopy(actor.obs_encoder) if actor.obs_encoder is not None else None
         self.network = deepcopy(actor.network)
         self.input_size = actor.num_obs
+        self.register_buffer("action_b", actor.action_b.detach().clone())
+        self.register_buffer("action_c", actor.action_c.detach().clone())
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         obs = self.pre_normalizer(obs)
         obs = self.actor_normalizer(obs)
         if self.obs_encoder is not None:
             obs = self.obs_encoder(obs)
-        return torch.tanh(self.network(obs))
+        return self.action_b + self.action_c * torch.tanh(self.network(obs))
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:
         return (torch.zeros(1, self.input_size),)
@@ -446,8 +489,12 @@ class _OnnxStochasticActor(nn.Module):
         self.pre_normalizer = deepcopy(pre_normalizer) if pre_normalizer is not None else nn.Identity()
         self.actor_normalizer = deepcopy(actor_normalizer) if actor_normalizer is not None else nn.Identity()
         self.obs_encoder = deepcopy(actor.obs_encoder) if actor.obs_encoder is not None else None
-        self.backbone = deepcopy(actor.backbone)
-        self.mean_head = deepcopy(actor.mean_head)
+        # network_type="simba" has a single trunk emitting [mean, log_std]; "mlp" has
+        # a backbone + separate heads. Mirror StochasticActor.forward for both.
+        self.is_simba = actor.network_type == "simba"
+        self.network = deepcopy(actor.network) if self.is_simba else None
+        self.backbone = deepcopy(actor.backbone) if not self.is_simba else None
+        self.mean_head = deepcopy(actor.mean_head) if not self.is_simba else None
         self.input_size = actor.num_obs
         self.register_buffer("action_b", actor.action_b.detach().clone())
         self.register_buffer("action_c", actor.action_c.detach().clone())
@@ -457,7 +504,12 @@ class _OnnxStochasticActor(nn.Module):
         obs = self.actor_normalizer(obs)
         if self.obs_encoder is not None:
             obs = self.obs_encoder(obs)
-        return self.action_b + self.action_c * torch.tanh(self.mean_head(self.backbone(obs)))
+        if self.is_simba:
+            out = self.network(obs)
+            mean = out[..., : out.shape[-1] // 2]
+        else:
+            mean = self.mean_head(self.backbone(obs))
+        return self.action_b + self.action_c * torch.tanh(mean)
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:
         return (torch.zeros(1, self.input_size),)

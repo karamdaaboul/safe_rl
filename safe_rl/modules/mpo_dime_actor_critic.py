@@ -58,6 +58,9 @@ class MPODIMEActorCritic(nn.Module):
         diffusion: dict[str, Any] | None = None,
         ode_coef: float = 1.0,
         action_scale: float = 1.0,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         compile_score_net: bool = False,
         compile_mode: str = "default",
         critic_kwargs: dict[str, Any] | None = None,
@@ -73,7 +76,6 @@ class MPODIMEActorCritic(nn.Module):
         self.num_actions = num_actions
         self.num_actor_obs = num_actor_obs
         self.num_critic_obs = num_critic_obs
-        self.action_scale = float(action_scale)
         self.actor_type = "dime"
         self.critic_type = critic_type
         self.num_critics = num_critics
@@ -139,7 +141,13 @@ class MPODIMEActorCritic(nn.Module):
             ode_integrator=ode_integrator,
             logratio=logratio,
             action_scale=action_scale,
+            action_low=action_low,
+            action_high=action_high,
+            action_bounds=action_bounds,
         )
+        # The box lives on the actor (buffers); mirror the legacy scalar and expose the
+        # per-joint helpers REPPO/MPO read from the policy.
+        self.action_scale = self.actor.action_scale
         print(f"MPO-DIME Actor: {self.actor}")
 
         # Optional speedup — see DIMEActorCritic for why the compile() METHOD is
@@ -208,6 +216,18 @@ class MPODIMEActorCritic(nn.Module):
                 scales.append(torch.sqrt(2 * eta).expand(self.num_actions))
             return torch.stack(scales).mean(dim=0)
 
+    @property
+    def scaled_actions(self) -> bool:
+        return bool(getattr(self.actor, "scaled_actions", False))
+
+    @property
+    def sum_log_action_scale(self) -> float:
+        """``sum_j log c_j`` of the actor's action box (0 when unbounded)."""
+        return float(self.actor.sum_log_action_scale)
+
+    def squash_unit_action(self, x: torch.Tensor) -> torch.Tensor:
+        return self.actor.squash(x)
+
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
         if self.actor_obs_normalization:
             self.actor_obs_normalizer.update(actor_obs)
@@ -255,8 +275,9 @@ class MPODIMEActorCritic(nn.Module):
     def sample_random_action(self, num_envs: int) -> torch.Tensor:
         """Uniform warmup actions in the squashed range (-action_scale, +action_scale)."""
         device = next(self.parameters()).device
-        unit = torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
-        return self.action_scale * unit
+        from safe_rl.modules.action_bounds import uniform_in_box
+
+        return uniform_in_box(self.actor, num_envs, device)
 
     def as_onnx(self, obs_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
         raise NotImplementedError(

@@ -110,7 +110,7 @@ class MPODIME(MPO):
         obs_tiled = actor_obs.unsqueeze(0).expand(n, -1, -1).reshape(n * batch_size, -1)
         traj, old_means, old_scales = sde_rollout_with_traj(self.actor_target.diffusion_model, obs_tiled)
 
-        actions = self.policy.actor.action_scale * torch.tanh(traj[-1])
+        actions = self.policy.actor.squash(traj[-1])
 
         cobs_exp = critic_obs.unsqueeze(0).expand(n, -1, -1).reshape(n * batch_size, -1)
         if self.estep_use_target_critic:

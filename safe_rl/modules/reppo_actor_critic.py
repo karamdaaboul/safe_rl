@@ -48,6 +48,9 @@ class REPPOActorCritic(StochasticActorCriticBase):
         action_scale: float = 1.0,
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -70,6 +73,9 @@ class REPPOActorCritic(StochasticActorCriticBase):
             # form's up-to-100x amplification.
             normalizer_eps_mode="add_var",
             actor_kwargs=actor_kwargs,
+            action_low=action_low,
+            action_high=action_high,
+            action_bounds=action_bounds,
         )
         print(f"REPPO Actor: {self.actor}")
 

@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 import torch
 import torch.nn as nn
 
+from safe_rl.modules.action_bounds import BOUND_KEYS, uniform_in_box
 from safe_rl.modules.actor import StochasticActor
 from safe_rl.modules.critic import StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
@@ -42,6 +43,9 @@ class SafeSACActorCritic(nn.Module):
         critic_kwargs: dict[str, Any] | None = None,
         cost_critic_kwargs: dict[str, Any] | None = None,
         cost_critic_nonneg: bool = False,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         """Initialize Safe SAC Actor-Critic.
@@ -88,6 +92,11 @@ class SafeSACActorCritic(nn.Module):
                 "SafeSACActorCritic.__init__ got unexpected arguments, which will be ignored: "
                 + str([key for key in kwargs])
             )
+        # Per-joint action box on the policy -> actor (see safe_rl.modules.action_bounds).
+        policy_box = {k: v for k, v in dict(action_low=action_low, action_high=action_high, action_bounds=action_bounds).items() if v is not None}
+        if policy_box and any(k in actor_kwargs for k in BOUND_KEYS):
+            raise ValueError("Give the action box either on the policy (action_bounds/action_low/action_high) or in actor_kwargs, not both.")
+        actor_kwargs.update(policy_box)
         cost_critic_kwargs = deepcopy(cost_critic_kwargs) if cost_critic_kwargs is not None else {}
 
         self.num_actions = num_actions
@@ -352,9 +361,9 @@ class SafeSACActorCritic(nn.Module):
                 target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
     def sample_random_action(self, num_envs: int) -> torch.Tensor:
-        """Sample random actions for initial exploration."""
+        """Uniform warm-up actions over the actor's action box ([-1, 1] when unbounded)."""
         device = next(self.parameters()).device
-        return torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
+        return uniform_in_box(self.actor, num_envs, device)
 
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
         """Update observation normalizers."""

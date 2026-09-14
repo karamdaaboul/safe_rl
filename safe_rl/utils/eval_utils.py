@@ -46,11 +46,13 @@ def make_q_argmax_policy(policy_module: Any, num_samples: int):
         samples = dist.sample((num_samples,))                             # [N, B, A]
         candidates = torch.cat([dist.mean.unsqueeze(0), samples], dim=0)  # [N+1, B, A]
         if getattr(policy_module, "squash", "none") == "tanh":
-            # action_scale is NOT optional here: the policy emits
-            # `action_scale * tanh(u)`, so squashing to +-1 alone would hand the
-            # critic and the env actions up to `action_scale` times too small --
-            # silently crippling Q-greedy on any widened-range policy.
-            candidates = getattr(policy_module, "action_scale", 1.0) * torch.tanh(candidates)
+            # The action box is NOT optional here: the policy emits `b + c * tanh(u)`,
+            # so squashing to +-1 alone would hand the critic and the env actions up
+            # to c_j times too small -- silently crippling Q-greedy on any widened box.
+            if hasattr(policy_module, "squash_unit_action"):
+                candidates = policy_module.squash_unit_action(candidates)
+            else:
+                candidates = getattr(policy_module, "action_scale", 1.0) * torch.tanh(candidates)
         num_cand = candidates.shape[0]
         # evaluate_q normalizes critic_obs internally; broadcast obs over candidates.
         flat_obs = critic_obs.unsqueeze(0).expand(num_cand, batch, -1).reshape(num_cand * batch, -1)

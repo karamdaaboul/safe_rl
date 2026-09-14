@@ -32,10 +32,10 @@ def _critic_loss_standard(
     dones: torch.Tensor,
     next_obs: torch.Tensor,
     gamma: float,
-    smoothing_noise: float,
-    noise_clip: float,
-    action_low: float,
-    action_high: float,
+    smoothing_noise: torch.Tensor,
+    noise_clip: torch.Tensor,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
     clipped_double_q: bool,
     actor: nn.Module,
     critic_1: nn.Module,
@@ -48,8 +48,11 @@ def _critic_loss_standard(
 ) -> torch.Tensor:
     with torch.no_grad():
         next_mean = actor(actor_obs_normalizer(next_actor_obs))
-        noise = torch.randn_like(next_mean).mul(smoothing_noise).clamp(-noise_clip, noise_clip)
-        next_actions = (next_mean + noise).clamp(action_low, action_high)
+        # Per-joint vectors [A] so a bounded actor's target-smoothing noise and clamp
+        # scale with each joint's half-width (all ±1 / scalar when unbounded).
+        dt = next_mean.dtype
+        noise = (torch.randn_like(next_mean) * smoothing_noise.to(dt)).clamp(-noise_clip.to(dt), noise_clip.to(dt))
+        next_actions = (next_mean + noise).clamp(action_low.to(dt), action_high.to(dt))
 
         next_obs_norm = critic_obs_normalizer(next_obs)
         q1_t = target_1(next_obs_norm, next_actions)
@@ -71,10 +74,10 @@ def _critic_loss_distributional(
     dones: torch.Tensor,
     next_obs: torch.Tensor,
     gamma: float,
-    smoothing_noise: float,
-    noise_clip: float,
-    action_low: float,
-    action_high: float,
+    smoothing_noise: torch.Tensor,
+    noise_clip: torch.Tensor,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
     clipped_double_q: bool,
     actor: nn.Module,
     critic_1: nn.Module,
@@ -90,8 +93,11 @@ def _critic_loss_distributional(
 
     with torch.no_grad():
         next_mean = actor(actor_obs_normalizer(next_actor_obs))
-        noise = torch.randn_like(next_mean).mul(smoothing_noise).clamp(-noise_clip, noise_clip)
-        next_actions = (next_mean + noise).clamp(action_low, action_high)
+        # Per-joint vectors [A] so a bounded actor's target-smoothing noise and clamp
+        # scale with each joint's half-width (all ±1 / scalar when unbounded).
+        dt = next_mean.dtype
+        noise = (torch.randn_like(next_mean) * smoothing_noise.to(dt)).clamp(-noise_clip.to(dt), noise_clip.to(dt))
+        next_actions = (next_mean + noise).clamp(action_low.to(dt), action_high.to(dt))
 
         next_obs_norm = critic_obs_normalizer(next_obs)
         logits_t1 = target_1(next_obs_norm, next_actions)
@@ -203,6 +209,31 @@ class FastTD3:
         self.action_low = action_low
         self.action_high = action_high
         self.clipped_double_q = clipped_double_q
+
+        # Target-policy smoothing operates on the actor's action box. A bounded actor
+        # (policy.action_bounds, see safe_rl.modules.action_bounds) defines the clamp
+        # and scales the noise per joint; the algorithm cfg's scalar action_low/high
+        # then have no role and must stay at their ±1 defaults so there is one source
+        # of truth. Unbounded actors keep the scalar behaviour, broadcast to [A].
+        actor = getattr(self.policy, "actor", None)
+        num_actions = int(getattr(self.policy, "num_actions", 0) or getattr(actor, "num_actions", 0))
+        if actor is not None and getattr(actor, "scaled_actions", False):
+            if (float(action_low), float(action_high)) != (-1.0, 1.0):
+                raise ValueError(
+                    "FastTD3: the actor carries a per-joint action box, so algorithm.action_low/"
+                    f"action_high must stay at -1/1 (got {action_low}/{action_high}); set the box on the policy only."
+                )
+            b = actor.action_b.detach().to(self.device).float()
+            c = actor.action_c.detach().to(self.device).float()
+            self.action_low_vec = b - c
+            self.action_high_vec = b + c
+            self.smoothing_noise_vec = float(smoothing_noise) * c
+            self.noise_clip_vec = float(noise_clip) * c
+        else:
+            self.action_low_vec = torch.full((num_actions,), float(action_low), device=self.device)
+            self.action_high_vec = torch.full((num_actions,), float(action_high), device=self.device)
+            self.smoothing_noise_vec = torch.full((num_actions,), float(smoothing_noise), device=self.device)
+            self.noise_clip_vec = torch.full((num_actions,), float(noise_clip), device=self.device)
 
         self.amp = amp
         self.amp_device = "cuda" if "cuda" in self.device else "cpu"
@@ -357,8 +388,8 @@ class FastTD3:
             if self.policy.is_distributional_critic:
                 loss = _critic_loss_distributional(
                     critic_obs, actions, rewards, dones, next_critic_obs,
-                    self.bellman_gamma, self.smoothing_noise, self.noise_clip,
-                    self.action_low, self.action_high, self.clipped_double_q,
+                    self.bellman_gamma, self.smoothing_noise_vec, self.noise_clip_vec,
+                    self.action_low_vec, self.action_high_vec, self.clipped_double_q,
                     self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                     self.policy.critic_1_target, self.policy.critic_2_target,
                     self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
@@ -367,8 +398,8 @@ class FastTD3:
             else:
                 loss = _critic_loss_standard(
                     critic_obs, actions, rewards, dones, next_critic_obs,
-                    self.bellman_gamma, self.smoothing_noise, self.noise_clip,
-                    self.action_low, self.action_high, self.clipped_double_q,
+                    self.bellman_gamma, self.smoothing_noise_vec, self.noise_clip_vec,
+                    self.action_low_vec, self.action_high_vec, self.clipped_double_q,
                     self.policy.actor, self.policy.critic_1, self.policy.critic_2,
                     self.policy.critic_1_target, self.policy.critic_2_target,
                     self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,

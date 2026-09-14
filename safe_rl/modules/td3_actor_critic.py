@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 import torch
 import torch.nn as nn
 
+from safe_rl.modules.action_bounds import BOUND_KEYS, uniform_in_box
 from safe_rl.modules.actor import DeterministicActor
 from safe_rl.modules.critic import DistributionalCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
@@ -33,6 +34,9 @@ class TD3ActorCritic(nn.Module):
         critic_obs_normalization: bool = False,
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -54,6 +58,11 @@ class TD3ActorCritic(nn.Module):
 
         # -------- Actor --------
         actor_kwargs.setdefault("num_envs", num_envs)
+        # Per-joint action box (policy-level spelling; see safe_rl.modules.action_bounds).
+        policy_box = {k: v for k, v in dict(action_low=action_low, action_high=action_high, action_bounds=action_bounds).items() if v is not None}
+        if policy_box and any(k in actor_kwargs for k in BOUND_KEYS):
+            raise ValueError("Give the action box either on the policy (action_bounds/action_low/action_high) or in actor_kwargs, not both.")
+        actor_kwargs.update(policy_box)
         self.actor = DeterministicActor(
             num_obs=num_actor_obs,
             num_actions=num_actions,
@@ -140,8 +149,9 @@ class TD3ActorCritic(nn.Module):
                 target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
     def sample_random_action(self, num_envs: int) -> torch.Tensor:
+        """Uniform warm-up actions over the actor's action box ([-1, 1] when unbounded)."""
         device = next(self.parameters()).device
-        return torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
+        return uniform_in_box(self.actor, num_envs, device)
 
     def as_onnx(self, obs_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
         """Return an ONNX-exportable actor: obs_normalizer → actor_obs_normalizer → network."""

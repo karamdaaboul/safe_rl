@@ -227,8 +227,13 @@ class REPPO:
         # target by the same constant so `target_entropy: -0.5` keeps meaning "this
         # sharp relative to the action range" instead of silently demanding a
         # log(s)-per-dim sharper policy the moment the range is widened.
-        action_scale = float(getattr(policy, "action_scale", 1.0))
-        self._entropy_shift = num_actions * math.log(action_scale) if action_scale != 1.0 else 0.0
+        # Per-joint boxes shift the entropy by sum_j log c_j (safe_rl.modules.action_bounds);
+        # the scalar fallback keeps policies that only expose `action_scale` working.
+        shift = getattr(policy, "sum_log_action_scale", None)
+        if shift is None:
+            action_scale = float(getattr(policy, "action_scale", 1.0) or 1.0)
+            shift = num_actions * math.log(action_scale) if action_scale != 1.0 else 0.0
+        self._entropy_shift = float(shift)
         self.target_entropy += self._entropy_shift
 
         # Optional target-entropy anneal. The target is held at its initial value
@@ -918,7 +923,10 @@ class REPPO:
         # trained to value. This is the quantity the entropy experiments move.
         with torch.no_grad():
             if getattr(self.policy, "squash", "none") == "tanh":
-                mode_action = getattr(self.policy, "action_scale", 1.0) * torch.tanh(mu_new)
+                if hasattr(self.policy, "squash_unit_action"):
+                    mode_action = self.policy.squash_unit_action(mu_new)
+                else:
+                    mode_action = getattr(self.policy, "action_scale", 1.0) * torch.tanh(mu_new)
             else:
                 mode_action = mu_new
             q_mode = self.policy.evaluate_q(critic_obs, mode_action, normalized=True).squeeze(-1)

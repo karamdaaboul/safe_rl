@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 import torch
 import torch.nn as nn
 
+from safe_rl.modules.action_bounds import BOUND_KEYS, uniform_in_box
 from safe_rl.modules.actor import StochasticActor
 from safe_rl.modules.critic import DistributionalCritic, StandardCritic
 from safe_rl.modules.normalizer import EmpiricalNormalization
@@ -37,6 +38,9 @@ class SACActorCritic(nn.Module):
         critic_obs_normalization: bool = False,
         actor_kwargs: dict[str, Any] | None = None,
         critic_kwargs: dict[str, Any] | None = None,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         **kwargs: dict[str, Any],
     ) -> None:
         """Initialize SAC Actor-Critic.
@@ -71,6 +75,12 @@ class SACActorCritic(nn.Module):
         self.num_critics = num_critics
 
         # ==================== Actor ====================
+        # Per-joint action box a = b + c * tanh(u), configured on the policy (the task's
+        # agent cfg) and forwarded to the actor; see safe_rl.modules.action_bounds.
+        policy_box = {k: v for k, v in dict(action_low=action_low, action_high=action_high, action_bounds=action_bounds).items() if v is not None}
+        if policy_box and any(k in actor_kwargs for k in BOUND_KEYS):
+            raise ValueError("Give the action box either on the policy (action_bounds/action_low/action_high) or in actor_kwargs, not both.")
+        actor_kwargs.update(policy_box)
         init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
 
         if actor_type == "stochastic":
@@ -324,10 +334,7 @@ class SACActorCritic(nn.Module):
         action_high] when bounded action scaling is enabled (calibrated warmup).
         """
         device = next(self.parameters()).device
-        unit = torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
-        if getattr(self.actor, "scaled_actions", False):
-            return self.actor.action_b + self.actor.action_c * unit
-        return unit
+        return uniform_in_box(self.actor, num_envs, device)
 
     def as_onnx(self, obs_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
         """Return an ONNX-exportable actor: obs_normalizer → actor_obs_normalizer → backbone → tanh(mean)."""

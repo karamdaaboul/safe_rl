@@ -211,3 +211,20 @@ def test_q_argmax_respects_action_scale():
     assert chosen.abs().max() <= scale
     # with sigma ~ 1 and 32 samples, some candidate must exceed the unscaled bound
     assert chosen.abs().max() > 1.0, "candidates never left the +-1 range: action_scale ignored"
+
+
+def test_q_argmax_with_per_joint_action_bounds():
+    """A per-joint box must be applied to the candidates (b + c*tanh), not a scalar."""
+    torch.manual_seed(0)
+    policy = REPPOActorCritic(
+        num_actor_obs=OBS_DIM, num_critic_obs=CRITIC_OBS_DIM, num_actions=ACT_DIM,
+        actor_type="stochastic", critic_type="distributional", squash="tanh",
+        action_bounds=[3.0] + [1.0] * (ACT_DIM - 1),
+        actor_kwargs={"hidden_dims": [16, 16], "network_type": "mlp"},
+        critic_kwargs={"num_atoms": 11, "v_min": -5.0, "v_max": 5.0, "network_type": "simba",
+                       "network_kwargs": {"hidden_dim": 16, "num_blocks": 1}},
+    )
+    select = make_q_argmax_policy(policy, num_samples=64)
+    actions = select(torch.randn(64, OBS_DIM), torch.randn(64, CRITIC_OBS_DIM))
+    assert actions[:, 0].abs().max() <= 3.0 + 1e-5 and actions[:, 1:].abs().max() <= 1.0 + 1e-5
+    assert actions[:, 0].abs().max() > 1.0

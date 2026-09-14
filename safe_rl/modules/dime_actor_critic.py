@@ -60,6 +60,9 @@ class DIMEActorCritic(nn.Module):
         diffusion: dict[str, Any] | None = None,
         ode_coef: float = 1.0,
         action_scale: float = 1.0,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
         compile_score_net: bool = False,
         compile_mode: str = "default",
         critic_kwargs: dict[str, Any] | None = None,
@@ -76,7 +79,6 @@ class DIMEActorCritic(nn.Module):
         # Read by REPPO.__init__ to shift target_entropy by +num_actions*log(scale)
         # (reppo.py `_entropy_shift`), so a widened range does not silently demand a
         # log(s)-per-dim sharper policy. Must live on the POLICY, not just the actor.
-        self.action_scale = float(action_scale)
         self.num_actor_obs = num_actor_obs
         self.num_critic_obs = num_critic_obs
         # Score-scaling coefficient `c` for the probability-flow ODE used at
@@ -148,7 +150,13 @@ class DIMEActorCritic(nn.Module):
             # REPPO's `_entropy_shift` adds the matching +num_actions*log(scale) to
             # target_entropy, so the YAML target keeps its meaning when this widens.
             action_scale=action_scale,
+            action_low=action_low,
+            action_high=action_high,
+            action_bounds=action_bounds,
         )
+        # The box lives on the actor (buffers); mirror the legacy scalar and expose the
+        # per-joint helpers REPPO/MPO read from the policy.
+        self.action_scale = self.actor.action_scale
         print(f"REPPO-DIME Actor: {self.actor}")
 
         # Frozen KL reference — hard-synced by sync_old_actor() after each
@@ -230,6 +238,18 @@ class DIMEActorCritic(nn.Module):
                 eta = dm.delta_t_fn(step) / dm.friction_fn(step)
                 scales.append(torch.sqrt(2 * eta).expand(self.num_actions))
             return torch.stack(scales).mean(dim=0)
+
+    @property
+    def scaled_actions(self) -> bool:
+        return bool(getattr(self.actor, "scaled_actions", False))
+
+    @property
+    def sum_log_action_scale(self) -> float:
+        """``sum_j log c_j`` of the actor's action box (0 when unbounded)."""
+        return float(self.actor.sum_log_action_scale)
+
+    def squash_unit_action(self, x: torch.Tensor) -> torch.Tensor:
+        return self.actor.squash(x)
 
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
         if self.actor_obs_normalization:

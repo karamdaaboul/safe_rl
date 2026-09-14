@@ -180,6 +180,9 @@ class DIMEActor(nn.Module):
         ent_start: float = 0.1,
         action_scale: float = 1.0,
         device=None,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -204,14 +207,49 @@ class DIMEActor(nn.Module):
         # so every pseudo-log-prob picks up an exact +n*log(s) alongside the existing
         # tanh log-det-jacobian. Omitting that term would leave the entropy (and thus
         # the temperature dual) silently miscalibrated by n*log(s) nats.
-        self.action_scale = float(action_scale)
-        if self.action_scale <= 0.0:
-            raise ValueError(f"action_scale must be > 0; got {action_scale!r}")
-        self._n_log_scale = action_dim * math.log(self.action_scale) if self.action_scale != 1.0 else 0.0
+        # Per-joint box a = b + c * tanh(x) (safe_rl.modules.action_bounds); `action_scale`
+        # is the legacy scalar spelling. `_n_log_scale` is sum_j log c_j, which for the
+        # scalar case equals the old n*log(s) exactly.
+        from safe_rl.modules.action_bounds import (
+            register_action_bound_buffers,
+            resolve_action_bounds,
+            uniform_scale_or_none,
+        )
+
+        b, c, _ = resolve_action_bounds(
+            action_dim, action_low=action_low, action_high=action_high, action_bounds=action_bounds, action_scale=action_scale
+        )
+        register_action_bound_buffers(self, b, c)
+        self.action_scale = uniform_scale_or_none(self)
+        self._n_log_scale = -float(self.neg_log_action_scale)
 
         # Inert in safe_rl — see module docstring.
         self.log_temperature = nn.Parameter(torch.ones(1, device=device) * math.log(ent_start))
         self.log_lagrangian = nn.Parameter(torch.ones(1, device=device) * math.log(kl_start))
+
+    @property
+    def sum_log_action_scale(self) -> float:
+        """``sum_j log c_j``: entropy offset of the action box (0 when unbounded)."""
+        return -float(self.neg_log_action_scale)
+
+    def squash(self, x: torch.Tensor) -> torch.Tensor:
+        """Map the terminal diffusion state onto the action box: ``b + c * tanh(x)``."""
+        if not self.scaled_actions:
+            return torch.tanh(x)
+        return self.action_b + self.action_c * torch.tanh(x)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        from safe_rl.modules.action_bounds import (
+            fill_missing_action_bound_buffers,
+            sync_scaled_flag,
+            uniform_scale_or_none,
+        )
+
+        fill_missing_action_bound_buffers(self, state_dict, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        sync_scaled_flag(self)
+        self.action_scale = uniform_scale_or_none(self)
+        self._n_log_scale = -float(self.neg_log_action_scale)
 
     def ode_sample(
         self,
@@ -251,7 +289,7 @@ class DIMEActor(nn.Module):
         tanh_transform = torch.distributions.TanhTransform()
         tanh_log_det_jac = tanh_transform.log_abs_det_jacobian(final_x, tanh_transform(final_x)).sum(dim=-1)
         running_cost = -(tanh_log_det_jac + self._n_log_scale)
-        final_action = self.action_scale * tanh_transform(final_x)
+        final_action = self.squash(final_x)
         stochastic_costs = torch.zeros_like(running_cost)
 
         if return_history:
@@ -291,7 +329,7 @@ class DIMEActor(nn.Module):
         tanh_transform = torch.distributions.TanhTransform()
         tanh_log_det_jac = tanh_transform.log_abs_det_jacobian(final_x, tanh_transform(final_x)).sum(dim=-1)
         running_cost = -(log_w + tanh_log_det_jac + self._n_log_scale)
-        final_action = self.action_scale * tanh_transform(final_x)
+        final_action = self.squash(final_x)
         stochastic_costs = torch.zeros_like(running_cost)
 
         if return_history:
@@ -327,7 +365,7 @@ class DIMEActor(nn.Module):
         tanh_transform = torch.distributions.TanhTransform()
         tanh_log_det_jac = tanh_transform.log_abs_det_jacobian(final_x, tanh_transform(final_x)).sum(dim=-1)
         running_cost = -(log_w + tanh_log_det_jac + self._n_log_scale)
-        final_action = self.action_scale * tanh_transform(final_x)
+        final_action = self.squash(final_x)
         stochastic_costs = torch.zeros_like(running_cost)
 
         return final_action, running_cost, stochastic_costs, terminal_costs, kl_log_w

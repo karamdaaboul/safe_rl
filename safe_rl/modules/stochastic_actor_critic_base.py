@@ -26,6 +26,15 @@ import torch
 import torch.nn as nn
 from torch.distributions import AffineTransform, Normal, TanhTransform, TransformedDistribution
 
+from safe_rl.modules.action_bounds import (
+    fill_missing_action_bound_buffers,
+    register_action_bound_buffers,
+    resolve_action_bounds,
+    split_action_bound_kwargs,
+    squash_unit,
+    sync_scaled_flag,
+    uniform_scale_or_none,
+)
 from safe_rl.modules.actor import GaussianActor, StochasticActor
 from safe_rl.modules.normalizer import EmpiricalNormalization
 
@@ -48,6 +57,9 @@ class StochasticActorCriticBase(nn.Module):
         action_scale: float = 1.0,
         normalizer_eps_mode: str = "add_var",
         actor_kwargs: dict[str, Any] | None = None,
+        action_low: list[float] | None = None,
+        action_high: list[float] | None = None,
+        action_bounds: float | list[float] | None = None,
     ) -> None:
         super().__init__()
 
@@ -63,18 +75,29 @@ class StochasticActorCriticBase(nn.Module):
             raise ValueError(f"squash must be 'none' or 'tanh'; got {squash!r}")
         self.squash = squash
 
-        # Half-width of the squashed action range: actions live in
-        # (-action_scale, +action_scale) rather than (-1, 1). tanh caps |a| at 1,
-        # but mjlab locomotion applies no action clipping, so an unbounded-Gaussian
-        # policy commands far more -- measured on Unitree-Go2-Flat, PPO reaches
-        # -2.86..+4.46 and spends 61-67% of steps beyond |a| > 1 on the four calf
-        # joints. The affine is folded into the TransformedDistribution so log_prob
-        # (hence entropy and the KL estimate) carries the exact -n*log(scale) term.
-        self.action_scale = float(action_scale)
-        if self.action_scale <= 0.0:
-            raise ValueError(f"action_scale must be > 0; got {action_scale!r}")
-
+        # Per-joint action box a = b + c * tanh(u): actions live in [b - c, b + c]
+        # rather than (-1, 1). tanh caps |a| at 1, but mjlab locomotion applies no
+        # action clipping and the AGXCave joint-velocity terms scale 0.1 rad/s per
+        # unit, so an unbounded-Gaussian policy commands far more -- PPO reaches
+        # -2.86..+4.46 on Unitree-Go2-Flat and spends 5-9 % of steps beyond |a| > 1
+        # on the excavator arm. The affine is folded into the TransformedDistribution
+        # so log_prob (hence entropy and the KL estimate) carries the exact
+        # -sum_j log c_j term. `action_scale` is the legacy scalar spelling; the box
+        # lives on the POLICY (this module), so bound spellings that arrive inside
+        # actor_kwargs are lifted out and the inner actor stays a unit tanh actor.
         actor_kwargs = dict(actor_kwargs) if actor_kwargs else {}
+        lifted = split_action_bound_kwargs(actor_kwargs)
+        box = dict(action_low=action_low, action_high=action_high, action_bounds=action_bounds, action_scale=action_scale)
+        for key, value in lifted.items():
+            current = box.get(key)
+            if current is not None and not (key == "action_scale" and float(current) == 1.0):
+                raise ValueError(f"{key} given both on the policy and in actor_kwargs.")
+            box[key] = value
+        b, c, _ = resolve_action_bounds(num_actions, **box)
+        register_action_bound_buffers(self, b, c)
+        # Legacy attribute: the scalar half-width when the box is uniform and symmetric
+        # (1.0 when unbounded), None for a genuinely per-joint box.
+        self.action_scale = uniform_scale_or_none(self)
         if actor_type == "gaussian":
             self.actor = GaussianActor(num_actor_obs, num_actions, **actor_kwargs)
         elif actor_type == "stochastic":
@@ -132,6 +155,35 @@ class StochasticActorCriticBase(nn.Module):
             self.critic_obs_normalizer.update(critic_obs)
 
     # ------------------------------------------------------------------
+    # Action box
+    # ------------------------------------------------------------------
+
+    @property
+    def sum_log_action_scale(self) -> float:
+        """``sum_j log c_j``: the differential-entropy offset of the widened box (0 when unbounded)."""
+        return -float(self.neg_log_action_scale)
+
+    def squash_unit_action(self, u: torch.Tensor) -> torch.Tensor:
+        """Map a pre-squash value onto the action box: ``b + c * tanh(u)``.
+
+        (Named to avoid the ``squash`` string attribute that selects 'none' / 'tanh'.)
+        """
+        return squash_unit(self, u)
+
+    def as_onnx(self, obs_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
+        """ONNX/JIT-exportable deterministic path: obs_normalizer -> actor_obs_normalizer -> mean -> box."""
+        return _OnnxSquashedPolicy(self, obs_normalizer, verbose)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints from before the box buffers keep the configured box (which for a
+        # legacy scalar action_scale is the same range); a checkpoint carrying buffers
+        # pins its own box.
+        fill_missing_action_bound_buffers(self, state_dict, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        sync_scaled_flag(self)
+        self.action_scale = uniform_scale_or_none(self)
+
+    # ------------------------------------------------------------------
     # Action distribution
     # ------------------------------------------------------------------
 
@@ -150,23 +202,28 @@ class StochasticActorCriticBase(nn.Module):
         return Normal(mean, std)
 
     def squashed(self, base: Normal) -> TransformedDistribution:
-        """tanh-transform the base Normal, then rescale to the action range.
+        """tanh-transform the base Normal, then map onto the action box.
 
-        With `action_scale == 1` this is exactly the reference distribution.
+        Unbounded, this is exactly the reference distribution. The per-joint
+        AffineTransform has event_dim 0, so its log-det-Jacobian is ``log c_j`` per
+        dimension and callers' ``.sum(dim=-1)`` yields ``sum_j log c_j``.
         """
         transforms: list[Any] = [TanhTransform(cache_size=1)]
-        if self.action_scale != 1.0:
-            transforms.append(AffineTransform(loc=0.0, scale=self.action_scale))
+        if self.scaled_actions:
+            transforms.append(AffineTransform(loc=self.action_b, scale=self.action_c))
         return TransformedDistribution(base, transforms)
 
     def _clamp_squashed(self, actions: torch.Tensor) -> torch.Tensor:
         """Clip before log_prob so the inverse (atanh) stays finite.
 
         The reference does `pi.log_prob(actions.clip(-1 + 1e-6, 1 - 1e-6))`; the
-        bound moves with the action scale.
+        clip is applied in unit space and mapped back through the box.
         """
-        bound = self.action_scale * (1.0 - 1e-6)
-        return actions.clamp(-bound, bound)
+        bound = 1.0 - 1e-6
+        if not self.scaled_actions:
+            return actions.clamp(-bound, bound)
+        unit = ((actions - self.action_b) / self.action_c).clamp(-bound, bound)
+        return self.action_b + self.action_c * unit
 
     # ------------------------------------------------------------------
     # Acting
@@ -186,7 +243,7 @@ class StochasticActorCriticBase(nn.Module):
         self._distribution = dist
         action = dist.mean if deterministic else dist.sample()
         if self.squash == "tanh":
-            action = self.action_scale * torch.tanh(action)
+            action = self.squash_unit_action(action)
         self._last_action = action
         return action
 
@@ -195,7 +252,7 @@ class StochasticActorCriticBase(nn.Module):
         obs = self.actor_obs_normalizer(obs)
         dist = self._build_distribution(obs)
         if self.squash == "tanh":
-            return self.action_scale * torch.tanh(dist.mean)
+            return self.squash_unit_action(dist.mean)
         return dist.mean
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
@@ -221,3 +278,46 @@ class StochasticActorCriticBase(nn.Module):
             action = dist.rsample()
             log_prob = dist.log_prob(action).sum(dim=-1)
         return action, log_prob, dist.mean, dist.scale
+
+
+class _OnnxSquashedPolicy(nn.Module):
+    """Deterministic export path of a :class:`StochasticActorCriticBase` policy.
+
+    obs -> obs_normalizer -> actor_obs_normalizer -> actor mean -> action box. Feed-forward
+    only, so it can be traced for ONNX or TorchScript; the box buffers travel with it.
+    """
+
+    def __init__(self, policy: StochasticActorCriticBase, obs_normalizer: nn.Module | None, verbose: bool) -> None:
+        super().__init__()
+        from copy import deepcopy
+
+        self.verbose = verbose
+        self.pre_normalizer = deepcopy(obs_normalizer) if obs_normalizer is not None else nn.Identity()
+        self.actor_normalizer = deepcopy(policy.actor_obs_normalizer)
+        self.actor = deepcopy(policy.actor)
+        self.actor_type = policy.actor_type
+        self.apply_tanh = policy.squash == "tanh"
+        self.input_size = policy.num_actor_obs
+        self.register_buffer("action_b", policy.action_b.detach().clone())
+        self.register_buffer("action_c", policy.action_c.detach().clone())
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        obs = self.actor_normalizer(self.pre_normalizer(obs))
+        if self.actor_type == "gaussian":
+            mean = self.actor.network(obs)
+        else:
+            mean, _ = self.actor.forward(obs)
+        if not self.apply_tanh:
+            return mean
+        return self.action_b + self.action_c * torch.tanh(mean)
+
+    def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:
+        return (torch.zeros(1, self.input_size),)
+
+    @property
+    def input_names(self) -> list[str]:
+        return ["obs"]
+
+    @property
+    def output_names(self) -> list[str]:
+        return ["actions"]
