@@ -72,7 +72,7 @@ class MujocoPlaygroundVecEnv(VecEnv):
 
         assert env_id.startswith("Mjx"), env_id
         self.env_id = env_id
-        task = env_id[len("Mjx"):]
+        task = env_id[len("Mjx") :]
 
         env_cfg = registry.get_default_config(task)
         base = registry.load(task, config=env_cfg)
@@ -90,10 +90,18 @@ class MujocoPlaygroundVecEnv(VecEnv):
         self.device = torch.device(device)
         self.reward_scale = float(reward_scale)
         self.num_actions = int(self._inner.num_actions)
-        self.num_obs = int(self._inner.num_obs)
+
+        def flat_dimension(shape):
+            if isinstance(shape, (tuple, list)):
+                if len(shape) != 1:
+                    raise ValueError(f"Expected a flat observation space, got {shape}")
+                shape = shape[0]
+            return int(shape)
+
+        self.num_obs = flat_dimension(self._inner.num_obs)
         self.asymmetric_obs = bool(self._inner.asymmetric_obs)
         self.num_privileged_obs = (
-            int(self._inner.num_privileged_obs) if self._inner.num_privileged_obs else None
+            flat_dimension(self._inner.num_privileged_obs) if self._inner.num_privileged_obs else None
         )
         self.forward_final_observation = bool(forward_final_observation)
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -122,6 +130,7 @@ class MujocoPlaygroundVecEnv(VecEnv):
             "episode_length": self.max_episode_length,
             "action_repeat": int(action_repeat),
             "reward_scale": reward_scale,
+            "forward_final_observation": self.forward_final_observation,
         }
 
     # ------------------------------------------------------------------
@@ -178,17 +187,23 @@ class MujocoPlaygroundVecEnv(VecEnv):
                 critic_obs = raw.get("critic_obs")
                 if isinstance(critic_obs, torch.Tensor):
                     final["critic"] = critic_obs.clone().to(self.device)
-                extras["final_observation"] = final
+                extras["final_observation"] = final["actor"]
+                extras["final_critic_observation"] = final.get("critic", final["actor"])
         if info.get("log"):
             extras["log"] = dict(info["log"])
         return extras
 
     def reset(self) -> tuple[torch.Tensor, dict]:
-        obs = self._inner.reset()
+        if self.asymmetric_obs:
+            obs, critic_obs = self._inner.reset_with_critic_obs()
+            observations = {"critic": critic_obs.clone().to(self.device)}
+        else:
+            obs = self._inner.reset()
+            observations = {}
         obs = obs.clone().to(self.device)
         self.episode_length_buf.zero_()
         self._last_obs = obs
-        self._last_extras = {"observations": {}}
+        self._last_extras = {"observations": observations}
         return obs, self._last_extras
 
     def get_observations(self) -> tuple[torch.Tensor, dict]:

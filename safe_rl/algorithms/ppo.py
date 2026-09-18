@@ -164,8 +164,9 @@ class PPO:
 
         # Bootstrapping on time outs
         if "time_outs" in infos:
+            timeout_values = infos.get("timeout_values", self.transition.values)
             self.transition.rewards += self.gamma * torch.squeeze(
-                self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+                timeout_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
             )
 
         # record the transition

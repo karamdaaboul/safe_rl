@@ -9,7 +9,7 @@ import torch.nn as nn
 from safe_rl.modules.action_bounds import BOUND_KEYS, uniform_in_box
 from safe_rl.modules.actor import StochasticActor
 from safe_rl.modules.critic import DistributionalCritic, StandardCritic
-from safe_rl.modules.normalizer import EmpiricalNormalization
+from safe_rl.modules.normalizer import ExplicitEmpiricalNormalization
 
 
 class SACActorCritic(nn.Module):
@@ -25,6 +25,7 @@ class SACActorCritic(nn.Module):
     """
 
     is_recurrent = False
+    normalization_updates_from_env = True
 
     def __init__(
         self,
@@ -77,9 +78,16 @@ class SACActorCritic(nn.Module):
         # ==================== Actor ====================
         # Per-joint action box a = b + c * tanh(u), configured on the policy (the task's
         # agent cfg) and forwarded to the actor; see safe_rl.modules.action_bounds.
-        policy_box = {k: v for k, v in dict(action_low=action_low, action_high=action_high, action_bounds=action_bounds).items() if v is not None}
+        policy_box = {
+            k: v
+            for k, v in dict(action_low=action_low, action_high=action_high, action_bounds=action_bounds).items()
+            if v is not None
+        }
         if policy_box and any(k in actor_kwargs for k in BOUND_KEYS):
-            raise ValueError("Give the action box either on the policy (action_bounds/action_low/action_high) or in actor_kwargs, not both.")
+            raise ValueError(
+                "Give the action box either on the policy (action_bounds/action_low/action_high) or in actor_kwargs,"
+                " not both."
+            )
         actor_kwargs.update(policy_box)
         init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
 
@@ -103,7 +111,7 @@ class SACActorCritic(nn.Module):
         # Actor observation normalization
         self.actor_obs_normalization = actor_obs_normalization
         if actor_obs_normalization:
-            self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs)
+            self.actor_obs_normalizer = ExplicitEmpiricalNormalization(num_actor_obs)
         else:
             self.actor_obs_normalizer = nn.Identity()
 
@@ -137,9 +145,7 @@ class SACActorCritic(nn.Module):
         print(f"SAC Critic: {self.critics[0]}")
 
         # Create target networks
-        self.critic_targets = nn.ModuleList(
-            deepcopy(critic) for critic in self.critics
-        )
+        self.critic_targets = nn.ModuleList(deepcopy(critic) for critic in self.critics)
 
         # Freeze target networks
         for target in self.critic_targets:
@@ -155,7 +161,7 @@ class SACActorCritic(nn.Module):
         # Critic observation normalization
         self.critic_obs_normalization = critic_obs_normalization
         if critic_obs_normalization:
-            self.critic_obs_normalizer = EmpiricalNormalization(num_critic_obs)
+            self.critic_obs_normalizer = ExplicitEmpiricalNormalization(num_critic_obs)
         else:
             self.critic_obs_normalizer = nn.Identity()
 
@@ -228,9 +234,7 @@ class SACActorCritic(nn.Module):
         obs = self.actor_obs_normalizer(obs)
         return self.actor.log_prob(obs, actions)
 
-    def evaluate_q(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate Q-values for state-action pairs using both critics.
 
         Args:
@@ -260,9 +264,7 @@ class SACActorCritic(nn.Module):
 
         return q1, q2
 
-    def evaluate_q_dist(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q_dist(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate distributional Q-values and return raw logits.
 
         Only available when critic_type='distributional'.
@@ -275,9 +277,7 @@ class SACActorCritic(nn.Module):
         logits_2 = self.critic_2(obs, actions)
         return logits_1, logits_2
 
-    def evaluate_q_target(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q_target(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate Q-values using target networks.
 
         Args:
@@ -303,9 +303,7 @@ class SACActorCritic(nn.Module):
 
         return q1_target, q2_target
 
-    def evaluate_q_target_dist(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q_target_dist(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate distributional Q-values from target networks.
 
         Only available when critic_type='distributional'.
@@ -344,8 +342,11 @@ class SACActorCritic(nn.Module):
             verbose=verbose,
         )
 
+    @torch.no_grad()
     def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        """Update observation normalizers."""
+        """Observe one collected batch, never replay or replicated candidate states."""
+        if not self.training:
+            return
         if self.actor_obs_normalization:
             self.actor_obs_normalizer.update(actor_obs)
         if self.critic_obs_normalization:

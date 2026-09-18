@@ -100,6 +100,20 @@ class EmpiricalNormalization(nn.Module):
         return y * (self._std + self.eps) + self._mean
 
 
+class ExplicitEmpiricalNormalization(EmpiricalNormalization):
+    """Read-only normalization; callers update statistics from collected observations."""
+
+    def forward(self, x):
+        return self.normalize(x)
+
+    @torch.jit.unused
+    def update(self, x):
+        # Collection runs in inference_mode. Keep replacement buffers (e.g. _std)
+        # ordinary tensors so state-dict loading can copy into them afterward.
+        with torch.inference_mode(False), torch.no_grad():
+            super().update(x)
+
+
 class EmpiricalDiscountedVariationNormalization(nn.Module):
     """Reward normalization from Pathak's large scale study on PPO.
 

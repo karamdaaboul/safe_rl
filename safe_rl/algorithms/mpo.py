@@ -8,7 +8,8 @@ from copy import deepcopy
 from torch.distributions import Normal, kl_divergence
 from typing import Any
 
-from scipy.optimize import minimize
+from scipy.optimize import brentq
+from scipy.special import softmax, xlogy
 
 from safe_rl.algorithms.sac import SAC
 from safe_rl.modules.sac_actor_critic import SACActorCritic
@@ -19,10 +20,10 @@ def nonparametric_kl_from_weights(weights: torch.Tensor) -> torch.Tensor:
 
     ``weights`` is ``[N, B]`` and normalised over the sample axis, so under the sampling
     distribution ``q*(a_i) = w_i`` and ``pi_old(a_i) = 1/N``, giving ``sum_i w_i log(N w_i)``.
-    This is the E-step dual residual's other half: at the dual optimum it equals ``eps_dual``.
+    Its batch mean equals ``eps_dual`` at an interior optimum with an active constraint.
     """
     n = weights.shape[0]
-    return (weights * torch.log(n * weights + 1e-8)).sum(dim=0)
+    return torch.special.xlogy(weights, n * weights).sum(dim=0)
 
 
 def effective_sample_size(weights: torch.Tensor) -> torch.Tensor:
@@ -39,12 +40,12 @@ class MPO(SAC):
 
     https://arxiv.org/abs/1806.06920
 
-    Off-policy EM actor-critic. Reuses SAC's twin critics and replay buffer and replaces
-    only the actor update:
+    Off-policy EM actor-critic. Reuses SAC's twin critics and replay buffer, evaluates
+    the frozen reference policy, and replaces the actor update:
 
     * **E-step** — sample ``sample_action_num`` actions per state from the target policy,
       evaluate Q, and solve the 1-D convex dual over the temperature ``eta`` to get the
-      non-parametric ``q(a|s) proportional to exp(Q/eta)`` inside a KL trust region.
+      non-parametric ``q(a|s) proportional to pi_old(a|s) * exp(Q/eta)`` inside a KL trust region.
     * **M-step** — fit the Gaussian policy to the weighted samples by weighted maximum
       likelihood under decoupled mean / covariance KL trust regions.
 
@@ -73,17 +74,20 @@ class MPO(SAC):
         kl_var_constraint: float = 1e-4,  # M-step covariance-KL trust region
         alpha_mean_scale: float = 1.0,  # dual ascent step for the mean-KL multiplier
         alpha_var_scale: float = 100.0,  # dual ascent step for the var-KL multiplier
-        # Overflow guards only: the multiplier update is an integral controller and a low
-        # cap opens the loop, leaving the M-step trust region unenforced.
-        alpha_mean_max: float = 10.0,
-        alpha_var_max: float = 1000.0,
+        # Optional legacy caps. Unbounded multipliers can keep responding to KL violations.
+        alpha_mean_max: float | None = None,
+        # L2 on the PRE-TANH actor mean. 0.0 = off, and every arm before this used 0.0.
+        mean_l2_coef: float = 0.0,
+        alpha_var_max: float | None = None,
         mstep_iteration_num: int = 5,
         per_dim_constraining: bool = False,
         decoupled_mstep: bool = False,
         estep_use_target_critic: bool = False,
+        estep_q_reduction: str = "min",  # "min" | "mean" over the twin critics
         target_actor_update: str = "polyak",  # "polyak" | "hard"
         target_actor_period: int = 100,
         device: str = "cpu",
+        critic_action_samples: int = 1,
         **kwargs: Any,
     ) -> None:
         # MPO handles exploration through the E-step KL trust region, not SAC entropy.
@@ -93,30 +97,58 @@ class MPO(SAC):
         super().__init__(policy, device=device, auto_entropy_tuning=False, alpha=1e-8, **kwargs)
 
         self.sample_action_num = int(sample_action_num)
-        # Widen the std used ONLY to draw E-step candidates. 1.0 = unchanged (every existing arm).
-        # The E-step can only choose among the actions it is shown; if all N candidates are equally
-        # safe there is nothing to reweight toward, whatever lambda does. Measured on FH-DCMPO:
-        # std_qc = 0.065 against a cost level of ~11, i.e. the 64 candidates differ by 0.6%.
-        # Note this makes the proposal wider than pi_old, so the KL that `eps` bounds is measured
-        # against a distribution the candidates were NOT drawn from -- watch `kl_q`.
+        if self.sample_action_num < 1:
+            raise ValueError("sample_action_num must be >= 1")
+        if isinstance(critic_action_samples, bool) or not isinstance(critic_action_samples, (int, np.integer)):
+            raise ValueError("critic_action_samples must be a positive integer")
+        self.critic_action_samples = int(critic_action_samples)
+        if self.critic_action_samples < 1:
+            raise ValueError("critic_action_samples must be a positive integer")
+        if self.critic_action_samples > 1 and (
+            self.policy.is_distributional_critic or getattr(self.policy, "is_quantile_critic", False)
+        ):
+            raise ValueError("critic_action_samples > 1 currently requires standard scalar critics")
         self.estep_sample_std_scale = float(estep_sample_std_scale)
-        if self.estep_sample_std_scale <= 0.0:
-            raise ValueError(f"estep_sample_std_scale must be > 0, got {estep_sample_std_scale}")
+        if self.estep_sample_std_scale != 1.0:
+            raise ValueError(
+                "estep_sample_std_scale must be 1.0: other proposals require importance correction "
+                "in both the E-step dual and sample weights to constrain KL against pi_old."
+            )
         self.eps_dual = float(dual_constraint)
         self.eps_kl_mean = float(kl_mean_constraint)
         self.eps_kl_var = float(kl_var_constraint)
+        for name, value in (
+            ("dual_constraint", self.eps_dual),
+            ("kl_mean_constraint", self.eps_kl_mean),
+            ("kl_var_constraint", self.eps_kl_var),
+        ):
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and > 0, got {value}")
         self.alpha_mean_scale = float(alpha_mean_scale)
         self.alpha_var_scale = float(alpha_var_scale)
-        self.alpha_mean_max = float(alpha_mean_max)
-        self.alpha_var_max = float(alpha_var_max)
+        self.alpha_mean_max = float("inf") if alpha_mean_max is None else float(alpha_mean_max)
+        self.mean_l2_coef = float(mean_l2_coef)
+        if self.mean_l2_coef < 0.0:
+            raise ValueError(f"mean_l2_coef must be >= 0, got {mean_l2_coef}")
+        self.alpha_var_max = float("inf") if alpha_var_max is None else float(alpha_var_max)
+        for name, value in (("alpha_mean_max", self.alpha_mean_max), ("alpha_var_max", self.alpha_var_max)):
+            if np.isnan(value) or value <= 0.0:
+                raise ValueError(f"{name} must be > 0 or None, got {value}")
         self.mstep_iteration_num = int(mstep_iteration_num)
+        if self.mstep_iteration_num < 1:
+            raise ValueError("mstep_iteration_num must be >= 1")
         self.per_dim_constraining = bool(per_dim_constraining)
         self.decoupled_mstep = bool(decoupled_mstep)
         self.estep_use_target_critic = bool(estep_use_target_critic)
+        if estep_q_reduction not in ("min", "mean"):
+            raise ValueError(f"estep_q_reduction must be 'min' or 'mean', got {estep_q_reduction!r}")
+        self.estep_q_reduction = estep_q_reduction
         if target_actor_update not in ("polyak", "hard"):
             raise ValueError(f"target_actor_update must be 'polyak' or 'hard', got {target_actor_update!r}.")
         self.target_actor_update = target_actor_update
         self.target_actor_period = int(target_actor_period)
+        if self.target_actor_period < 1:
+            raise ValueError("target_actor_period must be >= 1")
         self._actor_update_count = 0
 
         # Frozen target actor: the E-step samples from it and the M-step KL is measured
@@ -128,7 +160,7 @@ class MPO(SAC):
         # Dual variables (warm-started across batches). The M-step multipliers are arrays so the
         # scalar and per-dimension trust regions share one code path: shape [1] vs [num_actions].
         dual_dim = self.policy.num_actions if self.per_dim_constraining else 1
-        self.eta = 1.0  # E-step temperature (warm-start for SLSQP)
+        self.eta = 1.0  # Last E-step temperature, also retained for flat-Q batches.
         self.alpha_mean = np.zeros(dual_dim)  # M-step mean-KL multiplier(s)
         self.alpha_var = np.zeros(dual_dim)  # M-step var-KL multiplier(s)
         self._solver_status = -1.0
@@ -146,6 +178,72 @@ class MPO(SAC):
             weight_decay=group["weight_decay"],
             betas=group["betas"],
         )
+
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        """MPO state outside the policy module and the actor/critic optimizers."""
+        return {
+            "version": 1,
+            "actor_target": self.actor_target.state_dict(),
+            "eta": self.eta,
+            "alpha_mean": torch.from_numpy(self.alpha_mean.copy()),
+            "alpha_var": torch.from_numpy(self.alpha_var.copy()),
+            "actor_update_count": self._actor_update_count,
+            "update_step": self.update_step,
+        }
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None, *, load_optimizer: bool = True) -> None:
+        """Restore the EM anchor; legacy checkpoints start from the loaded policy."""
+        if state is None:
+            self.actor_target.load_state_dict(self.policy.actor.state_dict())
+            self.eta = 1.0
+            self.alpha_mean.fill(0.0)
+            self.alpha_var.fill(0.0)
+            self._actor_update_count = 0
+            self.update_step = 0
+        else:
+            if state.get("version") != 1:
+                raise ValueError("Unsupported MPO checkpoint state version")
+            duals = {}
+            for name in ("alpha_mean", "alpha_var"):
+                value = torch.as_tensor(state[name]).detach().cpu().numpy().astype(np.float64, copy=True)
+                if value.shape != getattr(self, name).shape or not np.isfinite(value).all() or (value < 0).any():
+                    raise ValueError(f"Invalid MPO checkpoint {name}; check per_dim_constraining and action dimensions")
+                duals[name] = value
+            eta = float(state["eta"])
+            if not np.isfinite(eta) or eta <= 0.0:
+                raise ValueError("Invalid MPO checkpoint eta")
+            self.actor_target.load_state_dict(state["actor_target"])
+            self.eta = eta
+            self.alpha_mean, self.alpha_var = duals["alpha_mean"], duals["alpha_var"]
+            self._actor_update_count = int(state["actor_update_count"])
+            self.update_step = int(state["update_step"])
+        self._last_actor_info = {}
+
+    def _sample_next_actions(self, next_obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate the same reference policy used by the E-step, without entropy."""
+        actor_obs = self.policy.actor_obs_normalizer(next_obs)
+        actions, _ = self.actor_target.sample(actor_obs)
+        return actions, actions.new_zeros((actions.shape[0], 1))
+
+    @torch.no_grad()
+    def _compute_next_value(self, next_obs: torch.Tensor, next_critic_obs: torch.Tensor) -> torch.Tensor:
+        """Estimate E_pi_target[min(Q1_target, Q2_target)] with independent action samples.
+
+        This count is independent of the E-step's ``sample_action_num``. Normalize
+        each state once before expanding it, so extra actions do not reweight the
+        observation statistics. The one-sample default retains the original path.
+        """
+        if self.critic_action_samples == 1:
+            return super()._compute_next_value(next_obs, next_critic_obs)
+        count, batch = self.critic_action_samples, next_obs.shape[0]
+        actor_obs = self.policy.actor_obs_normalizer(next_obs)
+        actor_obs = actor_obs.unsqueeze(0).expand(count, -1, -1).reshape(count * batch, -1)
+        actions, _ = self.actor_target.sample(actor_obs)
+        critic_obs = self.policy.critic_obs_normalizer(next_critic_obs)
+        critic_obs = critic_obs.unsqueeze(0).expand(count, -1, -1).reshape(count * batch, -1)
+        q1 = self.policy.critic_1_target(critic_obs, actions)
+        q2 = self.policy.critic_2_target(critic_obs, actions)
+        return torch.minimum(q1, q2).reshape(count, batch, 1).mean(dim=0)
 
     def _update_critic_distributional(
         self,
@@ -175,8 +273,7 @@ class MPO(SAC):
         t1, t2 = self.policy.critic_1_target, self.policy.critic_2_target
 
         with torch.no_grad():
-            # log_prob unused; the call is kept so the RNG stream matches earlier runs.
-            next_actions, _ = self.policy.sample_with_log_prob(next_obs)
+            next_actions, _ = self._sample_next_actions(next_obs)
             next_obs_norm = self.policy.critic_obs_normalizer(next_critic_obs)
 
             d1 = t1.get_dist(t1(next_obs_norm, next_actions))
@@ -185,16 +282,14 @@ class MPO(SAC):
             use_1 = (t1.get_value(d1) < t2.get_value(d2)).unsqueeze(-1)
             next_dist = torch.where(use_1, d1, d2)
 
-            target_dist = t1.project(
-                next_dist=next_dist, rewards=rewards, bootstrap=bootstrap_mask, discount=discount
-            )
+            target_dist = t1.project(next_dist=next_dist, rewards=rewards, bootstrap=bootstrap_mask, discount=discount)
 
         obs_normalized = self.policy.critic_obs_normalizer(critic_obs)
         critic_loss = -torch.sum(target_dist * F.log_softmax(c1(obs_normalized, actions), dim=-1), dim=-1).mean()
         if c2 is not c1:
-            critic_loss = critic_loss - torch.sum(
-                target_dist * F.log_softmax(c2(obs_normalized, actions), dim=-1), dim=-1
-            ).mean()
+            critic_loss = (
+                critic_loss - torch.sum(target_dist * F.log_softmax(c2(obs_normalized, actions), dim=-1), dim=-1).mean()
+            )
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -209,32 +304,47 @@ class MPO(SAC):
         q_np : [N, B] numpy array (N sampled actions per state, B states).
 
         Minimizes ``g(eta) = eta * eps + eta * E_s[log mean_a exp(Q(s,a)/eta)]``
-        (Abdolmaleki et al. 2018, eq. 9), warm-started from the previous solution.
+        using ``g'(eta) = eps - mean_s KL(weights || uniform)``. Centering and
+        scaling Q makes the bracketed solve independent of reward units and offsets.
 
         Returns the eta used to form this batch's variational weights, > 0.
         """
-        eps = self.eps_dual
+        q_np = np.asarray(q_np, dtype=np.float64)
+        self._solver_status, self._solver_iters = -1.0, 0.0
+        if q_np.ndim != 2 or 0 in q_np.shape or not np.isfinite(q_np).all():
+            raise ValueError("MPO E-step Q values must be a finite, nonempty [N, B] array")
+        centered = q_np - q_np.max(axis=0, keepdims=True)
+        scale = float(-centered.min())
+        if scale == 0.0:
+            self._solver_status = 0.0
+            return self.eta  # Uniform weights solve every flat-Q state; the constraint is inactive.
 
-        def dual_eta(x: np.ndarray) -> float:
-            eta = x[0]
-            z = q_np / eta
-            zmax = z.max(axis=0, keepdims=True)
-            lse = zmax.squeeze(0) + np.log(np.mean(np.exp(z - zmax), axis=0))
-            return eta * eps + eta * float(np.mean(lse))
+        # As eta -> 0, mass is shared equally among ties for the maximum in each state.
+        max_kl = float(np.log(q_np.shape[0] / (centered == 0.0).sum(axis=0)).mean())
+        if self.eps_dual >= max_kl:
+            self._solver_status = 0.0
+            return max(float(-centered[centered < 0.0].max()) / 745.0, np.finfo(np.float64).tiny)
 
-        try:
-            res = minimize(dual_eta, np.array([max(self.eta, 1e-3)]), method="SLSQP", bounds=[(1e-6, 1e6)])
-            eta = float(res.x[0])
-            self._solver_status = float(res.status)
-            self._solver_iters = float(res.nit)
-            if not np.isfinite(eta):
-                raise ValueError("non-finite eta")
-        except Exception as exc:  # pragma: no cover - numerical fallback
-            print(f"MPO eta solve failed ({exc}); keeping previous eta.")
-            eta = self.eta
-            self._solver_status = -1.0
-            self._solver_iters = 0.0
-        return max(eta, 1e-6)
+        normalized = centered / scale
+
+        def residual(inverse_temperature: float) -> float:
+            weights = softmax(normalized * inverse_temperature, axis=0)
+            kl = xlogy(weights, q_np.shape[0] * weights).sum(axis=0).mean()
+            return float(kl) - self.eps_dual
+
+        upper = 1.0
+        while residual(upper) < 0.0:
+            upper *= 2.0
+            if not np.isfinite(upper):
+                raise RuntimeError("Could not bracket the MPO E-step KL constraint")
+        inverse_temperature, result = brentq(
+            residual, 0.0, upper, xtol=np.finfo(np.float64).tiny, rtol=1e-12, maxiter=200, full_output=True
+        )
+        eta = scale / inverse_temperature
+        if not result.converged or not np.isfinite(eta) or eta <= 0.0 or abs(residual(inverse_temperature)) > 1e-8:
+            raise RuntimeError("MPO E-step failed to satisfy the KL optimality residual")
+        self._solver_status, self._solver_iters = 0.0, float(result.iterations)
+        return float(eta)
 
     def _estep_sample(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor):
         """Draw ``sample_action_num`` actions from pi_old and score them under Q.
@@ -247,16 +357,14 @@ class MPO(SAC):
         mean_old, log_std_old = self.actor_target(actor_obs)
         std_old = log_std_old.exp()
 
-        # `std_old` still parameterises pi_old for the M-step KL; only the PROPOSAL is widened.
-        sample_std = std_old * self.estep_sample_std_scale
-        x = Normal(mean_old, sample_std).sample((n,))  # [N, B, A] pre-tanh
+        x = Normal(mean_old, std_old).sample((n,))  # [N, B, A] pre-tanh
         actions = self.policy.actor.action_b + self.policy.actor.action_c * torch.tanh(x)
 
         cobs_exp = critic_obs.unsqueeze(0).expand(n, -1, -1).reshape(n * batch_size, -1)
         act_flat = actions.reshape(n * batch_size, -1)
         evaluate = self.policy.evaluate_q_target if self.estep_use_target_critic else self.policy.evaluate_q
         q1, q2 = evaluate(cobs_exp, act_flat)
-        q = torch.min(q1, q2)  # same pessimism as the critic target; identical tensors if one critic
+        q = torch.min(q1, q2) if self.estep_q_reduction == "min" else 0.5 * (q1 + q2)
         return x, actions, q.reshape(n, batch_size), mean_old, std_old
 
     def _estep_weights(self, q: torch.Tensor, actions: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
@@ -264,8 +372,10 @@ class MPO(SAC):
 
         CVPO overrides this to subtract the cost term; everything else is shared.
         """
-        self.eta = self._solve_eta(q.cpu().numpy().astype(np.float64))
-        return torch.softmax(q / self.eta, dim=0)  # [N, B], columns sum to 1
+        q64 = q.detach().to(torch.float64)
+        self.eta = self._solve_eta(q64.cpu().numpy())
+        centered = q64 - q64.max(dim=0, keepdim=True).values
+        return torch.softmax(centered / self.eta, dim=0).to(q.dtype)  # [N, B], columns sum to 1
 
     def _mstep(self, actor_obs, x, weights, mean_old, std_old) -> tuple[float, dict[str, float]]:
         """Weighted MLE under decoupled mean / covariance KL trust regions.
@@ -317,15 +427,33 @@ class MPO(SAC):
                 + (alpha_var_t * (self.eps_kl_var - kl_var_vec)).sum()
             )
 
+            # Keep the pre-tanh mean inside tanh's responsive region. Measured on the a2 arms,
+            # `pretanh_mean_absmax` reaches 9.3-12.6 with `frac_saturated` at 0.28: sech^2(5.3) is
+            # ~5e-5, so 64 candidate actions there differ by almost nothing and the cost critic has
+            # nothing across-action to discriminate. This is a soft pull toward the linear region,
+            # NOT a clip -- clipping maps everything past the boundary onto ONE action, which
+            # removes across-action variation entirely rather than restoring it.
+            #
+            # Applied to the mean only: the samples' own spread is the covariance trust region's
+            # job, controlled by its adaptive KL multiplier.
+            if self.mean_l2_coef > 0.0:
+                actor_loss = actor_loss + self.mean_l2_coef * mean.pow(2).sum(dim=-1).mean()
+
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
             nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
 
-        kl_mean_val = float(kl_mean_dims.sum().item())
-        kl_var_val = float(kl_var_dims.sum().item())
         with torch.no_grad():
-            std_d = std.detach()
+            # Measure the returned actor against the SAME anchor, before syncing that anchor.
+            mean, log_std = self.policy.actor(actor_obs)
+            std_d = log_std.exp()
+            kl_mean_dims = kl_divergence(dist_old_ref, Normal(mean, std_old)).mean(dim=0)
+            kl_var_dims = kl_divergence(dist_old_ref, Normal(mean_old, std_d)).mean(dim=0)
+            kl_mean_val = float(kl_mean_dims.sum().item())
+            kl_var_val = float(kl_var_dims.sum().item())
+            mean_budget_use = kl_mean_dims if self.per_dim_constraining else kl_mean_dims.sum().reshape(1)
+            var_budget_use = kl_var_dims if self.per_dim_constraining else kl_var_dims.sum().reshape(1)
             std_cond = float((std_d.max(dim=-1).values / std_d.min(dim=-1).values.clamp_min(1e-12)).mean().item())
             # tanh saturates past |x| ~ 2.5, where Q is flat in the pre-tanh mean.
             info = {
@@ -335,13 +463,19 @@ class MPO(SAC):
                 # is eps * num_actions, so the two trust-region modes stay comparable.
                 "kl_mean_rel": kl_mean_val / max(self.eps_kl_mean * len(self.alpha_mean), 1e-12),
                 "kl_var_rel": kl_var_val / max(self.eps_kl_var * len(self.alpha_var), 1e-12),
+                "kl_mean_max_rel": float(mean_budget_use.max().item()) / self.eps_kl_mean,
+                "kl_var_max_rel": float(var_budget_use.max().item()) / self.eps_kl_var,
+                "alpha_mean_at_cap": float(np.any(self.alpha_mean >= self.alpha_mean_max)),
+                "alpha_var_at_cap": float(np.any(self.alpha_var >= self.alpha_var_max)),
                 "alpha_mean": float(self.alpha_mean.mean()),
                 "alpha_var": float(self.alpha_var.mean()),
                 "pi_std_min": float(std_d.min().item()),
                 "pi_std_max": float(std_d.max().item()),
                 "pi_std_cond": std_cond,
                 "pretanh_mean_absmax": float(mean.detach().abs().max().item()),
+                "pretanh_mean_absmean": float(mean.detach().abs().mean().item()),
                 "frac_saturated": float((mean.detach().abs() > 2.5).float().mean().item()),
+                "mean_l2_coef": self.mean_l2_coef,
             }
         self._sync_target_actor()
         return actor_loss.item(), info

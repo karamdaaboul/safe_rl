@@ -20,7 +20,7 @@ projected dual ascent. This is a weighted-ELBO projection with the old chain as
 inference distribution, so Prop. 7.2's bias analysis applies unchanged.
 
 Deliberately shared with MPO (inherited, not copied): the SAC critic tower,
-``_solve_eta`` (SLSQP temperature dual), ``_estep_weights``,
+``_solve_eta`` (bracketed temperature dual), ``_estep_weights``,
 ``_sync_target_actor``, and the ``actor_target`` deepcopy — one frozen copy of
 pi_old, owned by the algorithm.
 
@@ -62,7 +62,6 @@ class MPODIME(MPO):
     ) -> None:
         if estep_q_reduction not in ("min", "mean"):
             raise ValueError(f"estep_q_reduction must be 'min' or 'mean', got {estep_q_reduction!r}.")
-        self.estep_q_reduction = estep_q_reduction
         if not hasattr(getattr(policy, "actor", None), "diffusion_model"):
             raise TypeError(
                 "MPODIME requires a diffusion policy (MPODIMEActorCritic); "
@@ -81,7 +80,7 @@ class MPODIME(MPO):
                 "transition-noise scale unconstrained by the trust region (noise-collapse "
                 "risk). Use kl_form='full'."
             )
-        super().__init__(policy, **kwargs)
+        super().__init__(policy, estep_q_reduction=estep_q_reduction, **kwargs)
 
         # Path-space trust region: one scalar budget beta replaces the Gaussian
         # mean/var pair; the multiplier follows MPO's projected-dual-ascent pattern.
@@ -90,6 +89,18 @@ class MPODIME(MPO):
         self.alpha_path_max = float(alpha_path_max)
         self.alpha_path = 0.0
         self.kl_form = kl_form
+
+    def _sample_next_actions(self, next_obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_obs = self.policy.actor_obs_normalizer(next_obs)
+        actions, _, _, _ = self.actor_target.sde_sample(actor_obs)
+        return actions, actions.new_zeros((actions.shape[0], 1))
+
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        return {**super().get_checkpoint_state(), "alpha_path": self.alpha_path}
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None, *, load_optimizer: bool = True) -> None:
+        super().load_checkpoint_state(state, load_optimizer=load_optimizer)
+        self.alpha_path = float(state["alpha_path"]) if state is not None else 0.0
 
     # ------------------------------------------------------------------
     # E-step: sample trajectories from the frozen target actor
@@ -163,6 +174,12 @@ class MPODIME(MPO):
             self.actor_optimizer.step()
 
         with torch.no_grad():
+            # Report the final actor, not the parameters before the last optimizer step.
+            log_prob, kl = path_logprob_and_kl(
+                self.policy.actor.diffusion_model, obs_tiled, traj, old_means, old_scales, kl_form=self.kl_form
+            )
+            mle = (weights * log_prob.view(n, batch_size)).sum(dim=0).mean()
+            kl_path = kl.view(n, batch_size).mean()
             pretanh = traj[-1]
             dm = self.policy.actor.diffusion_model
             friction = torch.nn.functional.softplus(dm.friction)

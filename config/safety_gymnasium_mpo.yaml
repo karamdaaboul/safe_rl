@@ -35,9 +35,8 @@ algorithm:
   decoupled_mstep: true          # split weighted MLE like the KL (mean at old std)
   alpha_mean_scale: 1.0
   alpha_var_scale: 100.0
-  # alpha_mean_max / alpha_var_max: left at the code defaults (10 / 1000). These are
-  # overflow guards; the old 0.1 / 10 values pinned the multipliers and disabled the
-  # M-step trust region (see codex/mpo-vs-acme-reference.md).
+  # Multipliers are uncapped by default so they can respond to KL violations.
+  # Finite M-step iterations approximate the constraints; monitor kl_*_max_rel.
   mstep_iteration_num: 5
   # Target actor: plain Polyak (default). The hard periodic copy doubles early learning
   # speed but cost final policy quality in the 3-seed paired Humanoid-Flat ablation

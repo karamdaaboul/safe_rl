@@ -109,7 +109,7 @@ def test_mpo_update_moves_actor_params() -> None:
 
 
 def test_mpo_dual_optimum_satisfies_kkt_on_eta() -> None:
-    # dg/deta = eps - KL(q*||pi_old) exactly, so at the SLSQP optimum the actualized
+    # dg/deta = eps - KL(q*||pi_old) exactly, so at an interior optimum the actualized
     # non-parametric KL must equal the E-step trust region eps_dual.
     import numpy as np
 
@@ -122,7 +122,7 @@ def test_mpo_dual_optimum_satisfies_kkt_on_eta() -> None:
 
     weights = torch.softmax(torch.from_numpy(q_np) / eta, dim=0)
     kl_q = nonparametric_kl_from_weights(weights).mean().item()
-    assert abs(kl_q - alg.eps_dual) < 0.02, f"KKT residual too large: kl_q={kl_q}, eps={alg.eps_dual}"
+    assert abs(kl_q - alg.eps_dual) < 1e-8, f"KKT residual too large: kl_q={kl_q}, eps={alg.eps_dual}"
 
 
 def test_mpo_ess_bounds() -> None:
@@ -178,22 +178,26 @@ def test_mpo_per_dim_constraining_allocates_one_multiplier_per_action() -> None:
 def test_mpo_decoupled_mstep_doubles_mle_at_the_identity_point() -> None:
     # Before the actor moves, online == target, so both halves of Acme's split cross-entropy
     # are the same distribution: the decoupled objective is exactly 2x the coupled one.
-    # This is the same effective-scale doubling Acme gets from summing its two weight sets.
+    # This only doubles the VALUE, not the gradient: each old half is held fixed.
     from torch.distributions import Normal
 
     torch.manual_seed(0)
-    mean = torch.randn(8, NUM_ACT)
-    std = torch.rand(8, NUM_ACT) + 0.5
+    mean = torch.randn(8, NUM_ACT).requires_grad_()
+    std = (torch.rand(8, NUM_ACT) + 0.5).requires_grad_()
     x = Normal(mean, std).sample((16,))
     weights = torch.softmax(torch.randn(16, 8), dim=0)
 
-    dist_mean = Normal(mean, std)  # Normal(mean, std_old) with std_old == std
-    dist_var = Normal(mean, std)  # Normal(mean_old, std) with mean_old == mean
+    dist_mean = Normal(mean, std.detach())
+    dist_var = Normal(mean.detach(), std)
     coupled = (weights * Normal(mean, std).log_prob(x).sum(dim=-1)).sum(dim=0).mean()
     decoupled = (weights * dist_mean.log_prob(x).sum(dim=-1)).sum(dim=0).mean() + (
         weights * dist_var.log_prob(x).sum(dim=-1)
     ).sum(dim=0).mean()
     assert decoupled.item() == pytest.approx(2.0 * coupled.item(), rel=1e-5)
+    coupled_grad = torch.autograd.grad(coupled, (mean, std), retain_graph=True)
+    split_grad = torch.autograd.grad(decoupled, (mean, std))
+    for actual, expected in zip(split_grad, coupled_grad):
+        assert torch.allclose(actual, expected, atol=1e-6)
 
 
 def test_mpo_estep_options_run() -> None:
@@ -204,12 +208,10 @@ def test_mpo_estep_options_run() -> None:
         assert torch.isfinite(torch.tensor(info["actor"])), kwargs
 
 
-def test_mpo_caps_default_high() -> None:
-    # The old defaults (0.1 / 10) pinned the multipliers and un-enforced the M-step trust
-    # region (measured on three envs). Guard the raised defaults against regression.
+def test_mpo_multipliers_are_uncapped_by_default() -> None:
     alg = _make_mpo()
-    assert alg.alpha_mean_max >= 10.0
-    assert alg.alpha_var_max >= 1000.0
+    assert alg.alpha_mean_max == float("inf")
+    assert alg.alpha_var_max == float("inf")
 
 
 def test_mpo_hard_target_update_copies_on_period_only() -> None:
@@ -325,4 +327,4 @@ def test_mpo_reports_estep_diagnostics() -> None:
         assert torch.isfinite(torch.tensor(info[key])), key
     # ESS lives in [1, N] by construction.
     assert 1.0 <= info["ess_min"] <= alg.sample_action_num + 1e-6
-    assert info["solver_status"] == 0.0, "SLSQP did not converge"
+    assert info["solver_status"] == 0.0, "E-step did not converge"

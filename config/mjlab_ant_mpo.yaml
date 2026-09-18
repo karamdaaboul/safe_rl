@@ -37,8 +37,8 @@ algorithm:
   kl_var_constraint: 0.0001
   alpha_mean_scale: 1.0
   alpha_var_scale: 100.0
-  alpha_mean_max: 0.1       # Acme never caps its duals, only floors them
-  alpha_var_max: 10.0
+  alpha_mean_max: null     # let the multipliers keep responding to KL violations
+  alpha_var_max: null
   mstep_iteration_num: 5
   per_dim_constraining: false
   decoupled_mstep: false    # single Normal(mean, std) for the weighted MLE

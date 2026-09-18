@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -172,6 +173,38 @@ class SAC:
     def alpha(self) -> torch.Tensor:
         """Current entropy coefficient."""
         return self.log_alpha.exp()
+
+    def get_checkpoint_state(self) -> dict:
+        """Entropy state and update schedule live outside the policy module."""
+        return {
+            "version": 1,
+            "algorithm": "SAC",
+            "auto_entropy_tuning": self.auto_entropy_tuning,
+            "target_entropy": self.target_entropy,
+            "log_alpha": self.log_alpha.detach().clone(),
+            "alpha_optimizer": deepcopy(self.alpha_optimizer.state_dict()) if self.alpha_optimizer else None,
+            "update_step": self.update_step,
+        }
+
+    def load_checkpoint_state(self, state: dict | None, *, load_optimizer: bool = True) -> None:
+        """Legacy checkpoints retain configured alpha; exact replay/RNG resume is separate."""
+        if state is None:
+            self.update_step = 0
+            return
+        if state.get("version") != 1 or state.get("algorithm") != "SAC":
+            raise ValueError("Unsupported SAC checkpoint state")
+        if load_optimizer and bool(state["auto_entropy_tuning"]) != self.auto_entropy_tuning:
+            raise ValueError("SAC entropy-tuning configuration differs from the checkpoint")
+        log_alpha = torch.as_tensor(state["log_alpha"], device=self.device, dtype=self.log_alpha.dtype)
+        if log_alpha.shape != self.log_alpha.shape or not torch.isfinite(log_alpha).all():
+            raise ValueError("Invalid SAC checkpoint log_alpha")
+        with torch.no_grad():
+            self.log_alpha.copy_(log_alpha)
+        self.update_step = int(state["update_step"])
+        if load_optimizer:
+            self.target_entropy = state["target_entropy"]
+            if self.alpha_optimizer is not None and state.get("alpha_optimizer") is not None:
+                self.alpha_optimizer.load_state_dict(state["alpha_optimizer"])
 
     def init_storage(
         self,
@@ -510,6 +543,17 @@ class SAC:
             return self.gamma
         return self.gamma ** effective_n_steps.to(torch.float32)
 
+    def _sample_next_actions(self, next_obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Policy sampling for reward Bellman backups; MPO overrides the reference policy."""
+        return self.policy.sample_with_log_prob(next_obs)
+
+    @torch.no_grad()
+    def _compute_next_value(self, next_obs: torch.Tensor, next_critic_obs: torch.Tensor) -> torch.Tensor:
+        """Scalar Bellman value; algorithms may override how actions are integrated."""
+        next_actions, next_log_prob = self._sample_next_actions(next_obs)
+        q1_target, q2_target = self.policy.evaluate_q_target(next_critic_obs, next_actions)
+        return torch.min(q1_target, q2_target) - self.alpha.detach() * next_log_prob
+
     def _update_critic_standard(
         self,
         obs: torch.Tensor,
@@ -540,18 +584,12 @@ class SAC:
             Critic loss value.
         """
         with torch.no_grad():
-            # Sample next actions and compute log probs (actor-space obs)
-            next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
-
-            # Compute target Q-values (critic-space obs)
-            q1_target, q2_target = self.policy.evaluate_q_target(next_critic_obs, next_actions)
-            q_target = torch.min(q1_target, q2_target)
-
+            next_value = self._compute_next_value(next_obs, next_critic_obs)
             # Soft Bellman backup
             # Q_target = r + γ^n * mask * (min Q_target - α * log π)
             mask = self._bootstrap_mask(dones, bootstrap)
             discount = self._bootstrap_discount(effective_n_steps, survival_discount)
-            target_q = rewards + discount * mask * (q_target - self.alpha.detach() * next_log_prob)
+            target_q = rewards + discount * mask * next_value
 
         # Compute current Q-values (critic-space obs)
         q1, q2 = self.policy.evaluate_q(critic_obs, actions)
@@ -610,7 +648,7 @@ class SAC:
 
         with torch.no_grad():
             # Sample next actions and compute log probs (actor-space obs)
-            next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
+            next_actions, next_log_prob = self._sample_next_actions(next_obs)
             next_log_prob = next_log_prob.squeeze(-1)  # [batch, 1] -> [batch]
 
             # Modify rewards to include entropy bonus: r - γ^n * α * log π(a'|s')
@@ -690,7 +728,7 @@ class SAC:
             discount = discount.reshape(-1)
 
         with torch.no_grad():
-            next_actions, next_log_prob = self.policy.sample_with_log_prob(next_obs)
+            next_actions, next_log_prob = self._sample_next_actions(next_obs)
             next_log_prob = next_log_prob.squeeze(-1)
 
             entropy_adjusted_rewards = rewards - discount * bootstrap_mask * self.alpha.detach() * next_log_prob

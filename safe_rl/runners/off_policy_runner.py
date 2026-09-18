@@ -48,6 +48,10 @@ class OffPolicyRunner:
         self.env = env
         self.log_dir = log_dir
 
+        enable_final_observations = getattr(self.env, "enable_final_observations", None)
+        if callable(enable_final_observations):
+            enable_final_observations()
+
         # Resolve dimensions of observations
         obs, extras = self.env.get_observations()
         num_obs = obs.shape[1]
@@ -239,8 +243,8 @@ class OffPolicyRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
 
-        obs, critic_obs = self._initial_observations()
         self.train_mode()
+        obs, critic_obs = self._initial_observations()
 
         # Training loop
         global_step = self.tot_timesteps
@@ -307,6 +311,9 @@ class OffPolicyRunner:
                     store_next_obs, store_next_critic_obs = self._terminal_observations(
                         infos, time_outs, next_obs, next_critic_obs
                     )
+                    # One true successor per transition. Timeout successors are final
+                    # states; ordinary/terminal transitions use the returned observations.
+                    self._update_policy_normalization(store_next_obs, store_next_critic_obs)
 
                     costs = self._costs(infos)
                     self._store_transition(
@@ -542,6 +549,8 @@ class OffPolicyRunner:
             saved_dict["critic_optimizer_state_dict"] = self.alg.critic_optimizer.state_dict()
         if hasattr(self.alg, "actor_optimizer"):
             saved_dict["actor_optimizer_state_dict"] = self.alg.actor_optimizer.state_dict()
+        if hasattr(self.alg, "get_checkpoint_state"):
+            saved_dict["algorithm_state_dict"] = self.alg.get_checkpoint_state()
 
         # Save normalizers
         if self.empirical_normalization:
@@ -568,6 +577,15 @@ class OffPolicyRunner:
 
         # Load model
         self.actor_critic.load_state_dict(loaded_dict["model_state_dict"], strict=False)
+        if hasattr(self.alg, "load_checkpoint_state"):
+            algorithm_state = loaded_dict.get("algorithm_state_dict")
+            if algorithm_state is None:
+                LOGGER.warning(
+                    "Checkpoint has no algorithm state; using legacy initialization for %s. "
+                    "SAC entropy state cannot be recovered from these older checkpoints.",
+                    type(self.alg).__name__,
+                )
+            self.alg.load_checkpoint_state(algorithm_state, load_optimizer=load_optimizer)
 
         # Load normalizers. A checkpoint trained with normalization is unusable
         # without its statistics — the policy would see inputs on a scale it never
@@ -839,7 +857,20 @@ class OffPolicyRunner:
         if self.empirical_normalization:
             self.obs_normalizer(obs)
             self.critic_obs_normalizer(critic_obs)
+        self._update_policy_normalization(obs, critic_obs)
         return obs, critic_obs
+
+    def _update_policy_normalization(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
+        if not getattr(self.actor_critic, "normalization_updates_from_env", False):
+            return
+        update = getattr(self.actor_critic, "update_normalization", None)
+        if not callable(update):
+            return
+        with torch.no_grad():
+            if self.empirical_normalization:
+                obs = self.obs_normalizer.normalize(obs)
+                critic_obs = self.critic_obs_normalizer.normalize(critic_obs)
+            update(obs, critic_obs)
 
     def _obs_for_policy(self, obs: torch.Tensor) -> torch.Tensor:
         """Normalize for action selection; stats already absorbed this obs as ``next_obs``."""
@@ -978,6 +1009,17 @@ class OffPolicyRunner:
 
         mask = time_outs.bool().unsqueeze(-1)
         store_next_obs = torch.where(mask, final_obs, next_obs)
-        # Only reusable when the critic obs IS the actor obs.
-        store_next_critic_obs = store_next_obs if next_critic_obs is next_obs else next_critic_obs
+        final_critic_obs = infos.get("final_critic_observation")
+        if final_critic_obs is not None:
+            final_critic_obs = final_critic_obs.to(self.device)
+            if final_critic_obs.shape != next_critic_obs.shape:
+                raise ValueError(
+                    f"Final critic observation shape {final_critic_obs.shape} "
+                    f"does not match {next_critic_obs.shape}."
+                )
+            store_next_critic_obs = torch.where(mask, final_critic_obs, next_critic_obs)
+        else:
+            # A single final observation is only reusable when actor and critic
+            # consume the same tensor. mjlab publishes both groups explicitly.
+            store_next_critic_obs = store_next_obs if next_critic_obs is next_obs else next_critic_obs
         return store_next_obs, store_next_critic_obs

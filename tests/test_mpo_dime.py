@@ -83,6 +83,39 @@ def test_builds_with_frozen_target_actor() -> None:
     assert not alg.auto_entropy_tuning
 
 
+def test_reference_actor_supplies_the_diffusion_critic_backup(monkeypatch) -> None:
+    alg = _make_alg(estep_q_reduction="mean")
+    assert alg.estep_q_reduction == "mean"
+    actions = torch.ones(8, NUM_ACT)
+    calls = []
+
+    def sample(obs):
+        calls.append(obs)
+        return actions, torch.ones(8), torch.ones(8), torch.ones(8)
+
+    def unexpected(obs):
+        pytest.fail("diffusion MPO backup sampled the online policy")
+
+    monkeypatch.setattr(alg.actor_target, "sde_sample", sample)
+    monkeypatch.setattr(alg.policy.actor, "sde_sample", unexpected)
+    with torch.no_grad():
+        actual, log_prob = alg._sample_next_actions(torch.zeros(8, NUM_OBS))
+    assert len(calls) == 1
+    assert actual is actions
+    assert torch.equal(log_prob, torch.zeros(8, 1))
+
+
+def test_diffusion_checkpoint_keeps_its_path_multiplier() -> None:
+    from copy import deepcopy
+
+    src, dst = _make_alg(), _make_alg()
+    src.alpha_path = 12.0
+    dst.load_checkpoint_state(deepcopy(src.get_checkpoint_state()))
+    assert dst.alpha_path == 12.0
+    for source, target in zip(src.actor_target.parameters(), dst.actor_target.parameters()):
+        assert torch.equal(source, target)
+
+
 def test_rejects_gaussian_policy() -> None:
     from safe_rl.algorithms import MPODIME
     from safe_rl.modules import SACActorCritic

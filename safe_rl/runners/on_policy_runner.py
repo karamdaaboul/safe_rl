@@ -43,6 +43,13 @@ class OnPolicyRunner:
         self.policy_cfg = train_cfg["policy"]
         self.device = device
         self.env = env
+        self.bootstrap_final_observations = bool(self.cfg.get("bootstrap_final_observations", False))
+        if self.bootstrap_final_observations:
+            if self.alg_cfg["class_name"] != "PPO":
+                raise ValueError("bootstrap_final_observations currently supports feed-forward PPO.")
+            enable_final = getattr(self.env, "enable_final_observations", None)
+            if callable(enable_final):
+                enable_final()
 
         # check if multi-gpu is enabled
         self._configure_multi_gpu()
@@ -259,6 +266,33 @@ class OnPolicyRunner:
         self.current_learning_iteration = 0
         self.git_status_repos = [safe_rl.__file__]
 
+    def _add_timeout_values(self, infos: dict) -> dict:
+        """Evaluate actual timeout successors without advancing normalizer statistics."""
+        timeouts = infos.get("time_outs")
+        if timeouts is None or not timeouts.any():
+            return infos
+        if self.alg.policy.is_recurrent:
+            raise ValueError("Final-observation PPO bootstrapping requires a feed-forward policy.")
+        key = "final_critic_observation" if self.privileged_obs_type is not None else "final_observation"
+        final_obs = infos.get(key)
+        if final_obs is None:
+            raise RuntimeError(f"PPO timeout is missing {key}; cannot evaluate the final state.")
+        mask = timeouts.to(self.device).bool().reshape(-1)
+        obs = final_obs.to(self.device)[mask]
+        if self.empirical_normalization:
+            normalizer = self.privileged_obs_normalizer if self.privileged_obs_type is not None else self.obs_normalizer
+            obs = normalizer.normalize(obs)
+        policy_normalizer = self.alg.policy.critic_obs_normalizer
+        was_training = policy_normalizer.training
+        policy_normalizer.eval()
+        try:
+            with torch.no_grad():
+                values = torch.zeros_like(self.alg.transition.values)
+                values[mask] = self.alg.policy.evaluate(obs)
+        finally:
+            policy_normalizer.train(was_training)
+        return {**infos, "timeout_values": values}
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         # initialize writer
         if self.log_dir is not None and self.writer is None and not self.disable_logs:
@@ -369,6 +403,9 @@ class OnPolicyRunner:
                         )
                     else:
                         privileged_obs = obs
+
+                    if self.bootstrap_final_observations:
+                        infos = self._add_timeout_values(infos)
 
                     # process the step
                     if is_saferl:

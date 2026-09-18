@@ -96,6 +96,7 @@ class OnPolicyRunnerCfg:
     num_steps_per_env: int = 24
     save_interval: int = 50
     empirical_normalization: bool = False
+    bootstrap_final_observations: bool = False
     logger: str = "tensorboard"
     wandb_project: str = "safe_rl"
     wandb_entity: str | None = None

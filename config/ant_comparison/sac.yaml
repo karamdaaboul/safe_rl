@@ -1,0 +1,53 @@
+# Ant comparison: 256 envs, 8,192,000 transitions per seed.
+runner_class_name: OffPolicyRunner
+seed: 1
+algorithm:
+  class_name: SAC
+  gamma: 0.99
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  alpha_lr: 0.0003
+  alpha: 0.2
+  auto_entropy_tuning: true
+  target_entropy_scale: 1.0
+  batch_size: 256
+  num_updates_per_step: 4
+  max_grad_norm: 1.0
+policy:
+  class_name: SACActorCritic
+  actor_type: stochastic
+  critic_type: standard
+  num_critics: 2
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+    log_std_min: -20
+    log_std_max: 2
+  critic_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+runner:
+  num_steps_per_env: 1
+  max_iterations: 32000
+  max_size: 1000000
+  start_random_steps: 5000
+  update_after: 5000
+  update_every: 1
+  save_interval: 3200
+  empirical_normalization: false
+  experiment_name: ant_comparison
+  run_name: ''
+  logger: wandb
+  wandb_project: mjlab
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  log_interval: 100
+  n_step: 1
+  reward_normalization: false

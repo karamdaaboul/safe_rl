@@ -1,0 +1,49 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+algorithm:
+  class_name: PPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.0
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.0005
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+  rnd_cfg: null
+  symmetry_cfg: null
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims:
+    - 256
+    - 256
+    activation: relu
+runner:
+  empirical_normalization: false
+  experiment_name: humanoid_comparison
+  run_name: ''
+  logger: wandb
+  wandb_project: mjlab
+  wandb_entity: uqerh-kit
+  wandb_dir: ./wandb_logs
+  num_steps_per_env: 32
+  max_iterations: 1000
+  save_interval: 100
+  bootstrap_final_observations: true
