@@ -301,9 +301,13 @@ class PPO:
                         param_group["lr"] = self.learning_rate
 
             # Surrogate loss
-            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-            surrogate = -torch.squeeze(advantages_batch) * ratio
-            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
+            old_log_prob = old_actions_log_prob_batch.squeeze(-1)
+            advantages = advantages_batch.squeeze(-1)
+            if actions_log_prob_batch.shape != old_log_prob.shape or advantages.shape != old_log_prob.shape:
+                raise ValueError("PPO log probabilities and advantages must have identical sample axes")
+            ratio = torch.exp(actions_log_prob_batch - old_log_prob)
+            surrogate = -advantages * ratio
+            surrogate_clipped = -advantages * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
