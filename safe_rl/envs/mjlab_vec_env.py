@@ -92,7 +92,7 @@ class MjlabVecEnv(VecEnv):
         actor_tensor = self._as_float_tensor(actor_obs)
 
         extras: dict[str, Any] = {"observations": {}}
-        for key in ("critic", "rnd_state", "teacher"):
+        for key in ("critic", "rnd_state", "teacher", "priv", "actor_history"):
             if key in obs_groups:
                 extras["observations"][key] = self._as_float_tensor(obs_groups[key])
         if "episode" in info:

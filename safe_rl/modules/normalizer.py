@@ -46,6 +46,10 @@ class EmpiricalNormalization(nn.Module):
 
         if self.training:
             self.update(x)
+        return self.normalize(x)
+
+    def normalize(self, x):
+        """Apply the current statistics without updating them."""
         return (x - self._mean) / (self._std + self.eps)
 
     @torch.jit.unused

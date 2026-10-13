@@ -15,9 +15,11 @@ from safe_rl.algorithms.pcpo import PCPO  # noqa: F401
 from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.reppo import REPPO
 from safe_rl.envs import VecEnv
+from safe_rl.envs.roa_obs_wrapper import ROAObsWrapper
 from safe_rl.modules import (  # noqa: F401
     ActorCritic,
     ActorCriticRecurrent,
+    ActorCriticROA,
     EmpiricalNormalization,
     REPPOActorCritic,
     StudentTeacher,
@@ -34,6 +36,9 @@ class OnPolicyRunner:
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         self.device = device
+        # ROA policies read [obs | priv | history]; other policies on the same task never see priv.
+        if getattr(getattr(safe_rl.modules, str(self.policy_cfg.get("class_name")), None), "requires_roa_obs", False):
+            env = ROAObsWrapper(env)
         self.env = env
 
         self._configure_multi_gpu()
@@ -98,6 +103,8 @@ class OnPolicyRunner:
             self.policy_cfg["num_costs"] = len(self.alg_cfg["cost_limits"])
 
         policy_class = eval(policy_class_name)
+        if getattr(policy_class, "requires_roa_obs", False):
+            self.policy_cfg.update(self.env.roa_obs_dims)
         policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
@@ -124,6 +131,13 @@ class OnPolicyRunner:
         self.alg: PPO | P3O | PPOL_PID | CPO | FPPO | Distillation = alg_class(
             policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
         )
+
+        # ROA: every N-th iteration the history encoder drives the rollout and is supervised
+        self._roa_interval = int(getattr(self.alg, "roa_adaptation_interval", 0))
+        if getattr(policy_class, "requires_roa_obs", False) and self._roa_interval <= 0:
+            raise ValueError(
+                f"{policy_class_name} needs 'algorithm.roa_cfg' (PPO), otherwise its history encoder is never trained."
+            )
 
         # store training configuration
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -244,6 +258,9 @@ class OnPolicyRunner:
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
             start = time.time()
+            roa_adaptation = self._roa_interval > 0 and it % self._roa_interval == 0
+            if self._roa_interval > 0:
+                self.alg.policy.use_history_latent = roa_adaptation
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -332,7 +349,10 @@ class OnPolicyRunner:
                         self.alg.compute_cost_returns(privileged_obs)
 
             # update policy
-            if is_saferl:
+            if roa_adaptation:
+                self.alg.policy.use_history_latent = False
+                loss_dict = self.alg.update_roa_adaptation()
+            elif is_saferl:
                 current_costs = None
                 if "costbuffers" in locals() and all(len(buf) > 0 for buf in costbuffers):
                     current_costs = [statistics.mean(buf) for buf in costbuffers]
@@ -584,6 +604,9 @@ class OnPolicyRunner:
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        # -- Algorithm-owned state the dicts above miss (PPO with ROA: the history-encoder optimizer).
+        if hasattr(self.alg, "extra_state_dict"):
+            saved_dict["alg_extra_state"] = self.alg.extra_state_dict()
         # -- Save RND model if used
         if self.alg.rnd:
             saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
@@ -625,6 +648,9 @@ class OnPolicyRunner:
             # -- RND optimizer if used
             if self.alg.rnd:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+        # -- algorithm-owned extra state (see save)
+        if load_optimizer and resumed_training and hasattr(self.alg, "load_extra_state"):
+            self.alg.load_extra_state(loaded_dict.get("alg_extra_state", {}))
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]

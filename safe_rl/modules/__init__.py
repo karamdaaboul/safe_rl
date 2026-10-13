@@ -3,6 +3,7 @@
 from .actor import DeterministicActor, GaussianActor, StochasticActor
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
+from .actor_critic_roa import ActorCriticROA, StateHistoryEncoder
 from .critic import DistributionalCritic, StandardCritic
 from .normalizer import EmpiricalNormalization
 from .reppo_actor_critic import REPPOActorCritic
@@ -16,6 +17,7 @@ from .td3_actor_critic import TD3ActorCritic
 
 __all__ = [
     "ActorCritic",
+    "ActorCriticROA",
     "ActorCriticRecurrent",
     "DeterministicActor",
     "DistributionalCritic",
@@ -27,6 +29,7 @@ __all__ = [
     "SACActorCritic",
     "SafeSACActorCritic",
     "StandardCritic",
+    "StateHistoryEncoder",
     "StochasticActor",
     "StudentTeacher",
     "StudentTeacherRecurrent",

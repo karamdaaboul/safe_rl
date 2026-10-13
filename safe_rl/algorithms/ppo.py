@@ -38,6 +38,8 @@ class PPO:
         rnd_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
+        # Regularized Online Adaptation parameters
+        roa_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
     ):
@@ -84,6 +86,7 @@ class PPO:
         self.policy = policy
         self.policy.to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+        self._init_roa(roa_cfg, learning_rate)
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
 
@@ -179,6 +182,11 @@ class PPO:
             mean_symmetry_loss = 0
         else:
             mean_symmetry_loss = None
+
+        if self.roa_optimizer is not None:
+            self.policy.use_history_latent = False
+            priv_reg_coef = self.roa_priv_reg_coef()
+            mean_priv_reg_loss = 0.0
 
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
@@ -299,6 +307,12 @@ class PPO:
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
+            # ROA: pull the privileged latent towards what the history encoder can reach
+            if self.roa_optimizer is not None:
+                priv_reg_loss = self.policy.priv_reg_loss()
+                loss = loss + priv_reg_coef * priv_reg_loss
+                mean_priv_reg_loss += priv_reg_loss.item()
+
             # Symmetry loss
             if self.symmetry:
                 # obtain the symmetric actions
@@ -393,8 +407,84 @@ class PPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if self.roa_optimizer is not None:
+            loss_dict["roa_priv_reg"] = mean_priv_reg_loss / num_updates
+            loss_dict["roa_priv_reg_coef"] = priv_reg_coef
+            self.roa_update_count += 1
 
         return loss_dict
+
+    """
+    Regularized Online Adaptation (Fu et al., Deep Whole-Body Control, CoRL 2022)
+    """
+
+    def _init_roa(self, roa_cfg: dict | None, learning_rate: float) -> None:
+        """Split the history encoder off the PPO optimizer and give it its own.
+
+        ``roa_cfg`` keys: ``priv_reg_coef_schedule`` = [start, end, start_update, ramp_updates] for the
+        regularization weight (reference: [0, 0.1, 3000, 7000]); ``adaptation_interval``: every N-th
+        iteration the history encoder drives the rollout and is supervised instead of a PPO update
+        (reference: 20); ``learning_rate`` of the history encoder (default: the PPO learning rate).
+        """
+        self.roa_optimizer = None
+        self.roa_adaptation_interval = 0
+        if roa_cfg is None:
+            return
+        if not hasattr(self.policy, "history_encoder"):
+            raise ValueError("roa_cfg requires a policy with a history encoder, e.g. ActorCriticROA.")
+        if self.is_multi_gpu:
+            raise NotImplementedError("ROA does not support multi-GPU training.")
+        roa_cfg = dict(roa_cfg)
+        schedule = tuple(float(v) for v in roa_cfg.pop("priv_reg_coef_schedule", (0.0, 0.1, 3000, 7000)))
+        if len(schedule) != 4 or schedule[3] < 0:
+            raise ValueError(f"priv_reg_coef_schedule must be [start, end, start_update, ramp_updates]; got {schedule}")
+        self.roa_priv_reg_coef_schedule = schedule
+        self.roa_adaptation_interval = int(roa_cfg.pop("adaptation_interval", 20))
+        adaptation_learning_rate = float(roa_cfg.pop("learning_rate", learning_rate))
+        if roa_cfg:
+            raise ValueError(f"Unknown roa_cfg keys: {sorted(roa_cfg)}")
+
+        history_params = {id(p) for p in self.policy.history_encoder.parameters()}
+        self.optimizer = optim.Adam(
+            [p for p in self.policy.parameters() if id(p) not in history_params], lr=learning_rate
+        )
+        self.roa_optimizer = optim.Adam(self.policy.history_encoder.parameters(), lr=adaptation_learning_rate)
+        self.roa_update_count = 0
+
+    def roa_priv_reg_coef(self) -> float:
+        """Regularization weight, ramped linearly over updates (both PPO and adaptation updates count)."""
+        start, end, start_update, ramp_updates = self.roa_priv_reg_coef_schedule
+        if ramp_updates == 0:
+            stage = float(self.roa_update_count >= start_update)
+        else:
+            stage = min(max(self.roa_update_count - start_update, 0) / ramp_updates, 1.0)
+        return start + stage * (end - start)
+
+    def update_roa_adaptation(self) -> dict[str, float]:
+        """Supervise the history encoder on a rollout it drove: ``||sg(z) - z_hat||``."""
+        mean_adaptation_loss = 0.0
+        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        for batch in generator:
+            adaptation_loss = self.policy.adaptation_loss(batch[0])
+            self.roa_optimizer.zero_grad()
+            adaptation_loss.backward()
+            nn.utils.clip_grad_norm_(self.policy.history_encoder.parameters(), self.max_grad_norm)
+            self.roa_optimizer.step()
+            mean_adaptation_loss += adaptation_loss.item()
+        self.storage.clear()
+        self.roa_update_count += 1
+        return {"roa_adaptation": mean_adaptation_loss / (self.num_learning_epochs * self.num_mini_batches)}
+
+    def extra_state_dict(self) -> dict:
+        if self.roa_optimizer is None:
+            return {}
+        return {"roa_optimizer": self.roa_optimizer.state_dict(), "roa_update_count": self.roa_update_count}
+
+    def load_extra_state(self, state: dict) -> None:
+        if self.roa_optimizer is None or not state:
+            return
+        self.roa_optimizer.load_state_dict(state["roa_optimizer"])
+        self.roa_update_count = int(state["roa_update_count"])
 
     """
     Helper functions

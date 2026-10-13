@@ -1,0 +1,68 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# PPO + Regularized Online Adaptation (ROA) on the Unitree G1 flat velocity task.
+#
+# Method: Fu, Cheng, Pathak, "Deep Whole-Body Control", CoRL 2022. A teacher
+# encoder maps the randomized physics (friction, CoM, torso mass, PD gains,
+# encoder bias) to a latent z; a CNN over the last 10 proprioceptive steps
+# learns z_hat. PPO adds priv_reg_coef * ||z - sg(z_hat)||; every
+# adaptation_interval-th iteration z_hat drives the rollout and is regressed
+# onto sg(z). The deployed policy uses z_hat only.
+#
+# Task: Unitree-G1-Flat-ROA (unitree_rl_mjlab, branch feature/g1-roa), which
+# adds the 'priv' and 'actor_history' observation groups. Baseline on the same
+# randomization: config/unitree_g1_flat_ppo.yaml with --env_id Unitree-G1-Flat-ROA.
+#
+# Everything outside policy.class_name / priv_encoder_dims / roa_cfg matches
+# unitree_g1_flat_ppo.yaml.
+# ===========================================================================
+
+algorithm:
+  class_name: PPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.005
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+  roa_cfg:
+    # [start, end, start_update, ramp_updates]. The reference uses [0, 0.1, 3000, 7000]
+    # for much longer runs; scaled here to the 2000-iteration budget.
+    priv_reg_coef_schedule: [0.0, 0.1, 500, 1000]
+    adaptation_interval: 20
+
+policy:
+  class_name: ActorCriticROA
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  priv_encoder_dims: [64, 20]
+  encoder_activation: elu
+  actor_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+
+runner:
+  num_steps_per_env: 24
+  max_iterations: 2000
+  empirical_normalization: false
+  save_interval: 200
+  experiment_name: g1_flat_ppo_roa
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab
