@@ -326,7 +326,9 @@ class RolloutStorageCMDP:
                 privileged_observations = self.privileged_observations[i]
             else:
                 privileged_observations = self.observations[i]
-            yield self.observations[i], privileged_observations, self.actions[i], self.privileged_actions[i], self.dones[i]
+            yield self.observations[i], privileged_observations, self.actions[i], self.privileged_actions[
+                i
+            ], self.dones[i]
 
     # For reinforcement learning with feedforward networks
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -405,10 +407,23 @@ class RolloutStorageCMDP:
                 else:
                     rnd_state_batch = None
 
-                yield (obs_batch, privileged_observations_batch, actions_batch, target_values_batch,
-                       advantages_batch, returns_batch, target_cost_values_batch, cost_advantages_batch,
-                       returns_cost_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch,
-                       (None, None), None, rnd_state_batch)
+                yield (
+                    obs_batch,
+                    privileged_observations_batch,
+                    actions_batch,
+                    target_values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    target_cost_values_batch,
+                    cost_advantages_batch,
+                    returns_cost_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    (None, None),
+                    None,
+                    rnd_state_batch,
+                )
 
     # For reinforcement learning with recurrent networks
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -486,9 +501,22 @@ class RolloutStorageCMDP:
                 hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
                 hid_c_batch = hid_c_batch if len(hid_c_batch) == 1 else hid_c_batch
 
-                yield (obs_batch, privileged_obs_batch, actions_batch, values_batch,
-                       advantages_batch, returns_batch, cost_values_batch, cost_advantages_batch,
-                       cost_returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch,
-                       (hid_a_batch, hid_c_batch), masks_batch, rnd_state_batch)
+                yield (
+                    obs_batch,
+                    privileged_obs_batch,
+                    actions_batch,
+                    values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    cost_values_batch,
+                    cost_advantages_batch,
+                    cost_returns_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    (hid_a_batch, hid_c_batch),
+                    masks_batch,
+                    rnd_state_batch,
+                )
 
                 first_traj = last_traj

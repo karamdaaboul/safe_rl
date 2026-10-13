@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any, NoReturn
-
 import torch
 import torch.nn as nn
+from copy import deepcopy
+from typing import Any, NoReturn
 
 from safe_rl.modules.actor import StochasticActor
 from safe_rl.modules.critic import StandardCritic
@@ -139,9 +138,7 @@ class SafeSACActorCritic(nn.Module):
 
         print(f"Safe SAC Reward Critic: {self.reward_critics[0]}")
 
-        self.reward_critic_targets = nn.ModuleList(
-            deepcopy(critic) for critic in self.reward_critics
-        )
+        self.reward_critic_targets = nn.ModuleList(deepcopy(critic) for critic in self.reward_critics)
 
         # Freeze target networks
         for target in self.reward_critic_targets:
@@ -152,7 +149,9 @@ class SafeSACActorCritic(nn.Module):
         self.critic_1 = self.reward_critics[0]
         self.critic_2 = self.reward_critics[1] if num_reward_critics > 1 else self.reward_critics[0]
         self.critic_1_target = self.reward_critic_targets[0]
-        self.critic_2_target = self.reward_critic_targets[1] if num_reward_critics > 1 else self.reward_critic_targets[0]
+        self.critic_2_target = (
+            self.reward_critic_targets[1] if num_reward_critics > 1 else self.reward_critic_targets[0]
+        )
 
         # Cost Critics
         cost_critic_kwargs.setdefault("hidden_dims", critic_kwargs.get("hidden_dims", [256, 256]))
@@ -171,9 +170,7 @@ class SafeSACActorCritic(nn.Module):
 
         print(f"Safe SAC Cost Critic (num_costs={num_costs}): {self.cost_critics[0]}")
 
-        self.cost_critic_targets = nn.ModuleList(
-            deepcopy(critic) for critic in self.cost_critics
-        )
+        self.cost_critic_targets = nn.ModuleList(deepcopy(critic) for critic in self.cost_critics)
 
         # Freeze cost target networks
         for target in self.cost_critic_targets:
@@ -233,9 +230,7 @@ class SafeSACActorCritic(nn.Module):
         obs = self.actor_obs_normalizer(obs)
         return self.actor.sample(obs)
 
-    def evaluate_q(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate Q-values for state-action pairs using both reward critics.
 
         Args:
@@ -251,9 +246,7 @@ class SafeSACActorCritic(nn.Module):
         q2 = self.critic_2(obs, actions)
         return q1, q2
 
-    def evaluate_q_target(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q_target(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate Q-values using target networks.
 
         Args:
@@ -269,9 +262,7 @@ class SafeSACActorCritic(nn.Module):
         q2_target = self.critic_2_target(obs, actions)
         return q1_target, q2_target
 
-    def evaluate_cost_q(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> torch.Tensor:
+    def evaluate_cost_q(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Evaluate cost Q-values for state-action pairs.
 
         Args:
@@ -289,9 +280,7 @@ class SafeSACActorCritic(nn.Module):
             cost_qs = [critic(obs, actions) for critic in self.cost_critics]
             return torch.stack(cost_qs, dim=0).mean(dim=0)
 
-    def evaluate_cost_q_target(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> torch.Tensor:
+    def evaluate_cost_q_target(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """Evaluate cost Q-values using target networks.
 
         Args:

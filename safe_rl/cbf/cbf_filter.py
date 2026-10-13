@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import time
-from typing import TYPE_CHECKING
-
 import numpy as np
+import time
 import torch
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from safe_rl.envs.safety_gymnasium_vec_env import SafetyGymnasiumVecEnv
@@ -62,8 +61,8 @@ class SafetyGymnasiumCBFFilter:
         return torch.as_tensor(actions_np, dtype=actions.dtype, device=self.device)
 
     def _filter_single(self, action: np.ndarray, state: dict) -> np.ndarray:
-        pos = state["pos"]              # (2,)
-        heading = state["heading"]      # (2,) unit forward vector
+        pos = state["pos"]  # (2,)
+        heading = state["heading"]  # (2,) unit forward vector
         hazards_pos = state["hazards_pos"]  # (N, 2)
         hazard_size = state["hazard_size"]
         d_safe = self.d_min + hazard_size
@@ -75,7 +74,7 @@ class SafetyGymnasiumCBFFilter:
         for _ in range(self.max_iter):
             changed = False
             for haz in hazards_pos:
-                diff = pos - haz          # vector from hazard center to robot
+                diff = pos - haz  # vector from hazard center to robot
                 d_sq = float(np.dot(diff, diff))
                 h = d_sq - d_safe**2
 

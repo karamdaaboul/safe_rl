@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any, NoReturn
-
 import torch
 import torch.nn as nn
+from copy import deepcopy
+from typing import Any, NoReturn
 
 from safe_rl.modules.actor import DeterministicActor, GaussianActor
 from safe_rl.modules.critic import DistributionalCritic, HLGaussCostCritic, StandardCritic
@@ -49,8 +48,7 @@ class ActorCritic(nn.Module):
         """
         if kwargs:
             print(
-                "ActorCritic.__init__ got unexpected arguments, which will be ignored: "
-                + str([key for key in kwargs])
+                "ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs])
             )
         super().__init__()
 
@@ -100,8 +98,7 @@ class ActorCritic(nn.Module):
         if critic_type == "standard":
             self.is_distributional_critic = False
             self.critics = nn.ModuleList(
-                StandardCritic(num_obs=num_critic_obs, num_actions=0, **critic_kwargs)
-                for _ in range(num_critics)
+                StandardCritic(num_obs=num_critic_obs, num_actions=0, **critic_kwargs) for _ in range(num_critics)
             )
 
         elif critic_type == "distributional":
@@ -148,9 +145,7 @@ class ActorCritic(nn.Module):
                     **cost_critic_kwargs,
                 )
             else:
-                raise ValueError(
-                    f"Unknown cost_critic loss_type: {loss_type!r}. Must be 'mse' or 'hlgauss'."
-                )
+                raise ValueError(f"Unknown cost_critic loss_type: {loss_type!r}. Must be 'mse' or 'hlgauss'.")
             print(f"Cost critic ({loss_type}): {self.cost_critic}")
         else:
             self.cost_critic = None
@@ -233,12 +228,8 @@ class ActorCritic(nn.Module):
 
         if self.is_distributional_critic:
             # For V(s), we use dummy empty actions
-            dummy_actions = torch.zeros(
-                critic_observations.shape[0], 0, device=critic_observations.device
-            )
-            out = torch.stack(
-                [critic(critic_observations, dummy_actions) for critic in self.critics], dim=1
-            )
+            dummy_actions = torch.zeros(critic_observations.shape[0], 0, device=critic_observations.device)
+            out = torch.stack([critic(critic_observations, dummy_actions) for critic in self.critics], dim=1)
             self._logits = out
             self._value_dist = self.critics[0].get_dist(self._logits[:, 0])
             value = self.critics[0].get_value(self._value_dist)
@@ -246,9 +237,7 @@ class ActorCritic(nn.Module):
             if self.num_critics == 1:
                 value = self.critics[0](critic_observations)
             else:
-                value = torch.stack(
-                    [critic(critic_observations) for critic in self.critics], dim=1
-                )
+                value = torch.stack([critic(critic_observations) for critic in self.critics], dim=1)
         return value
 
     def evaluate_cost(self, critic_observations: torch.Tensor, **kwargs: dict[str, Any]) -> torch.Tensor:

@@ -193,7 +193,7 @@ class FastTD3:
 
         self.gamma = gamma
         self.n_step = max(1, int(n_step))
-        self.bellman_gamma = gamma ** self.n_step
+        self.bellman_gamma = gamma**self.n_step
         self.tau = tau
         self.batch_size = batch_size
         self.num_updates_per_step = num_updates_per_step
@@ -320,9 +320,7 @@ class FastTD3:
                     else:
                         rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
-            critic_loss = self._update_critic(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs
-            )
+            critic_loss = self._update_critic(obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs)
             total_critic_loss += critic_loss
 
             if update_idx % self.policy_frequency == 0:
@@ -356,22 +354,46 @@ class FastTD3:
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
             if self.policy.is_distributional_critic:
                 loss = _critic_loss_distributional(
-                    critic_obs, actions, rewards, dones, next_critic_obs,
-                    self.bellman_gamma, self.smoothing_noise, self.noise_clip,
-                    self.action_low, self.action_high, self.clipped_double_q,
-                    self.policy.actor, self.policy.critic_1, self.policy.critic_2,
-                    self.policy.critic_1_target, self.policy.critic_2_target,
-                    self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
+                    critic_obs,
+                    actions,
+                    rewards,
+                    dones,
+                    next_critic_obs,
+                    self.bellman_gamma,
+                    self.smoothing_noise,
+                    self.noise_clip,
+                    self.action_low,
+                    self.action_high,
+                    self.clipped_double_q,
+                    self.policy.actor,
+                    self.policy.critic_1,
+                    self.policy.critic_2,
+                    self.policy.critic_1_target,
+                    self.policy.critic_2_target,
+                    self.policy.actor_obs_normalizer,
+                    self.policy.critic_obs_normalizer,
                     next_obs,
                 )
             else:
                 loss = _critic_loss_standard(
-                    critic_obs, actions, rewards, dones, next_critic_obs,
-                    self.bellman_gamma, self.smoothing_noise, self.noise_clip,
-                    self.action_low, self.action_high, self.clipped_double_q,
-                    self.policy.actor, self.policy.critic_1, self.policy.critic_2,
-                    self.policy.critic_1_target, self.policy.critic_2_target,
-                    self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
+                    critic_obs,
+                    actions,
+                    rewards,
+                    dones,
+                    next_critic_obs,
+                    self.bellman_gamma,
+                    self.smoothing_noise,
+                    self.noise_clip,
+                    self.action_low,
+                    self.action_high,
+                    self.clipped_double_q,
+                    self.policy.actor,
+                    self.policy.critic_1,
+                    self.policy.critic_2,
+                    self.policy.critic_1_target,
+                    self.policy.critic_2_target,
+                    self.policy.actor_obs_normalizer,
+                    self.policy.critic_obs_normalizer,
                     next_obs,
                 )
 
@@ -384,9 +406,15 @@ class FastTD3:
     def _update_actor(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> float:
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
             actor_loss = _actor_loss_fn(
-                obs, critic_obs, self.policy.is_distributional_critic, self.clipped_double_q,
-                self.policy.actor, self.policy.critic_1, self.policy.critic_2,
-                self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
+                obs,
+                critic_obs,
+                self.policy.is_distributional_critic,
+                self.clipped_double_q,
+                self.policy.actor,
+                self.policy.critic_1,
+                self.policy.critic_2,
+                self.policy.actor_obs_normalizer,
+                self.policy.critic_obs_normalizer,
             )
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -403,9 +431,7 @@ class FastTD3:
             torch._foreach_mul_(tgt_ps, 1.0 - self.tau)
             torch._foreach_add_(tgt_ps, src_ps, alpha=self.tau)
 
-            for (_, b_s), (_, b_t) in zip(
-                critic.named_buffers(), target.named_buffers(), strict=False
-            ):
+            for (_, b_s), (_, b_t) in zip(critic.named_buffers(), target.named_buffers(), strict=False):
                 b_t.copy_(b_s)
 
     def broadcast_parameters(self) -> None:

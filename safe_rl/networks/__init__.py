@@ -2,16 +2,7 @@
 
 from .memory import Memory
 from .mlp import MLP
-from .simba import (
-    HyperDense,
-    HyperEmbedder,
-    HyperLERPBlock,
-    HyperMLP,
-    HyperPredictor,
-    Scaler,
-    SimbaV2,
-    l2normalize,
-)
+from .simba import HyperDense, HyperEmbedder, HyperLERPBlock, HyperMLP, HyperPredictor, Scaler, SimbaV2, l2normalize
 
 __all__ = [
     "Memory",

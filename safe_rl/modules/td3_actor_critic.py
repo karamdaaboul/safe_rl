@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any, NoReturn
-
 import torch
 import torch.nn as nn
+from copy import deepcopy
+from typing import Any, NoReturn
 
 from safe_rl.modules.actor import DeterministicActor
 from safe_rl.modules.critic import DistributionalCritic, StandardCritic

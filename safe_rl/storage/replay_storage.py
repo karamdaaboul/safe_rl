@@ -91,9 +91,7 @@ class ReplayStorage:
     def _allocate_tensor(self, name: str, value: torch.Tensor) -> None:
         """Lazily allocate storage for a new data field."""
         if name not in self._data:
-            self._data[name] = torch.zeros(
-                self._max_size, *value.shape[1:], device=self.device, dtype=value.dtype
-            )
+            self._data[name] = torch.zeros(self._max_size, *value.shape[1:], device=self.device, dtype=value.dtype)
 
     def add(
         self,
@@ -152,9 +150,7 @@ class ReplayStorage:
             Dictionary containing sampled data for all stored fields.
         """
         if not self._initialized:
-            raise RuntimeError(
-                f"Buffer not initialized. Need {self._initial_size} samples, have {self._size}."
-            )
+            raise RuntimeError(f"Buffer not initialized. Need {self._initial_size} samples, have {self._size}.")
 
         if self.n_step > 1:
             return self._sample_n_step(batch_size)

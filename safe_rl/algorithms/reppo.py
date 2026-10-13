@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -80,24 +79,16 @@ class REPPO:
         self.old_policy.eval()
 
         # Algorithm-level learnable scalars.
-        self.log_alpha_temp = nn.Parameter(
-            torch.log(torch.tensor(float(init_alpha_temp), device=self.device))
-        )
-        self.log_alpha_kl = nn.Parameter(
-            torch.log(torch.tensor(float(init_alpha_kl), device=self.device))
-        )
+        self.log_alpha_temp = nn.Parameter(torch.log(torch.tensor(float(init_alpha_temp), device=self.device)))
+        self.log_alpha_kl = nn.Parameter(torch.log(torch.tensor(float(init_alpha_kl), device=self.device)))
 
         # Optimizers — actor on `self.optimizer` so the runner's checkpoint code finds it.
-        self.optimizer = optim.AdamW(
-            policy.actor.parameters(), lr=learning_rate, weight_decay=1e-3, betas=(0.9, 0.95)
-        )
+        self.optimizer = optim.AdamW(policy.actor.parameters(), lr=learning_rate, weight_decay=1e-3, betas=(0.9, 0.95))
         critic_lr = critic_learning_rate if critic_learning_rate is not None else learning_rate
         self.critic_optimizer = optim.AdamW(
             policy.critics.parameters(), lr=critic_lr, weight_decay=1e-3, betas=(0.9, 0.95)
         )
-        self.alpha_optimizer = optim.AdamW(
-            [self.log_alpha_temp, self.log_alpha_kl], lr=alpha_lr
-        )
+        self.alpha_optimizer = optim.AdamW([self.log_alpha_temp, self.log_alpha_kl], lr=alpha_lr)
 
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
@@ -261,9 +252,7 @@ class REPPO:
                 # truncation use the pure next-state bootstrap (next_v); otherwise
                 # the standard (1−λ)·next_v + λ·recurr blend.
                 trunc_step = trunc[step].bool()
-                blend = torch.where(
-                    trunc_step, next_v, (1.0 - self.lam) * next_v + self.lam * recurr
-                )
+                blend = torch.where(trunc_step, next_v, (1.0 - self.lam) * next_v + self.lam * recurr)
                 recurr = soft_r + self.gamma * m * blend
                 self.storage.returns[step] = recurr
 
@@ -319,15 +308,11 @@ class REPPO:
 
     # Critic update — HL-Gauss CE (distributional) or MSE (standard)
 
-    def _update_critic(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor, returns: torch.Tensor
-    ) -> float:
+    def _update_critic(self, critic_obs: torch.Tensor, actions: torch.Tensor, returns: torch.Tensor) -> float:
         if self.policy.is_distributional_critic:
             logits_1, logits_2 = self.policy.evaluate_q_dist(critic_obs, actions)
             c = self.policy.critic_1
-            soft_targets = self._hlgauss_embed(
-                returns.view(-1), c.v_min, c.v_max, c.num_atoms
-            ).detach()
+            soft_targets = self._hlgauss_embed(returns.view(-1), c.v_min, c.v_max, c.num_atoms).detach()
             loss_1 = -(soft_targets * F.log_softmax(logits_1, dim=-1)).sum(-1).mean()
             loss_2 = -(soft_targets * F.log_softmax(logits_2, dim=-1)).sum(-1).mean()
             critic_loss = loss_1 + loss_2
@@ -342,9 +327,7 @@ class REPPO:
         return critic_loss.item()
 
     @staticmethod
-    def _hlgauss_embed(
-        targets: torch.Tensor, v_min: float, v_max: float, num_atoms: int
-    ) -> torch.Tensor:
+    def _hlgauss_embed(targets: torch.Tensor, v_min: float, v_max: float, num_atoms: int) -> torch.Tensor:
         """Embed scalar targets as soft categorical distributions (HL-Gauss).
 
         Bin centers at linspace(v_min, v_max, num_atoms); edges extend half a
@@ -382,7 +365,7 @@ class REPPO:
         q_pi = torch.minimum(q1, q2).squeeze(-1)
         self._set_critic_grad(requires_grad=True)
 
-        primary = (self.alpha_temp.detach() * log_prob_pi - q_pi)
+        primary = self.alpha_temp.detach() * log_prob_pi - q_pi
 
         # Closed-form Gaussian KL on raw (μ, σ): reference π_old ‖ π_new.
         # KL(N(μ_o, σ_o) ‖ N(μ_n, σ_n)) per dim:

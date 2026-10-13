@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import math
-from copy import deepcopy
-from typing import Any
-
 import torch
 import torch.nn as nn
+from copy import deepcopy
 from torch.distributions import Normal
+from typing import Any
 
 from safe_rl.networks import MLP, SimbaV2
 from safe_rl.utils import resolve_nn_activation
@@ -111,7 +110,9 @@ class DeterministicActor(nn.Module):
         """Return the deterministic tanh-bounded action without added noise."""
         return self.forward(obs)
 
-    def as_onnx(self, pre_normalizer: nn.Module | None = None, actor_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
+    def as_onnx(
+        self, pre_normalizer: nn.Module | None = None, actor_normalizer: nn.Module | None = None, verbose: bool = False
+    ) -> nn.Module:
         """Return an ONNX-exportable wrapper: pre_normalizer → actor_normalizer → network."""
         return _OnnxDeterministicActor(self, pre_normalizer, actor_normalizer, verbose)
 
@@ -306,9 +307,7 @@ class StochasticActor(nn.Module):
         # Log probability with tanh squashing correction and the per-joint scale
         # Jacobian: -sum log(1 - tanh^2(x)) - sum log(c_j).
         log_prob = dist.log_prob(x).sum(dim=-1, keepdim=True)
-        log_prob -= (2 * (math.log(2.0) - x - nn.functional.softplus(-2 * x))).sum(
-            dim=-1, keepdim=True
-        )
+        log_prob -= (2 * (math.log(2.0) - x - nn.functional.softplus(-2 * x))).sum(dim=-1, keepdim=True)
         log_prob += self.neg_log_action_scale  # scalar; 0 when actions are unscaled
 
         return actions, log_prob
@@ -322,7 +321,9 @@ class StochasticActor(nn.Module):
         x = dist.rsample()
         return self.action_b + self.action_c * torch.tanh(x)
 
-    def as_onnx(self, pre_normalizer: nn.Module | None = None, actor_normalizer: nn.Module | None = None, verbose: bool = False) -> nn.Module:
+    def as_onnx(
+        self, pre_normalizer: nn.Module | None = None, actor_normalizer: nn.Module | None = None, verbose: bool = False
+    ) -> nn.Module:
         """Return an ONNX-exportable wrapper: pre_normalizer → actor_normalizer → backbone → tanh(mean)."""
         return _OnnxStochasticActor(self, pre_normalizer, actor_normalizer, verbose)
 
@@ -330,7 +331,13 @@ class StochasticActor(nn.Module):
 class _OnnxDeterministicActor(nn.Module):
     """ONNX-exportable deterministic actor (mirrors rsl_rl _OnnxMLPModel)."""
 
-    def __init__(self, actor: DeterministicActor, pre_normalizer: nn.Module | None, actor_normalizer: nn.Module | None, verbose: bool) -> None:
+    def __init__(
+        self,
+        actor: DeterministicActor,
+        pre_normalizer: nn.Module | None,
+        actor_normalizer: nn.Module | None,
+        verbose: bool,
+    ) -> None:
         super().__init__()
         self.pre_normalizer = deepcopy(pre_normalizer) if pre_normalizer is not None else nn.Identity()
         self.actor_normalizer = deepcopy(actor_normalizer) if actor_normalizer is not None else nn.Identity()
@@ -357,7 +364,13 @@ class _OnnxDeterministicActor(nn.Module):
 class _OnnxStochasticActor(nn.Module):
     """ONNX-exportable stochastic actor — exports deterministic (tanh mean) path."""
 
-    def __init__(self, actor: StochasticActor, pre_normalizer: nn.Module | None, actor_normalizer: nn.Module | None, verbose: bool) -> None:
+    def __init__(
+        self,
+        actor: StochasticActor,
+        pre_normalizer: nn.Module | None,
+        actor_normalizer: nn.Module | None,
+        verbose: bool,
+    ) -> None:
         super().__init__()
         self.pre_normalizer = deepcopy(pre_normalizer) if pre_normalizer is not None else nn.Identity()
         self.actor_normalizer = deepcopy(actor_normalizer) if actor_normalizer is not None else nn.Identity()

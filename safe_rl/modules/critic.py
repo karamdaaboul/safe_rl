@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import math
-from typing import Any
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Any
 
 from safe_rl.networks import MLP, SimbaV2
 
@@ -221,13 +220,13 @@ class HLGaussCostCritic(nn.Module):
         """
         probs = F.softmax(logits, dim=-1)  # [B, num_costs, num_bins]
         # Iterate from highest-cost bin; flip so index 0 = highest cost.
-        probs_desc = probs.flip(-1)                                      # [B, num_costs, num_bins]
-        centers_desc = self.centers.flip(0)                              # [num_bins]
-        cum = probs_desc.cumsum(dim=-1)                                  # [B, num_costs, num_bins]
+        probs_desc = probs.flip(-1)  # [B, num_costs, num_bins]
+        centers_desc = self.centers.flip(0)  # [num_bins]
+        cum = probs_desc.cumsum(dim=-1)  # [B, num_costs, num_bins]
         cum_prev = torch.cat([torch.zeros_like(cum[..., :1]), cum[..., :-1]], dim=-1)
         # Each bin contributes the probability mass it adds to the [0, alpha] window.
         bin_contrib = (cum.clamp(max=alpha) - cum_prev).clamp(min=0.0)  # [B, num_costs, num_bins]
-        return (bin_contrib * centers_desc).sum(dim=-1) / alpha          # [B, num_costs]
+        return (bin_contrib * centers_desc).sum(dim=-1) / alpha  # [B, num_costs]
 
     @torch.autocast("cuda", enabled=False)
     def loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -313,17 +312,11 @@ class DistributionalCritic(nn.Module):
 
         proj_dist = torch.zeros_like(next_dist)
         offset = (
-            torch.linspace(
-                0, (batch_size - 1) * self.num_atoms, batch_size, device=next_dist.device
-            )
+            torch.linspace(0, (batch_size - 1) * self.num_atoms, batch_size, device=next_dist.device)
             .unsqueeze(1)
             .expand(batch_size, self.num_atoms)
             .long()
         )
-        proj_dist.view(-1).index_add_(
-            0, (lower + offset).view(-1), (next_dist * (upper.float() - b)).view(-1)
-        )
-        proj_dist.view(-1).index_add_(
-            0, (upper + offset).view(-1), (next_dist * (b - lower.float())).view(-1)
-        )
+        proj_dist.view(-1).index_add_(0, (lower + offset).view(-1), (next_dist * (upper.float() - b)).view(-1))
+        proj_dist.view(-1).index_add_(0, (upper + offset).view(-1), (next_dist * (b - lower.float())).view(-1))
         return proj_dist

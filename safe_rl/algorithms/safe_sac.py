@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import math
-
-from collections import deque
-from typing import Any
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from collections import deque
+from typing import Any
 
 from safe_rl.modules.reward_normalization import RewardNormalization
 from safe_rl.modules.safe_sac_actor_critic import SafeSACActorCritic
@@ -129,7 +127,7 @@ class SafeSAC:
         self.num_costs = len(cost_limits)
 
         # Validate policy has matching num_costs
-        if hasattr(policy, 'num_costs') and policy.num_costs != self.num_costs:
+        if hasattr(policy, "num_costs") and policy.num_costs != self.num_costs:
             print(f"WARNING: Policy num_costs ({policy.num_costs}) doesn't match cost_limits ({self.num_costs})")
 
         # PID controller parameters
@@ -156,9 +154,7 @@ class SafeSAC:
         self.pid_i = [self.lambdas[i] for i in range(self.num_costs)]
         self.delta_p = [0.0] * self.num_costs
         self.cost_ema = [0.0] * self.num_costs
-        self.cost_delay_queue: list[deque] = [
-            deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)
-        ]
+        self.cost_delay_queue: list[deque] = [deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)]
 
         print(f"Safe SAC initialized with {self.num_costs} cost constraints")
         print(f"PID gains: Kp={self.kp}, Ki={self.ki}, Kd={self.kd}")
@@ -351,7 +347,13 @@ class SafeSAC:
             # Update delay queue
             self.cost_delay_queue[cost_idx].append(self.cost_ema[cost_idx])
 
-    def update(self, current_costs: list[float] | None = None, obs_normalizer=None, critic_obs_normalizer=None, reward_normalizer=None) -> dict[str, float]:
+    def update(
+        self,
+        current_costs: list[float] | None = None,
+        obs_normalizer=None,
+        critic_obs_normalizer=None,
+        reward_normalizer=None,
+    ) -> dict[str, float]:
         """Perform Safe SAC update step.
 
         Args:
@@ -405,8 +407,12 @@ class SafeSAC:
                     next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
             if critic_obs_normalizer is not None:
                 with torch.no_grad():
-                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
-                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
+                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
             # Normalize rewards by running std (don't shift mean). "return" mode uses
             # a RewardNormalization module (normalize via forward); "empirical" mode
             # uses EmpiricalNormalization (divide by running std).
@@ -658,7 +664,7 @@ class SafeSAC:
         """
         # Sample a dummy observation to get the actual std
         with torch.no_grad():
-            if hasattr(self.policy, 'actor') and hasattr(self.policy.actor, 'log_std_head'):
+            if hasattr(self.policy, "actor") and hasattr(self.policy.actor, "log_std_head"):
                 # Get the log_std bias (when input is zeros, output is roughly the bias)
                 # This gives a rough estimate of the policy's learned std
                 dummy_obs = torch.zeros(1, self.policy.actor.backbone[0].in_features, device=self.device)

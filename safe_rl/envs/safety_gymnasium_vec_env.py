@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
-
 import torch
+from typing import Any, Dict, Tuple
 
 import safety_gymnasium
 
@@ -41,10 +40,13 @@ class SafetyGymnasiumVecEnv(VecEnv):
         wrapper_chain: list = []
         if hidden_goal:
             from functools import partial
+
             from .hidden_goal_wrapper import HiddenGoalWrapper
+
             wrapper_chain.append(partial(HiddenGoalWrapper, continue_goal=hidden_goal_continue))
         if cbf_state:
             from safe_rl.cbf.sg_state_wrapper import SGCBFStateWrapper
+
             wrapper_chain.append(SGCBFStateWrapper)
 
         if wrapper_chain:
@@ -56,6 +58,7 @@ class SafetyGymnasiumVecEnv(VecEnv):
                     for w in _chain:
                         env = w(env)
                     return env
+
                 make_kwargs["wrappers"] = _compose
 
         self.env = safety_gymnasium.vector.make(env_id, num_envs=num_envs, **make_kwargs)
@@ -152,9 +155,8 @@ class SafetyGymnasiumVecEnv(VecEnv):
         goal_met = info.get("goal_met")
         if goal_met is not None:
             import numpy as np
-            self._goals_in_episode += torch.as_tensor(
-                np.asarray(goal_met, dtype=np.float32), device=self.device
-            )
+
+            self._goals_in_episode += torch.as_tensor(np.asarray(goal_met, dtype=np.float32), device=self.device)
 
         self.episode_length_buf += 1
         extras = self._build_extras(info=info, costs=costs_tensor, time_outs=time_outs)
@@ -182,6 +184,7 @@ class SafetyGymnasiumVecEnv(VecEnv):
             if self.num_envs == 1:
                 return frames[0]
             import numpy as np
+
             return np.stack(frames, axis=0)
         return self.env.render()
 
@@ -208,8 +211,12 @@ class SafetyGymnasiumVecEnv(VecEnv):
         final_obs = info.get("final_observation")
         if final_obs is not None:
             import numpy as np
-            stacked = np.zeros((self.num_envs, *self._last_obs.shape[1:]), dtype=np.float32) \
-                if self._last_obs is not None else None
+
+            stacked = (
+                np.zeros((self.num_envs, *self._last_obs.shape[1:]), dtype=np.float32)
+                if self._last_obs is not None
+                else None
+            )
             if stacked is not None:
                 for i, fo in enumerate(final_obs):
                     if fo is not None:

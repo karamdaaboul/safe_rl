@@ -8,7 +8,6 @@ ReplayStorage via the same interface as SAC.
 from __future__ import annotations
 
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,7 +17,6 @@ from torch.amp import GradScaler, autocast
 from safe_rl.modules.reward_normalization import RewardNormalization
 from safe_rl.modules.sac_actor_critic import SACActorCritic
 from safe_rl.storage.replay_storage import ReplayStorage
-
 
 # Compiled loss functions (standalone for maximum torch.compile benefit)
 
@@ -228,7 +226,7 @@ class FastSAC:
         # SAC parameters
         self.gamma = gamma
         self.n_step = max(1, int(n_step))
-        self.bellman_gamma = gamma ** self.n_step
+        self.bellman_gamma = gamma**self.n_step
         self.tau = tau
         self.batch_size = batch_size
         self.num_updates_per_step = num_updates_per_step
@@ -253,12 +251,8 @@ class FastSAC:
                 self.target_entropy = -float(policy.num_actions)
             else:
                 self.target_entropy = float(target_entropy)
-            self.log_alpha = torch.tensor(
-                math.log(alpha), dtype=torch.float32, device=device, requires_grad=True
-            )
-            self.alpha_optimizer = optim.AdamW(
-                [self.log_alpha], lr=alpha_lr, betas=adam_betas
-            )
+            self.log_alpha = torch.tensor(math.log(alpha), dtype=torch.float32, device=device, requires_grad=True)
+            self.alpha_optimizer = optim.AdamW([self.log_alpha], lr=alpha_lr, betas=adam_betas)
         else:
             self.log_alpha = torch.tensor([alpha], device=device).log()
             self.target_entropy = None
@@ -380,8 +374,12 @@ class FastSAC:
                     next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
             if critic_obs_normalizer is not None:
                 with torch.no_grad():
-                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
-                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
+                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
             if reward_normalizer is not None:
                 with torch.no_grad():
                     if isinstance(reward_normalizer, RewardNormalization):
@@ -435,21 +433,43 @@ class FastSAC:
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
             if self.policy.is_distributional_critic:
                 loss = _critic_loss_distributional(
-                    critic_obs, actions, rewards, dones, next_critic_obs,
-                    alpha, self.bellman_gamma, self.clipped_double_q,
-                    self.policy.actor, self.policy.critic_1, self.policy.critic_2,
-                    self.policy.critic_1_target, self.policy.critic_2_target,
-                    self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
-                    obs, next_obs,
+                    critic_obs,
+                    actions,
+                    rewards,
+                    dones,
+                    next_critic_obs,
+                    alpha,
+                    self.bellman_gamma,
+                    self.clipped_double_q,
+                    self.policy.actor,
+                    self.policy.critic_1,
+                    self.policy.critic_2,
+                    self.policy.critic_1_target,
+                    self.policy.critic_2_target,
+                    self.policy.actor_obs_normalizer,
+                    self.policy.critic_obs_normalizer,
+                    obs,
+                    next_obs,
                 )
             else:
                 loss = _critic_loss_standard(
-                    critic_obs, actions, rewards, dones, next_critic_obs,
-                    alpha, self.bellman_gamma, self.clipped_double_q,
-                    self.policy.actor, self.policy.critic_1, self.policy.critic_2,
-                    self.policy.critic_1_target, self.policy.critic_2_target,
-                    self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
-                    obs, next_obs,
+                    critic_obs,
+                    actions,
+                    rewards,
+                    dones,
+                    next_critic_obs,
+                    alpha,
+                    self.bellman_gamma,
+                    self.clipped_double_q,
+                    self.policy.actor,
+                    self.policy.critic_1,
+                    self.policy.critic_2,
+                    self.policy.critic_1_target,
+                    self.policy.critic_2_target,
+                    self.policy.actor_obs_normalizer,
+                    self.policy.critic_obs_normalizer,
+                    obs,
+                    next_obs,
                 )
 
         self.critic_optimizer.zero_grad(set_to_none=True)
@@ -468,10 +488,16 @@ class FastSAC:
         """One gradient step on the actor. Returns (loss, mean_log_pi)."""
         with autocast(device_type=self.amp_device, dtype=self.amp_dtype, enabled=self.amp):
             actor_loss, log_pi_mean = _actor_loss_fn(
-                obs, critic_obs, alpha, self.clipped_double_q,
+                obs,
+                critic_obs,
+                alpha,
+                self.clipped_double_q,
                 self.policy.is_distributional_critic,
-                self.policy.actor, self.policy.critic_1, self.policy.critic_2,
-                self.policy.actor_obs_normalizer, self.policy.critic_obs_normalizer,
+                self.policy.actor,
+                self.policy.critic_1,
+                self.policy.critic_2,
+                self.policy.actor_obs_normalizer,
+                self.policy.critic_obs_normalizer,
             )
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -501,9 +527,7 @@ class FastSAC:
             torch._foreach_add_(tgt_ps, src_ps, alpha=self.tau)
 
             # Copy buffers (e.g. normalizer running stats) exactly
-            for (_, b_s), (_, b_t) in zip(
-                critic.named_buffers(), target.named_buffers(), strict=False
-            ):
+            for (_, b_s), (_, b_t) in zip(critic.named_buffers(), target.named_buffers(), strict=False):
                 b_t.copy_(b_s)
 
     def broadcast_parameters(self) -> None:

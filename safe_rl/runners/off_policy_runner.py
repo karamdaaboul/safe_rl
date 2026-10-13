@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import statistics
 import time
-
 import torch
 
 from safe_rl.envs import VecEnv
@@ -48,17 +47,21 @@ class OffPolicyRunner:
         # Dynamic import based on policy class
         if policy_class_name == "SACActorCritic":
             from safe_rl.modules import SACActorCritic
+
             policy_class = SACActorCritic
         elif policy_class_name == "SafeSACActorCritic":
             from safe_rl.modules import SafeSACActorCritic
+
             policy_class = SafeSACActorCritic
         elif policy_class_name == "TD3ActorCritic":
             from safe_rl.modules import TD3ActorCritic
+
             policy_class = TD3ActorCritic
         else:
             # Try to import from safe_rl.modules first, then fall back to eval
             try:
                 import safe_rl.modules as modules
+
                 policy_class = getattr(modules, policy_class_name)
             except AttributeError:
                 policy_class = eval(policy_class_name)
@@ -93,20 +96,25 @@ class OffPolicyRunner:
         # Dynamic import based on algorithm class
         if alg_class_name == "SAC":
             from safe_rl.algorithms import SAC
+
             alg_class = SAC
         elif alg_class_name == "FastSAC":
             from safe_rl.algorithms import FastSAC
+
             alg_class = FastSAC
         elif alg_class_name == "FastTD3":
             from safe_rl.algorithms import FastTD3
+
             alg_class = FastTD3
         elif alg_class_name == "SafeSAC":
             from safe_rl.algorithms import SafeSAC
+
             alg_class = SafeSAC
         else:
             # Try to import from safe_rl.algorithms first, then fall back to eval
             try:
                 import safe_rl.algorithms as algorithms
+
                 alg_class = getattr(algorithms, alg_class_name)
             except AttributeError:
                 alg_class = eval(alg_class_name)
@@ -187,7 +195,7 @@ class OffPolicyRunner:
             self.reward_normalizer = torch.nn.Identity().to(self.device)
 
         # Safe RL detection
-        self.is_safe_rl = hasattr(self.alg, 'num_costs') and self.alg.num_costs > 0
+        self.is_safe_rl = hasattr(self.alg, "num_costs") and self.alg.num_costs > 0
         num_costs = self.alg.num_costs if self.is_safe_rl else 0
 
         if self.is_safe_rl and self.n_step_buffer is not None:
@@ -259,11 +267,13 @@ class OffPolicyRunner:
                         # Normalize for policy without updating stats (already updated when obs arrived as next_obs)
                         if self.empirical_normalization:
                             with torch.no_grad():
-                                obs_for_policy = (obs - self.obs_normalizer._mean) / (self.obs_normalizer._std + self.obs_normalizer.eps)
+                                obs_for_policy = (obs - self.obs_normalizer._mean) / (
+                                    self.obs_normalizer._std + self.obs_normalizer.eps
+                                )
                         else:
                             obs_for_policy = obs
                         # Use algorithm's act method if available (e.g., for shielding)
-                        if hasattr(self.alg, 'act'):
+                        if hasattr(self.alg, "act"):
                             action = self.alg.act(obs_for_policy, eval_mode=False)
                         else:
                             action = self.actor_critic.act_with_noise(obs_for_policy)
@@ -273,7 +283,9 @@ class OffPolicyRunner:
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
                     next_critic_obs = infos.get("observations", {}).get(self.privileged_obs_type, next_obs)
-                    next_critic_obs = next_critic_obs.to(self.device) if isinstance(next_critic_obs, torch.Tensor) else next_obs
+                    next_critic_obs = (
+                        next_critic_obs.to(self.device) if isinstance(next_critic_obs, torch.Tensor) else next_obs
+                    )
 
                     # Update normalizer stats with raw data (don't transform for storage)
                     if self.empirical_normalization:
@@ -329,7 +341,7 @@ class OffPolicyRunner:
                             costs = costs.expand(-1, self.alg.num_costs)
 
                     # Store transition in replay buffer (optionally aggregated via n-step buffer)
-                    if self.is_safe_rl and hasattr(self.alg, 'store_transition'):
+                    if self.is_safe_rl and hasattr(self.alg, "store_transition"):
                         self.alg.store_transition(
                             obs,
                             action,
@@ -424,18 +436,20 @@ class OffPolicyRunner:
                         if "alpha_loss" in update_result:
                             loss_dict["alpha_loss"] = update_result["alpha_loss"]
                         if self.is_safe_rl:
-                            loss_dict["cost_critic_loss"] = update_result.get("cost_critic", update_result.get("cost_critic_loss", 0.0))
+                            loss_dict["cost_critic_loss"] = update_result.get(
+                                "cost_critic", update_result.get("cost_critic_loss", 0.0)
+                            )
 
                 # Merge safe RL penalty info into loss_dict
                 if self.is_safe_rl:
-                    if hasattr(self.alg, 'get_penalty_info'):
+                    if hasattr(self.alg, "get_penalty_info"):
                         penalty_info = self.alg.get_penalty_info()
                         loss_dict["lambda_mean"] = penalty_info.get("lambda_mean", 0.0)
                         loss_dict["lambda_max"] = penalty_info.get("lambda_max", 0.0)
                         if "alpha" in penalty_info:
                             loss_dict["alpha"] = penalty_info["alpha"]
 
-                    if hasattr(self.alg, 'get_shield_stats'):
+                    if hasattr(self.alg, "get_shield_stats"):
                         shield_stats = self.alg.get_shield_stats()
                         loss_dict["shield_rejections"] = shield_stats.get("rejections", 0)
                         loss_dict["shield_total_samples"] = shield_stats.get("total_samples", 0)
@@ -443,9 +457,9 @@ class OffPolicyRunner:
 
             # Fill in noise_std if not set by update
             if "noise_std" not in loss_dict:
-                if hasattr(self.alg, 'get_actual_action_std'):
+                if hasattr(self.alg, "get_actual_action_std"):
                     loss_dict["noise_std"] = self.alg.get_actual_action_std()
-                elif hasattr(self.actor_critic, 'std'):
+                elif hasattr(self.actor_critic, "std"):
                     loss_dict["noise_std"] = self.actor_critic.std.mean().item()
 
             # Log the actor learning rate (rsl_rl_sac logs this each window).
@@ -618,7 +632,10 @@ class OffPolicyRunner:
             f"    {'gamma / tau:':<28} {alg.gamma}  /  {alg.tau}",
             f"    {'num_updates_per_step:':<28} {alg.num_updates_per_step}",
             f"    {'policy_frequency:':<28} {alg.policy_frequency}",
-            f"    {'actor_lr / critic_lr:':<28} {alg.actor_optimizer.param_groups[0]['lr']}  /  {alg.critic_optimizer.param_groups[0]['lr']}",
+            (
+                f"    {'actor_lr / critic_lr:':<28} {alg.actor_optimizer.param_groups[0]['lr']}  / "
+                f" {alg.critic_optimizer.param_groups[0]['lr']}"
+            ),
         ]
 
         if hasattr(alg, "auto_entropy_tuning"):
@@ -637,7 +654,7 @@ class OffPolicyRunner:
                 f"    {'num_costs:':<28} {alg.num_costs}",
                 f"    {'cost_limits:':<28} {alg.cost_limits}",
             ]
-            if hasattr(alg, 'lambdas'):
+            if hasattr(alg, "lambdas"):
                 lambda_str = ", ".join([f"{lam:.4f}" for lam in alg.lambdas])
                 lines.append(f"    {'lambdas:':<28} [{lambda_str}]")
 

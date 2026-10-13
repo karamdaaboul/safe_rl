@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import torch
 from typing import Any, Dict
 
-import torch
 import yaml
 
 from safe_rl.envs import make_env

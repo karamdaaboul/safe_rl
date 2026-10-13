@@ -22,7 +22,6 @@ of the Lyapunov derivative.
 from __future__ import annotations
 
 import math
-
 import torch
 
 # Output kinds the generator and the CLF wrapper agree on. The wrapper switches
@@ -185,9 +184,7 @@ class HLIPReference:
                 # 5th-order Bezier height profile: rises to clearance mid-swing,
                 # returns to ground at touchdown. Control points in meters.
                 h = self.swing_height
-                ctrl = torch.tensor(
-                    [0.0, 0.0, 1.5 * h, 1.5 * h, 0.0, 0.0], device=self.device
-                ).expand(self.num_envs, 6)
+                ctrl = torch.tensor([0.0, 0.0, 1.5 * h, 1.5 * h, 0.0, 0.0], device=self.device).expand(self.num_envs, 6)
                 z = bezier5(ctrl, phase)
                 zdot = bezier5_deriv(ctrl, phase) / self.step_period
                 cols_y.append(z)

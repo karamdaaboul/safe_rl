@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from functools import reduce
-
 import torch
 import torch.nn as nn
+from functools import reduce
 
 from safe_rl.utils import resolve_nn_activation
 

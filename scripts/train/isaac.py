@@ -23,11 +23,11 @@ Usage:
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import copy
 import os
 import sys
-import copy
-from typing import Dict, Any
 from datetime import datetime
+from typing import Any, Dict
 
 unitree_rl_lab_path = "/home/dh1659/workspace/unitree_rl_lab"
 if unitree_rl_lab_path not in sys.path:
@@ -50,8 +50,11 @@ except ImportError:
             arg_group.add_argument("--resume", action="store_true", default=False, help="Resume from checkpoint.")
             arg_group.add_argument("--load_run", type=str, default=None, help="Run folder to resume from.")
             arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
-            arg_group.add_argument("--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module.")
+            arg_group.add_argument(
+                "--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module."
+            )
             arg_group.add_argument("--log_project_name", type=str, default=None, help="Logging project name.")
+
 
 parser = argparse.ArgumentParser(description="Train Safe RL agent with wandb sweep support.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -61,7 +64,9 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
+parser.add_argument(
+    "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
+)
 
 # PPO Algorithm Parameters
 parser.add_argument("--learning_rate", type=float, help="Learning rate")
@@ -76,7 +81,9 @@ parser.add_argument("--lam", type=float, help="GAE lambda")
 parser.add_argument("--value_loss_coef", type=float, help="Value loss coefficient")
 parser.add_argument("--entropy_coef", type=float, help="Entropy coefficient")
 parser.add_argument("--use_clipped_value_loss", action="store_true", help="Use clipped value loss")
-parser.add_argument("--normalize_advantage_per_mini_batch", action="store_true", help="Normalize advantage per mini batch")
+parser.add_argument(
+    "--normalize_advantage_per_mini_batch", action="store_true", help="Normalize advantage per mini batch"
+)
 parser.add_argument("--algorithm_class", type=str, choices=["PPO", "P3O", "PPOL_PID"], help="Algorithm class")
 
 # Policy Network Architecture
@@ -139,28 +146,29 @@ sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import gymnasium as gym
 import torch
+
+import gymnasium as gym
 
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
     print("Warning: wandb not available. Sweep integration disabled.")
 
-from safe_rl.runners import OnPolicyRunner
-
 import unitree_rl_lab.tasks  # noqa: F401
-from unitree_rl.safe_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
-
+from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from unitree_lab.envs import ManagerBasedSafeRLEnvCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
+from unitree_rl.safe_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from unitree_rl_lab.utils.export_deploy_cfg import export_deploy_cfg
+
+from safe_rl.runners import OnPolicyRunner
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -187,33 +195,33 @@ def update_config_from_args(config: Dict[str, Any], args_cli) -> Dict[str, Any]:
 
     # Algorithm parameters
     alg_updates = {}
-    if hasattr(args_cli, 'learning_rate') and args_cli.learning_rate is not None:
+    if hasattr(args_cli, "learning_rate") and args_cli.learning_rate is not None:
         alg_updates["learning_rate"] = args_cli.learning_rate
-    if hasattr(args_cli, 'num_learning_epochs') and args_cli.num_learning_epochs is not None:
+    if hasattr(args_cli, "num_learning_epochs") and args_cli.num_learning_epochs is not None:
         alg_updates["num_learning_epochs"] = args_cli.num_learning_epochs
-    if hasattr(args_cli, 'num_mini_batches') and args_cli.num_mini_batches is not None:
+    if hasattr(args_cli, "num_mini_batches") and args_cli.num_mini_batches is not None:
         alg_updates["num_mini_batches"] = args_cli.num_mini_batches
-    if hasattr(args_cli, 'clip_param') and args_cli.clip_param is not None:
+    if hasattr(args_cli, "clip_param") and args_cli.clip_param is not None:
         alg_updates["clip_param"] = args_cli.clip_param
-    if hasattr(args_cli, 'max_grad_norm') and args_cli.max_grad_norm is not None:
+    if hasattr(args_cli, "max_grad_norm") and args_cli.max_grad_norm is not None:
         alg_updates["max_grad_norm"] = args_cli.max_grad_norm
-    if hasattr(args_cli, 'schedule') and args_cli.schedule is not None:
+    if hasattr(args_cli, "schedule") and args_cli.schedule is not None:
         alg_updates["schedule"] = args_cli.schedule
-    if hasattr(args_cli, 'desired_kl') and args_cli.desired_kl is not None:
+    if hasattr(args_cli, "desired_kl") and args_cli.desired_kl is not None:
         alg_updates["desired_kl"] = args_cli.desired_kl
-    if hasattr(args_cli, 'gamma') and args_cli.gamma is not None:
+    if hasattr(args_cli, "gamma") and args_cli.gamma is not None:
         alg_updates["gamma"] = args_cli.gamma
-    if hasattr(args_cli, 'lam') and args_cli.lam is not None:
+    if hasattr(args_cli, "lam") and args_cli.lam is not None:
         alg_updates["lam"] = args_cli.lam
-    if hasattr(args_cli, 'value_loss_coef') and args_cli.value_loss_coef is not None:
+    if hasattr(args_cli, "value_loss_coef") and args_cli.value_loss_coef is not None:
         alg_updates["value_loss_coef"] = args_cli.value_loss_coef
-    if hasattr(args_cli, 'entropy_coef') and args_cli.entropy_coef is not None:
+    if hasattr(args_cli, "entropy_coef") and args_cli.entropy_coef is not None:
         alg_updates["entropy_coef"] = args_cli.entropy_coef
-    if hasattr(args_cli, 'use_clipped_value_loss') and args_cli.use_clipped_value_loss:
+    if hasattr(args_cli, "use_clipped_value_loss") and args_cli.use_clipped_value_loss:
         alg_updates["use_clipped_value_loss"] = args_cli.use_clipped_value_loss
-    if hasattr(args_cli, 'normalize_advantage_per_mini_batch') and args_cli.normalize_advantage_per_mini_batch:
+    if hasattr(args_cli, "normalize_advantage_per_mini_batch") and args_cli.normalize_advantage_per_mini_batch:
         alg_updates["normalize_advantage_per_mini_batch"] = args_cli.normalize_advantage_per_mini_batch
-    if hasattr(args_cli, 'algorithm_class') and args_cli.algorithm_class is not None:
+    if hasattr(args_cli, "algorithm_class") and args_cli.algorithm_class is not None:
         alg_updates["class_name"] = args_cli.algorithm_class
 
     if "algorithm" in config:
@@ -224,38 +232,38 @@ def update_config_from_args(config: Dict[str, Any], args_cli) -> Dict[str, Any]:
 
     # Handle actor hidden dims
     actor_dims = []
-    if hasattr(args_cli, 'actor_hidden_dims_0') and args_cli.actor_hidden_dims_0 is not None:
+    if hasattr(args_cli, "actor_hidden_dims_0") and args_cli.actor_hidden_dims_0 is not None:
         actor_dims.append(args_cli.actor_hidden_dims_0)
-    if hasattr(args_cli, 'actor_hidden_dims_1') and args_cli.actor_hidden_dims_1 is not None:
+    if hasattr(args_cli, "actor_hidden_dims_1") and args_cli.actor_hidden_dims_1 is not None:
         actor_dims.append(args_cli.actor_hidden_dims_1)
-    if hasattr(args_cli, 'actor_hidden_dims_2') and args_cli.actor_hidden_dims_2 is not None:
+    if hasattr(args_cli, "actor_hidden_dims_2") and args_cli.actor_hidden_dims_2 is not None:
         actor_dims.append(args_cli.actor_hidden_dims_2)
     if actor_dims:
         policy_updates["actor_hidden_dims"] = actor_dims
 
     # Handle critic hidden dims
     critic_dims = []
-    if hasattr(args_cli, 'critic_hidden_dims_0') and args_cli.critic_hidden_dims_0 is not None:
+    if hasattr(args_cli, "critic_hidden_dims_0") and args_cli.critic_hidden_dims_0 is not None:
         critic_dims.append(args_cli.critic_hidden_dims_0)
-    if hasattr(args_cli, 'critic_hidden_dims_1') and args_cli.critic_hidden_dims_1 is not None:
+    if hasattr(args_cli, "critic_hidden_dims_1") and args_cli.critic_hidden_dims_1 is not None:
         critic_dims.append(args_cli.critic_hidden_dims_1)
-    if hasattr(args_cli, 'critic_hidden_dims_2') and args_cli.critic_hidden_dims_2 is not None:
+    if hasattr(args_cli, "critic_hidden_dims_2") and args_cli.critic_hidden_dims_2 is not None:
         critic_dims.append(args_cli.critic_hidden_dims_2)
     if critic_dims:
         policy_updates["critic_hidden_dims"] = critic_dims
 
     # Handle cost critic hidden dims (for safe RL)
     cost_critic_dims = []
-    if hasattr(args_cli, 'cost_critic_hidden_dims_0') and args_cli.cost_critic_hidden_dims_0 is not None:
+    if hasattr(args_cli, "cost_critic_hidden_dims_0") and args_cli.cost_critic_hidden_dims_0 is not None:
         cost_critic_dims.append(args_cli.cost_critic_hidden_dims_0)
-    if hasattr(args_cli, 'cost_critic_hidden_dims_1') and args_cli.cost_critic_hidden_dims_1 is not None:
+    if hasattr(args_cli, "cost_critic_hidden_dims_1") and args_cli.cost_critic_hidden_dims_1 is not None:
         cost_critic_dims.append(args_cli.cost_critic_hidden_dims_1)
     if cost_critic_dims:
         policy_updates["cost_critic_hidden_dims"] = cost_critic_dims
 
-    if hasattr(args_cli, 'activation') and args_cli.activation is not None:
+    if hasattr(args_cli, "activation") and args_cli.activation is not None:
         policy_updates["activation"] = args_cli.activation
-    if hasattr(args_cli, 'init_noise_std') and args_cli.init_noise_std is not None:
+    if hasattr(args_cli, "init_noise_std") and args_cli.init_noise_std is not None:
         policy_updates["init_noise_std"] = args_cli.init_noise_std
 
     if "policy" in config:
@@ -263,7 +271,7 @@ def update_config_from_args(config: Dict[str, Any], args_cli) -> Dict[str, Any]:
 
     # Runner parameters
     runner_updates = {}
-    if hasattr(args_cli, 'num_steps_per_env') and args_cli.num_steps_per_env is not None:
+    if hasattr(args_cli, "num_steps_per_env") and args_cli.num_steps_per_env is not None:
         runner_updates["num_steps_per_env"] = args_cli.num_steps_per_env
     if args_cli.max_iterations is not None:
         runner_updates["max_iterations"] = args_cli.max_iterations
@@ -274,35 +282,35 @@ def update_config_from_args(config: Dict[str, Any], args_cli) -> Dict[str, Any]:
     # RND parameters
     if "algorithm" in config and "rnd_cfg" in config["algorithm"] and config["algorithm"]["rnd_cfg"]:
         rnd_updates = {}
-        if hasattr(args_cli, 'rnd_weight') and args_cli.rnd_weight is not None:
+        if hasattr(args_cli, "rnd_weight") and args_cli.rnd_weight is not None:
             rnd_updates["weight"] = args_cli.rnd_weight
-        if hasattr(args_cli, 'rnd_learning_rate') and args_cli.rnd_learning_rate is not None:
+        if hasattr(args_cli, "rnd_learning_rate") and args_cli.rnd_learning_rate is not None:
             rnd_updates["learning_rate"] = args_cli.rnd_learning_rate
-        if hasattr(args_cli, 'rnd_reward_normalization') and args_cli.rnd_reward_normalization:
+        if hasattr(args_cli, "rnd_reward_normalization") and args_cli.rnd_reward_normalization:
             rnd_updates["reward_normalization"] = args_cli.rnd_reward_normalization
-        if hasattr(args_cli, 'rnd_state_normalization') and args_cli.rnd_state_normalization:
+        if hasattr(args_cli, "rnd_state_normalization") and args_cli.rnd_state_normalization:
             rnd_updates["state_normalization"] = args_cli.rnd_state_normalization
 
         config["algorithm"]["rnd_cfg"].update(rnd_updates)
 
     # Safe RL specific parameters
-    if hasattr(args_cli, 'algorithm_class') and args_cli.algorithm_class == "P3O":
-        if hasattr(args_cli, 'p3o_cost_limit') and args_cli.p3o_cost_limit is not None:
+    if hasattr(args_cli, "algorithm_class") and args_cli.algorithm_class == "P3O":
+        if hasattr(args_cli, "p3o_cost_limit") and args_cli.p3o_cost_limit is not None:
             config["algorithm"]["cost_limit"] = args_cli.p3o_cost_limit
-        if hasattr(args_cli, 'p3o_lambda_lr') and args_cli.p3o_lambda_lr is not None:
+        if hasattr(args_cli, "p3o_lambda_lr") and args_cli.p3o_lambda_lr is not None:
             config["algorithm"]["lambda_lr"] = args_cli.p3o_lambda_lr
-        if hasattr(args_cli, 'p3o_kl_early_stop') and args_cli.p3o_kl_early_stop:
+        if hasattr(args_cli, "p3o_kl_early_stop") and args_cli.p3o_kl_early_stop:
             config["algorithm"]["kl_early_stop"] = args_cli.p3o_kl_early_stop
 
-    elif hasattr(args_cli, 'algorithm_class') and args_cli.algorithm_class == "PPOL_PID":
+    elif hasattr(args_cli, "algorithm_class") and args_cli.algorithm_class == "PPOL_PID":
         pid_updates = {}
-        if hasattr(args_cli, 'ppol_pid_kp') and args_cli.ppol_pid_kp is not None:
+        if hasattr(args_cli, "ppol_pid_kp") and args_cli.ppol_pid_kp is not None:
             pid_updates["kp"] = args_cli.ppol_pid_kp
-        if hasattr(args_cli, 'ppol_pid_ki') and args_cli.ppol_pid_ki is not None:
+        if hasattr(args_cli, "ppol_pid_ki") and args_cli.ppol_pid_ki is not None:
             pid_updates["ki"] = args_cli.ppol_pid_ki
-        if hasattr(args_cli, 'ppol_pid_kd') and args_cli.ppol_pid_kd is not None:
+        if hasattr(args_cli, "ppol_pid_kd") and args_cli.ppol_pid_kd is not None:
             pid_updates["kd"] = args_cli.ppol_pid_kd
-        if hasattr(args_cli, 'ppol_pid_cost_limit') and args_cli.ppol_pid_cost_limit is not None:
+        if hasattr(args_cli, "ppol_pid_cost_limit") and args_cli.ppol_pid_cost_limit is not None:
             config["algorithm"]["cost_limit"] = args_cli.ppol_pid_cost_limit
 
         if pid_updates:
@@ -330,7 +338,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | ManagerBasedSafeRLEnvCfg, agent_cfg: Rs
         )
 
         env_cfg.seed = agent_cfg.seed if args_cli.seed is None else args_cli.seed
-        env_cfg.sim.device = args_cli.device if hasattr(args_cli, 'device') and args_cli.device is not None else env_cfg.sim.device
+        env_cfg.sim.device = (
+            args_cli.device if hasattr(args_cli, "device") and args_cli.device is not None else env_cfg.sim.device
+        )
 
         # Update environment reward weights from CLI args and wandb sweep
         if WANDB_AVAILABLE and wandb.run is not None:
@@ -339,9 +349,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | ManagerBasedSafeRLEnvCfg, agent_cfg: Rs
                 env_cfg.rewards.track_lin_vel_xy.weight = wandb_config["track_lin_vel_xy_weight"]
             if "track_ang_vel_z_weight" in wandb_config and wandb_config["track_ang_vel_z_weight"] is not None:
                 env_cfg.rewards.track_ang_vel_z.weight = wandb_config["track_ang_vel_z_weight"]
-            if "base_linear_velocity_weight" in wandb_config and wandb_config["base_linear_velocity_weight"] is not None:
+            if (
+                "base_linear_velocity_weight" in wandb_config
+                and wandb_config["base_linear_velocity_weight"] is not None
+            ):
                 env_cfg.rewards.base_linear_velocity.weight = wandb_config["base_linear_velocity_weight"]
-            if "base_angular_velocity_weight" in wandb_config and wandb_config["base_angular_velocity_weight"] is not None:
+            if (
+                "base_angular_velocity_weight" in wandb_config
+                and wandb_config["base_angular_velocity_weight"] is not None
+            ):
                 env_cfg.rewards.base_angular_velocity.weight = wandb_config["base_angular_velocity_weight"]
             if "flat_orientation_l2_weight" in wandb_config and wandb_config["flat_orientation_l2_weight"] is not None:
                 env_cfg.rewards.flat_orientation_l2.weight = wandb_config["flat_orientation_l2_weight"]
@@ -357,25 +373,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | ManagerBasedSafeRLEnvCfg, agent_cfg: Rs
                 env_cfg.rewards.air_time_variance.weight = wandb_config["air_time_variance_weight"]
 
         # Update reward weights from CLI args (these take precedence)
-        if hasattr(args_cli, 'track_lin_vel_xy_weight') and args_cli.track_lin_vel_xy_weight is not None:
+        if hasattr(args_cli, "track_lin_vel_xy_weight") and args_cli.track_lin_vel_xy_weight is not None:
             env_cfg.rewards.track_lin_vel_xy.weight = args_cli.track_lin_vel_xy_weight
-        if hasattr(args_cli, 'track_ang_vel_z_weight') and args_cli.track_ang_vel_z_weight is not None:
+        if hasattr(args_cli, "track_ang_vel_z_weight") and args_cli.track_ang_vel_z_weight is not None:
             env_cfg.rewards.track_ang_vel_z.weight = args_cli.track_ang_vel_z_weight
-        if hasattr(args_cli, 'base_linear_velocity_weight') and args_cli.base_linear_velocity_weight is not None:
+        if hasattr(args_cli, "base_linear_velocity_weight") and args_cli.base_linear_velocity_weight is not None:
             env_cfg.rewards.base_linear_velocity.weight = args_cli.base_linear_velocity_weight
-        if hasattr(args_cli, 'base_angular_velocity_weight') and args_cli.base_angular_velocity_weight is not None:
+        if hasattr(args_cli, "base_angular_velocity_weight") and args_cli.base_angular_velocity_weight is not None:
             env_cfg.rewards.base_angular_velocity.weight = args_cli.base_angular_velocity_weight
-        if hasattr(args_cli, 'flat_orientation_l2_weight') and args_cli.flat_orientation_l2_weight is not None:
+        if hasattr(args_cli, "flat_orientation_l2_weight") and args_cli.flat_orientation_l2_weight is not None:
             env_cfg.rewards.flat_orientation_l2.weight = args_cli.flat_orientation_l2_weight
-        if hasattr(args_cli, 'joint_torques_weight') and args_cli.joint_torques_weight is not None:
+        if hasattr(args_cli, "joint_torques_weight") and args_cli.joint_torques_weight is not None:
             env_cfg.rewards.joint_torques.weight = args_cli.joint_torques_weight
-        if hasattr(args_cli, 'action_rate_weight') and args_cli.action_rate_weight is not None:
+        if hasattr(args_cli, "action_rate_weight") and args_cli.action_rate_weight is not None:
             env_cfg.rewards.action_rate.weight = args_cli.action_rate_weight
-        if hasattr(args_cli, 'energy_weight') and args_cli.energy_weight is not None:
+        if hasattr(args_cli, "energy_weight") and args_cli.energy_weight is not None:
             env_cfg.rewards.energy.weight = args_cli.energy_weight
-        if hasattr(args_cli, 'feet_air_time_weight') and args_cli.feet_air_time_weight is not None:
+        if hasattr(args_cli, "feet_air_time_weight") and args_cli.feet_air_time_weight is not None:
             env_cfg.rewards.feet_air_time.weight = args_cli.feet_air_time_weight
-        if hasattr(args_cli, 'air_time_variance_weight') and args_cli.air_time_variance_weight is not None:
+        if hasattr(args_cli, "air_time_variance_weight") and args_cli.air_time_variance_weight is not None:
             env_cfg.rewards.air_time_variance.weight = args_cli.air_time_variance_weight
 
         # multi-gpu training configuration
@@ -389,13 +405,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | ManagerBasedSafeRLEnvCfg, agent_cfg: Rs
             agent_cfg.seed = seed
 
         # Update RSL-RL config with CLI args
-        if hasattr(args_cli, 'experiment_name') and args_cli.experiment_name is not None:
+        if hasattr(args_cli, "experiment_name") and args_cli.experiment_name is not None:
             agent_cfg.experiment_name = args_cli.experiment_name
-        if hasattr(args_cli, 'run_name') and args_cli.run_name is not None:
+        if hasattr(args_cli, "run_name") and args_cli.run_name is not None:
             agent_cfg.run_name = args_cli.run_name
-        if hasattr(args_cli, 'logger') and args_cli.logger is not None:
+        if hasattr(args_cli, "logger") and args_cli.logger is not None:
             agent_cfg.logger = args_cli.logger
-        if hasattr(args_cli, 'log_project_name') and args_cli.log_project_name is not None and agent_cfg.logger in {"wandb", "neptune"}:
+        if (
+            hasattr(args_cli, "log_project_name")
+            and args_cli.log_project_name is not None
+            and agent_cfg.logger in {"wandb", "neptune"}
+        ):
             agent_cfg.wandb_project = args_cli.log_project_name
             agent_cfg.neptune_project = args_cli.log_project_name
 

@@ -26,22 +26,22 @@ def _add_unitree_repo_to_path() -> None:
 
 _add_unitree_repo_to_path()
 
+# isort: off
 import mjlab.tasks  # noqa: E402,F401
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg  # noqa: E402
-from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks  # noqa: E402
+from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg  # noqa: E402
 from mjlab.tasks.tracking.mdp import MotionCommandCfg  # noqa: E402
 from mjlab.utils.torch import configure_torch_backends  # noqa: E402
 from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer  # noqa: E402
-
 import src.tasks  # noqa: E402,F401
-
 import torch  # noqa: E402
 import yaml  # noqa: E402
 
+# isort: on
+
 from safe_rl.envs import make_env  # noqa: E402
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
-
 
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
 
@@ -138,7 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video_length", type=int, default=1000, help="Recorded video length in steps.")
     parser.add_argument("--video_dir", type=str, default=None, help="Directory to store recorded evaluation videos.")
     parser.add_argument("--seed", type=int, default=None, help="Environment seed.")
-    parser.add_argument("--export_onnx", action="store_true", help="Export actor to ONNX alongside the checkpoint then exit.")
+    parser.add_argument(
+        "--export_onnx", action="store_true", help="Export actor to ONNX alongside the checkpoint then exit."
+    )
     return parser
 
 

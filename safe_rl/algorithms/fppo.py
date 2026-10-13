@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import collections
 import math
-from typing import List, Optional
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from typing import List, Optional
 
 from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
-from safe_rl.utils.torch_utils import (
-    get_flat_params_from,
-    set_param_values_to_parameters,
-)
+from safe_rl.utils.torch_utils import get_flat_params_from, set_param_values_to_parameters
 
 
 class FPPO:
@@ -137,9 +133,7 @@ class FPPO:
         if constraint_limits_start is not None:
             self._effective_limits = list(constraint_limits_start)
         else:
-            self._effective_limits = [
-                2.0 * limit if limit > 0.0 else 1.0 for limit in self.cost_limits
-            ]
+            self._effective_limits = [2.0 * limit if limit > 0.0 else 1.0 for limit in self.cost_limits]
         self._cost_ema = [0.0] * self.num_costs
         self._iteration_counter = 0
 
@@ -363,13 +357,11 @@ class FPPO:
             if target_cost_values_batch is not None and returns_cost_batch is not None:
                 cost_value_batch = self.policy.evaluate_cost(critic_obs_batch)
                 if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
-                    cost_value_loss = self.policy.cost_critic.loss(
-                        self.policy._cost_logits, returns_cost_batch
-                    ).mean()
+                    cost_value_loss = self.policy.cost_critic.loss(self.policy._cost_logits, returns_cost_batch).mean()
                 elif self.use_clipped_cost_loss:
-                    cost_value_clipped = target_cost_values_batch + (
-                        cost_value_batch - target_cost_values_batch
-                    ).clamp(-self.clip_param, self.clip_param)
+                    cost_value_clipped = target_cost_values_batch + (cost_value_batch - target_cost_values_batch).clamp(
+                        -self.clip_param, self.clip_param
+                    )
                     cost_value_loss = torch.max(
                         (cost_value_batch - returns_cost_batch).pow(2),
                         (cost_value_clipped - returns_cost_batch).pow(2),
@@ -394,12 +386,16 @@ class FPPO:
                 self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
                 new_mu = self.policy.action_mean
                 new_sigma = self.policy.action_std
-                kl_post = torch.sum(
-                    torch.log(new_sigma / (old_sigma_batch + 1e-5) + 1e-5)
-                    + (old_sigma_batch.pow(2) + (old_mu_batch - new_mu).pow(2)) / (2.0 * new_sigma.pow(2))
-                    - 0.5,
-                    dim=-1,
-                ).mean().item()
+                kl_post = (
+                    torch.sum(
+                        torch.log(new_sigma / (old_sigma_batch + 1e-5) + 1e-5)
+                        + (old_sigma_batch.pow(2) + (old_mu_batch - new_mu).pow(2)) / (2.0 * new_sigma.pow(2))
+                        - 0.5,
+                        dim=-1,
+                    )
+                    .mean()
+                    .item()
+                )
 
             mean_value_loss += value_loss.item()
             mean_cost_value_loss += cost_value_loss.item()
@@ -444,20 +440,17 @@ class FPPO:
 
         # Full rollout batch via indexed generator — strips the runner's inference-mode flag.
         batch = next(self.storage.mini_batch_generator(1, 1))
-        (obs_b, _, actions_b, _, _, _, _, cost_adv_b, _, old_logp_b,
-         old_mu_b, old_sigma_b, _, _, _) = batch
+        (obs_b, _, actions_b, _, _, _, _, cost_adv_b, _, old_logp_b, old_mu_b, old_sigma_b, _, _, _) = batch
 
         # Per-constraint cost-surrogate gradients at θ_predictor, stacked as columns.
-        a_mat, any_nonzero = self._compute_constraint_gradients(
-            actor_params, obs_b, actions_b, old_logp_b, cost_adv_b
-        )
+        a_mat, any_nonzero = self._compute_constraint_gradients(actor_params, obs_b, actions_b, old_logp_b, cost_adv_b)
         if not any_nonzero:
             return self._corrector_skip_dict(active_count=0)
 
         # Active-set soft projection: identify which constraints the predictor step violates.
         delta = self._theta_predictor - self._theta_anchor
         b_budget = self._constraint_budget(current_costs)
-        violation = a_mat.t() @ delta - b_budget                  # [num_costs]
+        violation = a_mat.t() @ delta - b_budget  # [num_costs]
         active = violation > 0.0
 
         if not bool(active.any()):
@@ -483,7 +476,11 @@ class FPPO:
 
         # KL-only backtracking line search between θ_anchor and θ_anchor + limited_delta.
         accepted, n_back, eta, final_kl = self._corrector_line_search(
-            actor_params, limited_delta, obs_b, old_mu_b, old_sigma_b,
+            actor_params,
+            limited_delta,
+            obs_b,
+            old_mu_b,
+            old_sigma_b,
         )
         self._recent_acceptances.append(float(accepted))
 
@@ -548,8 +545,10 @@ class FPPO:
                 allow_unused=True,
             )
             flat = torch.cat(
-                [g.reshape(-1) if g is not None else torch.zeros(p.numel(), device=self.device)
-                 for g, p in zip(grads, actor_params)]
+                [
+                    g.reshape(-1) if g is not None else torch.zeros(p.numel(), device=self.device)
+                    for g, p in zip(grads, actor_params)
+                ]
             ).detach()
             if flat.abs().max().item() > 0.0:
                 any_nonzero = True
@@ -559,9 +558,7 @@ class FPPO:
 
     def _solve_nonnegative_qp(self, q_mat, v_vec, max_iters=50, tol=1e-6):
         """Proximal-gradient solver for min_{λ ≥ 0} ½ λᵀ Q λ − vᵀ λ (first-order, on-device)."""
-        q_reg = q_mat + self.projection_eps * torch.eye(
-            q_mat.shape[0], device=q_mat.device, dtype=q_mat.dtype
-        )
+        q_reg = q_mat + self.projection_eps * torch.eye(q_mat.shape[0], device=q_mat.device, dtype=q_mat.dtype)
         max_eig = torch.linalg.eigvalsh(q_reg).max()
         step = 1.0 / (max_eig + self.projection_eps)
         lamb = torch.zeros_like(v_vec)
@@ -655,5 +652,5 @@ class FPPO:
         for p in self.policy.parameters():
             if p.grad is not None:
                 numel = p.grad.numel()
-                p.grad.copy_(all_grads[offset: offset + numel].view_as(p.grad))
+                p.grad.copy_(all_grads[offset : offset + numel].view_as(p.grad))
                 offset += numel

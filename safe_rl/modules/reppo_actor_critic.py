@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any, NoReturn
-
 import torch
 import torch.nn as nn
+from copy import deepcopy
 from torch.distributions import Normal
+from typing import Any, NoReturn
 
 from safe_rl.modules.actor import GaussianActor, StochasticActor
 from safe_rl.modules.critic import DistributionalCritic, StandardCritic
@@ -182,9 +181,7 @@ class REPPOActorCritic(nn.Module):
             raise RuntimeError("get_actions_log_prob called before act()")
         return self._distribution.log_prob(actions).sum(dim=-1)
 
-    def sample_with_log_prob(
-        self, obs: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample_with_log_prob(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reparameterized sample with gradient → (action, log_prob, mean, std)."""
         obs = self.actor_obs_normalizer(obs)
         dist = self._build_distribution(obs, target=False)
@@ -203,9 +200,7 @@ class REPPOActorCritic(nn.Module):
 
     # Q evaluation
 
-    def evaluate_q(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q(self, critic_obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         obs = self.critic_obs_normalizer(critic_obs)
         if self.is_distributional_critic:
             logits_1 = self.critic_1(obs, actions)
@@ -219,9 +214,7 @@ class REPPOActorCritic(nn.Module):
             q2 = self.critic_2(obs, actions)
         return q1, q2
 
-    def evaluate_q_target(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q_target(self, critic_obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         obs = self.critic_obs_normalizer(critic_obs)
         if self.is_distributional_critic:
             logits_1 = self.critic_1_target(obs, actions)
@@ -235,9 +228,7 @@ class REPPOActorCritic(nn.Module):
             q2 = self.critic_2_target(obs, actions)
         return q1, q2
 
-    def evaluate_q_dist(
-        self, critic_obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_q_dist(self, critic_obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.is_distributional_critic:
             raise RuntimeError("evaluate_q_dist only available for distributional critics")
         obs = self.critic_obs_normalizer(critic_obs)

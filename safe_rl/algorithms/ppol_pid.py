@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from collections import deque
-
 import torch
 import torch.nn as nn
-from typing import List, Optional, Dict, Any, Tuple
+from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
 
 from safe_rl.algorithms.ppo import PPO
 from safe_rl.modules import ActorCritic
@@ -34,6 +33,7 @@ class PPOL_PID(PPO):
     - PID output directly sets lambda (not accumulated)
     - Normalized surrogate: (adv_r - λ * adv_c) / (1 + λ)
     """
+
     policy: ActorCritic
 
     def __init__(
@@ -131,9 +131,7 @@ class PPOL_PID(PPO):
         # EMA-smoothed cost for derivative calculation
         self.cost_ema = [0.0] * self.num_costs
         # Delay queue for derivative calculation
-        self.cost_delay_queue: List[deque] = [
-            deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)
-        ]
+        self.cost_delay_queue: List[deque] = [deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)]
 
         self._validate_and_fix_cost_critic()
 
@@ -155,12 +153,25 @@ class PPOL_PID(PPO):
         # runner also reads self.intrinsic_rewards, which PPOL-PID never populates).
         self.intrinsic_rewards = None
 
-    def init_storage(self, training_type: str, num_envs: int, num_transitions_per_env: int,
-                     actor_obs_shape: Tuple, critic_obs_shape: Tuple, action_shape: Tuple) -> None:
+    def init_storage(
+        self,
+        training_type: str,
+        num_envs: int,
+        num_transitions_per_env: int,
+        actor_obs_shape: Tuple,
+        critic_obs_shape: Tuple,
+        action_shape: Tuple,
+    ) -> None:
         cost_shape = (self.num_costs,) if self.num_costs > 1 else None
         self.storage = RolloutStorageCMDP(
-            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape,
-            training_type=training_type, cost_shape=cost_shape, device=self.device
+            num_envs,
+            num_transitions_per_env,
+            actor_obs_shape,
+            critic_obs_shape,
+            action_shape,
+            training_type=training_type,
+            cost_shape=cost_shape,
+            device=self.device,
         )
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
@@ -178,7 +189,7 @@ class PPOL_PID(PPO):
             self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.learning_rate
+            param_group["lr"] = self.learning_rate
 
     def update_lagrangian_multipliers(self, current_costs: List[torch.Tensor]) -> None:
         """
@@ -243,33 +254,45 @@ class PPOL_PID(PPO):
             # Update delay queue for next iteration
             self.cost_delay_queue[cost_idx].append(self.cost_ema[cost_idx])
 
-    def _update_policy(self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None) -> Tuple[float, float, float]:
+    def _update_policy(
+        self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None
+    ) -> Tuple[float, float, float]:
         """
         PPO policy update with Lagrangian constraint handling (OmniSafe-style).
 
         Uses normalized surrogate advantage: (adv_r - λ * adv_c) / (1 + λ)
         This prevents the cost term from completely dominating when λ is large.
         """
-        (obs_batch, critic_obs_batch, actions_batch, target_values_batch,
-         advantages_batch, returns_batch, target_cost_values_batch, cost_advantages_batch,
-         returns_cost_batch, old_actions_log_prob_batch,
-         old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, rnd_state_batch) = batch
+        (
+            obs_batch,
+            critic_obs_batch,
+            actions_batch,
+            target_values_batch,
+            advantages_batch,
+            returns_batch,
+            target_cost_values_batch,
+            cost_advantages_batch,
+            returns_cost_batch,
+            old_actions_log_prob_batch,
+            old_mu_batch,
+            old_sigma_batch,
+            hid_states_batch,
+            masks_batch,
+            rnd_state_batch,
+        ) = batch
 
         if self.normalize_advantage_per_mini_batch:
             with torch.no_grad():
                 advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
                 for cost_idx in range(self.num_costs):
                     cost_advantages_batch[:, cost_idx] = (
-                        (cost_advantages_batch[:, cost_idx] - cost_advantages_batch[:, cost_idx].mean())
-                        / (cost_advantages_batch[:, cost_idx].std() + 1e-8)
-                    )
+                        cost_advantages_batch[:, cost_idx] - cost_advantages_batch[:, cost_idx].mean()
+                    ) / (cost_advantages_batch[:, cost_idx].std() + 1e-8)
 
         # Forward pass
         self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
         actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-        value_batch = self.policy.evaluate(
-            critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
-        )
+        value_batch = self.policy.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
         cost_value_batch_all = self.policy.evaluate_cost(
             critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
         )
@@ -311,9 +334,7 @@ class PPOL_PID(PPO):
 
         # PPO clipped surrogate with normalized advantage
         surrogate = -combined_advantage * ratio
-        surrogate_clipped = -combined_advantage * torch.clamp(
-            ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-        )
+        surrogate_clipped = -combined_advantage * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
         # Policy loss is just the normalized surrogate (no separate constraint term needed)
@@ -332,9 +353,7 @@ class PPOL_PID(PPO):
 
         # Cost value function losses
         if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
-            cost_losses_all = self.policy.cost_critic.loss(
-                self.policy._cost_logits, returns_cost_batch
-            ).mean(dim=0)
+            cost_losses_all = self.policy.cost_critic.loss(self.policy._cost_logits, returns_cost_batch).mean(dim=0)
         elif self.use_clipped_cost_loss:
             cost_clipped = target_cost_values_batch + (cost_value_batch_all - target_cost_values_batch).clamp(
                 -self.clip_param, self.clip_param
@@ -402,8 +421,9 @@ class PPOL_PID(PPO):
 
         return loss_dict
 
-    def process_env_step(self, rewards: torch.Tensor, costs: torch.Tensor,
-                         dones: torch.Tensor, infos: Dict[str, Any]) -> None:
+    def process_env_step(
+        self, rewards: torch.Tensor, costs: torch.Tensor, dones: torch.Tensor, infos: Dict[str, Any]
+    ) -> None:
         """Process environment step with costs."""
         self.transition.rewards = rewards.clone()
         self.transition.costs = self._format_costs_tensor(costs)
@@ -447,8 +467,7 @@ class PPOL_PID(PPO):
         """Compute GAE returns for costs."""
         last_cost_values = self.policy.evaluate_cost(last_critic_obs).detach()
         self.storage.compute_cost_returns(
-            last_cost_values, self.gamma, self.lam,
-            normalize_cost_advantage=not self.normalize_advantage_per_mini_batch
+            last_cost_values, self.gamma, self.lam, normalize_cost_advantage=not self.normalize_advantage_per_mini_batch
         )
 
     def get_penalty_info(self) -> Dict[str, Any]:
@@ -460,11 +479,9 @@ class PPOL_PID(PPO):
             # Convert lists to scalars for logging (compatible with P3O interface)
             "kappa": torch.tensor(self.lambdas).mean().item(),  # Use lambda as "kappa" for logging compatibility
             "cost_limit": torch.tensor(self.cost_limits).mean().item(),
-
             # Original lists for detailed analysis
             "kappa_list": self.lambdas,  # Lambdas mapped to kappa_list for logging compatibility
             "cost_limits": self.cost_limits,
-
             # PPOL-PID specific information
             "lambda_mean": torch.tensor(self.lambdas).mean().item(),
             "lambda_max": max(self.lambdas),
@@ -478,7 +495,7 @@ class PPOL_PID(PPO):
 
     def _validate_and_fix_cost_critic(self) -> None:
         """Validate cost critic output dimensions."""
-        if not hasattr(self.policy, 'cost_critic'):
+        if not hasattr(self.policy, "cost_critic"):
             raise ValueError("ActorCritic must have a cost_critic attribute for PPOL-PID algorithm")
 
         # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.

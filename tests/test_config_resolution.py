@@ -55,6 +55,6 @@ def test_safe_algorithm_cost_limits_are_valid_when_present(config_path: Path) ->
     cost_limits = algorithm_cfg["cost_limits"]
     assert isinstance(cost_limits, list), f"{config_path} cost_limits must be a list"
     assert cost_limits, f"{config_path} cost_limits must not be empty"
-    assert all(isinstance(limit, (float, int)) for limit in cost_limits), (
-        f"{config_path} cost_limits must contain only numbers"
-    )
+    assert all(
+        isinstance(limit, (float, int)) for limit in cost_limits
+    ), f"{config_path} cost_limits must contain only numbers"

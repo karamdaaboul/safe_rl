@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -263,8 +262,12 @@ class SAC:
                     next_obs = (next_obs - obs_normalizer._mean) / (obs_normalizer._std + obs_normalizer.eps)
             if critic_obs_normalizer is not None:
                 with torch.no_grad():
-                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
-                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (critic_obs_normalizer._std + critic_obs_normalizer.eps)
+                    critic_obs = (critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
+                    next_critic_obs = (next_critic_obs - critic_obs_normalizer._mean) / (
+                        critic_obs_normalizer._std + critic_obs_normalizer.eps
+                    )
             # Normalize rewards by running std (don't shift mean). "return" mode uses
             # a RewardNormalization module (normalize via forward); "empirical" mode
             # uses EmpiricalNormalization (divide by running std).
@@ -276,8 +279,15 @@ class SAC:
                         rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
             critic_loss = self._update_critic(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
             )
             total_critic_loss += critic_loss
 
@@ -333,13 +343,27 @@ class SAC:
         """
         if self.policy.is_distributional_critic:
             critic_loss = self._update_critic_distributional(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
             )
         else:
             critic_loss = self._update_critic_standard(
-                obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
-                bootstrap=bootstrap, effective_n_steps=effective_n_steps,
+                obs,
+                critic_obs,
+                actions,
+                rewards,
+                dones,
+                next_obs,
+                next_critic_obs,
+                bootstrap=bootstrap,
+                effective_n_steps=effective_n_steps,
             )
 
         return critic_loss
@@ -504,9 +528,7 @@ class SAC:
 
         return critic_loss.item()
 
-    def _update_actor_and_alpha(
-        self, obs: torch.Tensor, critic_obs: torch.Tensor | None = None
-    ) -> tuple[float, float]:
+    def _update_actor_and_alpha(self, obs: torch.Tensor, critic_obs: torch.Tensor | None = None) -> tuple[float, float]:
         """Update actor and entropy coefficient.
 
         Args:

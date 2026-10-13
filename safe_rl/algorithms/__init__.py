@@ -2,9 +2,9 @@
 
 from .cpo import CPO
 from .distillation import Distillation
-from .fppo import FPPO
 from .fast_sac import FastSAC
 from .fast_td3 import FastTD3
+from .fppo import FPPO
 from .p3o import P3O
 from .pcpo import PCPO
 from .ppo import PPO

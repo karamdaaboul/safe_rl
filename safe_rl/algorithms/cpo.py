@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal
+from typing import Any, Dict, List, Optional, Tuple
 
 from safe_rl.modules import ActorCritic
 from safe_rl.storage import RolloutStorageCMDP
@@ -259,14 +258,10 @@ class CPO:
             q_dist = Normal(mean, std)
             p_dist = Normal(mean.detach(), std.detach())
             kl = torch.distributions.kl_divergence(p_dist, q_dist).sum(dim=-1).mean()
-            grads = torch.autograd.grad(
-                kl, self._policy_parameters, create_graph=True, allow_unused=True
-            )
+            grads = torch.autograd.grad(kl, self._policy_parameters, create_graph=True, allow_unused=True)
             flat_grad_kl = flatten_tensor_sequence(grads, self._policy_parameters)
             kl_p = torch.dot(flat_grad_kl, vector)
-            hvp = torch.autograd.grad(
-                kl_p, self._policy_parameters, retain_graph=False, allow_unused=True
-            )
+            hvp = torch.autograd.grad(kl_p, self._policy_parameters, retain_graph=False, allow_unused=True)
             flat_hvp = flatten_tensor_sequence(hvp, self._policy_parameters)
         return flat_hvp + self.cg_damping * vector
 
@@ -499,12 +494,8 @@ class CPO:
         set_param_values_to_parameters(self._policy_parameters, theta_new)
 
         with torch.no_grad():
-            final_reward_loss = self._loss_pi_reward(
-                obs_batch, actions_batch, old_actions_log_prob_batch, reward_adv
-            )
-            final_cost_loss = self._loss_pi_cost(
-                obs_batch, actions_batch, old_actions_log_prob_batch, cost_adv_active
-            )
+            final_reward_loss = self._loss_pi_reward(obs_batch, actions_batch, old_actions_log_prob_batch, reward_adv)
+            final_cost_loss = self._loss_pi_cost(obs_batch, actions_batch, old_actions_log_prob_batch, cost_adv_active)
             self._make_distribution(obs_batch)
             entropy = self.policy.entropy.mean().item()
 
@@ -555,7 +546,6 @@ class CPO:
             _masks_batch,
             _rnd_state_batch,
         ) in generator:
-
             value_batch = self.policy.evaluate(critic_obs_batch)
             cost_value_batch = self.policy.evaluate_cost(critic_obs_batch)
 
@@ -567,9 +557,9 @@ class CPO:
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
 
-                cost_clipped = target_cost_values_batch + (
-                    cost_value_batch - target_cost_values_batch
-                ).clamp(-self.clip_param, self.clip_param)
+                cost_clipped = target_cost_values_batch + (cost_value_batch - target_cost_values_batch).clamp(
+                    -self.clip_param, self.clip_param
+                )
                 cost_losses = (cost_value_batch - returns_cost_batch).pow(2)
                 cost_losses_clipped = (cost_clipped - returns_cost_batch).pow(2)
                 cost_value_loss = torch.max(cost_losses, cost_losses_clipped).mean(dim=0).sum()

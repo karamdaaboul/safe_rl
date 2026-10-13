@@ -32,20 +32,17 @@ _add_unitree_repo_to_path()
 # needs CXXABI_1.3.15 from the conda env's newer libstdc++. If torch imports
 # first, it pins the host's older libstdc++ and later mjlab imports fail.
 import mjlab.tasks  # noqa: E402,F401
+import src.tasks  # noqa: E402,F401
+import yaml  # noqa: E402
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg  # noqa: E402
-from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks  # noqa: E402
+from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg  # noqa: E402
 from mjlab.tasks.tracking.mdp import MotionCommandCfg  # noqa: E402
 from mjlab.utils.gpu import select_gpus  # noqa: E402
 from mjlab.utils.torch import configure_torch_backends  # noqa: E402
 from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
 
-import src.tasks  # noqa: E402,F401
-
-import yaml  # noqa: E402
-
 from safe_rl.envs import make_env  # noqa: E402
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
-
 
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
 

@@ -18,11 +18,10 @@ Key design points carried over from the reference:
 """
 
 import math
-from typing import Callable
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Callable
 
 
 def l2normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.Tensor:
@@ -243,17 +242,19 @@ class SimbaV2(nn.Module):
             c_shift=c_shift,
         )
 
-        self.blocks = nn.ModuleList([
-            HyperLERPBlock(
-                hidden_dim,
-                scaler_init=scaler_init,
-                scaler_scale=scaler_scale,
-                alpha_init=alpha_init,
-                alpha_scale=alpha_scale,
-                expansion=expansion,
-            )
-            for _ in range(num_blocks)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                HyperLERPBlock(
+                    hidden_dim,
+                    scaler_init=scaler_init,
+                    scaler_scale=scaler_scale,
+                    alpha_init=alpha_init,
+                    alpha_scale=alpha_scale,
+                    expansion=expansion,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
 
         # Prediction head: reference uses scaler_init = scaler_scale = 1.0 and no
         # output normalization.

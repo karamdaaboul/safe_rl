@@ -3,9 +3,9 @@ from __future__ import annotations
 import math
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-from typing import List, Optional, Dict, Any, Tuple
+import torch.optim as optim
+from typing import Any, Dict, List, Optional, Tuple
 
 from safe_rl.algorithms.ppo import PPO
 from safe_rl.modules import ActorCritic
@@ -26,6 +26,7 @@ class P3O(PPO):
     Based on the paper: "Penalized Proximal Policy Optimization for Safe Reinforcement Learning"
     https://arxiv.org/pdf/2205.11814.pdf
     """
+
     policy: ActorCritic
 
     def __init__(
@@ -123,11 +124,9 @@ class P3O(PPO):
         self.cvar_alpha_anneal_iters = int(cvar_alpha_anneal_iters)
         if self.cvar_alpha_schedule not in ("constant", "linear", "cosine"):
             raise ValueError(
-                f"cvar_alpha_schedule must be 'constant', 'linear', or 'cosine'; "
-                f"got {self.cvar_alpha_schedule!r}"
+                f"cvar_alpha_schedule must be 'constant', 'linear', or 'cosine'; got {self.cvar_alpha_schedule!r}"
             )
-        for _name, _val in (("cvar_alpha_start", self.cvar_alpha_start),
-                            ("cvar_alpha_end", self.cvar_alpha_end)):
+        for _name, _val in (("cvar_alpha_start", self.cvar_alpha_start), ("cvar_alpha_end", self.cvar_alpha_end)):
             if _val is not None and not (0.0 < _val <= 1.0):
                 raise ValueError(f"{_name} must be in (0, 1]; got {_val}")
 
@@ -152,13 +151,13 @@ class P3O(PPO):
         if hasattr(self.policy, "cost_critic") and self.policy.cost_critic is not None:
             self.cost_critic_params = list(self.policy.cost_critic.parameters())
             cost_critic_param_ids = {id(p) for p in self.cost_critic_params}
-            self.actor_value_params = [
-                p for p in self.policy.parameters() if id(p) not in cost_critic_param_ids
-            ]
-            self.optimizer = optim.Adam([
-                {"params": self.actor_value_params, "lr": learning_rate},
-                {"params": self.cost_critic_params, "lr": self.cost_critic_lr},
-            ])
+            self.actor_value_params = [p for p in self.policy.parameters() if id(p) not in cost_critic_param_ids]
+            self.optimizer = optim.Adam(
+                [
+                    {"params": self.actor_value_params, "lr": learning_rate},
+                    {"params": self.cost_critic_params, "lr": self.cost_critic_lr},
+                ]
+            )
         else:
             self.actor_value_params = list(self.policy.parameters())
             self.cost_critic_params = []
@@ -192,13 +191,26 @@ class P3O(PPO):
         # runner also reads self.intrinsic_rewards, which P3O never populates).
         self.intrinsic_rewards = None
 
-    def init_storage(self, training_type: str, num_envs: int, num_transitions_per_env: int,
-                     actor_obs_shape: Tuple, critic_obs_shape: Tuple, action_shape: Tuple) -> None:
+    def init_storage(
+        self,
+        training_type: str,
+        num_envs: int,
+        num_transitions_per_env: int,
+        actor_obs_shape: Tuple,
+        critic_obs_shape: Tuple,
+        action_shape: Tuple,
+    ) -> None:
         # Cost shape for multiple cost constraints
         cost_shape = (self.num_costs,) if self.num_costs > 1 else None
         self.storage = RolloutStorageCMDP(
-            num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape,
-            training_type=training_type, cost_shape=cost_shape, device=self.device
+            num_envs,
+            num_transitions_per_env,
+            actor_obs_shape,
+            critic_obs_shape,
+            action_shape,
+            training_type=training_type,
+            cost_shape=cost_shape,
+            device=self.device,
         )
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
@@ -222,7 +234,7 @@ class P3O(PPO):
             self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
         # param_groups[0] is always actor+value; cost critic (if present) is in group 1.
-        self.optimizer.param_groups[0]['lr'] = self.learning_rate
+        self.optimizer.param_groups[0]["lr"] = self.learning_rate
 
     def _compute_cvar_alpha(self, iteration: int) -> Optional[float]:
         a0 = self.cvar_alpha_start
@@ -242,8 +254,7 @@ class P3O(PPO):
         return a1 + 0.5 * (a0 - a1) * (1.0 + math.cos(math.pi * progress))
 
     def constraint_violation_detected(
-        self, current_costs: List[torch.Tensor],
-        cost_advantages_batch: Optional[List[torch.Tensor]] = None
+        self, current_costs: List[torch.Tensor], cost_advantages_batch: Optional[List[torch.Tensor]] = None
     ) -> List[bool]:
         """
         Detect constraint violations for each cost constraint.
@@ -273,8 +284,7 @@ class P3O(PPO):
             # Secondary condition: approaching limit with positive cost trend
             if cost_advantages_batch is not None:
                 mean_cost_advantage = cost_advantages_batch[cost_idx].mean().item()
-                if (current_cost > self.constraint_margin * self.cost_limits[cost_idx]
-                        and mean_cost_advantage > 0.1):
+                if current_cost > self.constraint_margin * self.cost_limits[cost_idx] and mean_cost_advantage > 0.1:
                     violations.append(True)
                     continue
 
@@ -282,8 +292,7 @@ class P3O(PPO):
             if len(self.cost_history[cost_idx]) >= 6:
                 recent_trend = sum(self.cost_history[cost_idx][-3:]) / 3
                 older_trend = sum(self.cost_history[cost_idx][-6:-3]) / 3
-                if (recent_trend > older_trend
-                        and current_cost > self.constraint_margin * self.cost_limits[cost_idx]):
+                if recent_trend > older_trend and current_cost > self.constraint_margin * self.cost_limits[cost_idx]:
                     violations.append(True)
                     continue
 
@@ -292,8 +301,7 @@ class P3O(PPO):
         return violations
 
     def update_penalty_factor(
-        self, current_costs: List[torch.Tensor],
-        cost_advantages_batch: Optional[List[torch.Tensor]] = None
+        self, current_costs: List[torch.Tensor], cost_advantages_batch: Optional[List[torch.Tensor]] = None
     ) -> None:
         """
         Symmetric multiplicative κ update:
@@ -315,16 +323,27 @@ class P3O(PPO):
             else:
                 self.kappa[cost_idx] = max(self.kappa[cost_idx] / self.rho, 0.1)
 
-    def _update_policy(
-        self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None
-    ) -> Dict[str, float]:
+    def _update_policy(self, batch: Tuple, current_costs: Optional[List[torch.Tensor]] = None) -> Dict[str, float]:
         """
         Handle multiple costs with single cost critic having n output neurons.
         """
-        (obs_batch, critic_obs_batch, actions_batch, target_values_batch,
-         advantages_batch, returns_batch, target_cost_values_batch, cost_advantages_batch,
-         returns_cost_batch, old_actions_log_prob_batch,
-         old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, rnd_state_batch) = batch
+        (
+            obs_batch,
+            critic_obs_batch,
+            actions_batch,
+            target_values_batch,
+            advantages_batch,
+            returns_batch,
+            target_cost_values_batch,
+            cost_advantages_batch,
+            returns_cost_batch,
+            old_actions_log_prob_batch,
+            old_mu_batch,
+            old_sigma_batch,
+            hid_states_batch,
+            masks_batch,
+            rnd_state_batch,
+        ) = batch
 
         # Capture pre-normalization advantage stats for W&B diagnostics. These reveal
         # whether the cost critic is producing a usable signal (large abs_max + std)
@@ -350,17 +369,14 @@ class P3O(PPO):
                 # `evaluate_cost` always decodes V_cost as the expected value (not CVaR), so
                 # cost advantages are already naturally centered around zero.
                 for cost_idx in range(self.num_costs):
-                    cost_advantages_batch[:, cost_idx] = (
-                        cost_advantages_batch[:, cost_idx]
-                        / (cost_advantages_batch[:, cost_idx].std() + 1e-8)
+                    cost_advantages_batch[:, cost_idx] = cost_advantages_batch[:, cost_idx] / (
+                        cost_advantages_batch[:, cost_idx].std() + 1e-8
                     )
 
         # Perform the action and value predictions
         self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
         actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-        value_batch = self.policy.evaluate(
-            critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
-        )
+        value_batch = self.policy.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
 
         # Single call to cost critic returns tensor with shape (batch_size, num_costs)
         cost_value_batch_all = self.policy.evaluate_cost(
@@ -438,12 +454,8 @@ class P3O(PPO):
                     gate_open_acc += float(gate_input.item() > 0.0)
                     active_cost_heads += 1
 
-        batch_metrics["cost_penalty_term"] = (
-            cost_penalty_acc / active_cost_heads if active_cost_heads else 0.0
-        )
-        batch_metrics["cost_gate_open_frac"] = (
-            gate_open_acc / active_cost_heads if active_cost_heads else 0.0
-        )
+        batch_metrics["cost_penalty_term"] = cost_penalty_acc / active_cost_heads if active_cost_heads else 0.0
+        batch_metrics["cost_gate_open_frac"] = gate_open_acc / active_cost_heads if active_cost_heads else 0.0
         if cvar_anchor_per_cost is not None:
             batch_metrics["cvar_anchor"] = float(cvar_anchor_per_cost.mean().item())
             batch_metrics["cvar_minus_exp_mean"] = cvar_minus_exp_mean
@@ -477,9 +489,7 @@ class P3O(PPO):
 
         if getattr(self.policy, "cost_critic_loss_type", None) == "hlgauss":
             # _cost_logits cached by evaluate_cost call above
-            cost_losses_all = self.policy.cost_critic.loss(
-                self.policy._cost_logits, returns_cost_batch
-            ).mean(dim=0)
+            cost_losses_all = self.policy.cost_critic.loss(self.policy._cost_logits, returns_cost_batch).mean(dim=0)
             # Saturation diagnostic: fraction of cost-return targets pinned at v_max. ~0 means
             # the support is sized fine; sustained > 0 means raise v_max or use symlog support.
             with torch.no_grad():
@@ -511,12 +521,14 @@ class P3O(PPO):
         if not torch.isfinite(total_loss):
             print(f"[P3O] Skipping non-finite loss at update: {total_loss.item()}")
             self.optimizer.zero_grad()
-            batch_metrics.update({
-                "value_loss": value_loss.item() if torch.isfinite(value_loss) else 0.0,
-                "cost_loss": 0.0,
-                "surrogate_loss": surrogate_loss.item() if torch.isfinite(surrogate_loss) else 0.0,
-                "entropy": entropy_batch.mean().item(),
-            })
+            batch_metrics.update(
+                {
+                    "value_loss": value_loss.item() if torch.isfinite(value_loss) else 0.0,
+                    "cost_loss": 0.0,
+                    "surrogate_loss": surrogate_loss.item() if torch.isfinite(surrogate_loss) else 0.0,
+                    "entropy": entropy_batch.mean().item(),
+                }
+            )
             return batch_metrics
 
         self.optimizer.zero_grad()
@@ -532,12 +544,14 @@ class P3O(PPO):
             nn.utils.clip_grad_norm_(self.cost_critic_params, self.max_grad_norm)
         self.optimizer.step()
 
-        batch_metrics.update({
-            "value_loss": value_loss.item(),
-            "cost_loss": total_cost_critic_loss.item(),
-            "surrogate_loss": surrogate_loss.item(),
-            "entropy": entropy_batch.mean().item(),
-        })
+        batch_metrics.update(
+            {
+                "value_loss": value_loss.item(),
+                "cost_loss": total_cost_critic_loss.item(),
+                "surrogate_loss": surrogate_loss.item(),
+                "entropy": entropy_batch.mean().item(),
+            }
+        )
         return batch_metrics
 
     def update(
@@ -588,8 +602,9 @@ class P3O(PPO):
 
         return loss_dict
 
-    def process_env_step(self, rewards: torch.Tensor, costs: torch.Tensor,
-                         dones: torch.Tensor, infos: Dict[str, Any]) -> None:
+    def process_env_step(
+        self, rewards: torch.Tensor, costs: torch.Tensor, dones: torch.Tensor, infos: Dict[str, Any]
+    ) -> None:
         """
         Process environment step with multiple costs.
         """
@@ -648,7 +663,9 @@ class P3O(PPO):
         # the κ-penalty whether a sample is unsafe. Mean-centering would zero out the penalty in
         # expectation. (CPO/PCPO use the storage's centering for their trust-region logic.)
         self.storage.compute_cost_returns(
-            last_cost_values, self.gamma_cost, self.lam,
+            last_cost_values,
+            self.gamma_cost,
+            self.lam,
             normalize_cost_advantage=False,
         )
 
@@ -661,12 +678,11 @@ class P3O(PPO):
             # Convert lists to scalars for logging
             "kappa": torch.tensor(self.kappa).mean().item(),
             "cost_limit": torch.tensor(self.cost_limits).mean().item(),
-
             # Original lists for detailed analysis
             "kappa_list": self.kappa,
             "cost_limits": self.cost_limits,
             "constraint_margin": self.constraint_margin,
-            "recent_costs": [hist[-5:] if len(hist) >= 5 else hist for hist in self.cost_history]
+            "recent_costs": [hist[-5:] if len(hist) >= 5 else hist for hist in self.cost_history],
         }
 
     def _validate_and_fix_cost_critic(self) -> None:
@@ -674,7 +690,7 @@ class P3O(PPO):
         Validate that the cost critic outputs the correct number of cost values.
         If not, recreate the cost critic with the correct output dimension.
         """
-        if not hasattr(self.policy, 'cost_critic'):
+        if not hasattr(self.policy, "cost_critic"):
             raise ValueError("ActorCritic must have a cost_critic attribute for P3O algorithm")
 
         # HL-Gauss head outputs num_costs * num_bins; skip the linear-layer heuristic.

@@ -42,7 +42,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
 
         if not isinstance(self.alg, P3O):
             raise ValueError(
-                f"MetaOnPolicyRunner currently supports only P3O as the inner-loop algorithm, "
+                "MetaOnPolicyRunner currently supports only P3O as the inner-loop algorithm, "
                 f"got {type(self.alg).__name__}."
             )
 
@@ -151,9 +151,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
 
     def _capture_adapted_actor(self) -> dict[str, torch.Tensor]:
         return {
-            name: p.detach().clone()
-            for name, p in self.alg.policy.named_parameters()
-            if name in self.meta_actor_params
+            name: p.detach().clone() for name, p in self.alg.policy.named_parameters() if name in self.meta_actor_params
         }
 
     def _identify_head_param_names(self) -> set[str]:
@@ -169,11 +167,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
         num_actions = int(getattr(self.env, "num_actions"))
         head: set[str] = set()
         for mod_name, module in self.alg.policy.named_modules():
-            if (
-                isinstance(module, nn.Linear)
-                and module.out_features == num_actions
-                and mod_name.startswith("actor")
-            ):
+            if isinstance(module, nn.Linear) and module.out_features == num_actions and mod_name.startswith("actor"):
                 head.add(f"{mod_name}.weight")
                 head.add(f"{mod_name}.bias")
         for name in self.meta_actor_params:
@@ -231,7 +225,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
         for _ in range(self.cost_critic_epochs):
             perm = torch.randperm(n, device=self.device)
             for start in range(0, n, bs):
-                idx = perm[start:start + bs]
+                idx = perm[start : start + bs]
                 ob, tgt = obs_cat[idx], ret_cat[idx]
                 obs_n = policy.critic_obs_normalizer(ob)
                 if is_hlgauss:
@@ -330,15 +324,16 @@ class MetaOnPolicyRunner(OnPolicyRunner):
                 break
             perm = torch.randperm(n, device=self.device)
             for start in range(0, n, bs):
-                idx = perm[start:start + bs]
+                idx = perm[start : start + bs]
                 policy.act(actor_obs[idx])
                 logp = policy.get_actions_log_prob(actions[idx])
                 ratio = torch.exp(logp - old_logp[idx])
                 a = adv_c[idx]
                 # Pessimistic (upper-bound) clip for a term we MINIMIZE — the cost
                 # analogue of P3O's reward surrogate clip.
-                surr = torch.max(a * ratio, a * torch.clamp(ratio, 1.0 - self.meta_cost_clip,
-                                                            1.0 + self.meta_cost_clip)).mean()
+                surr = torch.max(
+                    a * ratio, a * torch.clamp(ratio, 1.0 - self.meta_cost_clip, 1.0 + self.meta_cost_clip)
+                ).mean()
                 # Normalized-Lagrangian weight eta/(1+eta) in [0, 1): the cost step can
                 # shape the meta-actor but never dominate Reptile's reward gains (raw eta
                 # drove cost->0 AND reward->0). Self-balancing: ->0 when safe, ->1 when eta large.
@@ -353,7 +348,9 @@ class MetaOnPolicyRunner(OnPolicyRunner):
                     kl = torch.sum(
                         torch.log(sigma / old_sigma[idx] + 1e-5)
                         + (old_sigma[idx].pow(2) + (old_mu[idx] - mu).pow(2)) / (2.0 * sigma.pow(2))
-                        - 0.5, dim=-1).mean()
+                        - 0.5,
+                        dim=-1,
+                    ).mean()
                     last_kl = float(kl.item())
                     ratio_max = max(ratio_max, float(ratio.max().item()))
                     surr_acc += float(surr.item())
@@ -528,8 +525,9 @@ class MetaOnPolicyRunner(OnPolicyRunner):
                     meta_batches.append(md)
 
             # Pool the meta-policy's first-rollout data across tasks.
-            pooled = {k: torch.cat([b[k] for b in meta_batches], dim=0) for k in meta_batches[0]} \
-                if meta_batches else None
+            pooled = (
+                {k: torch.cat([b[k] for b in meta_batches], dim=0) for k in meta_batches[0]} if meta_batches else None
+            )
 
             # Outer updates: actor via Reptile, cost critic via global on-policy training,
             # then the eta-penalized cost step that makes the meta-actor itself safer.
@@ -537,15 +535,12 @@ class MetaOnPolicyRunner(OnPolicyRunner):
             cc_diag = {"loss": 0.0, "pre_ev": 0.0, "post_ev": 0.0, "pre_rmse": 0.0, "target_mean": 0.0}
             if pooled is not None:
                 cc_diag = self._train_global_cost_critic(pooled["critic_obs"], pooled["cost_ret"])
-            mc_diag = {"surrogate": 0.0, "kl": 0.0, "ratio_max": 1.0, "adv_cost_mean": 0.0,
-                       "epochs": 0.0, "fired": 0.0}
+            mc_diag = {"surrogate": 0.0, "kl": 0.0, "ratio_max": 1.0, "adv_cost_mean": 0.0, "epochs": 0.0, "fired": 0.0}
             mean_meta_cost = statistics.mean(meta_policy_costs) if meta_policy_costs else None
             # Deadband gate: fire the cost step only while the init is unsafe. When the
             # cost can't be measured (no completed episodes) skip it — don't erode reward
             # blindly. With eta_deadband off, the step fires every iter (old behavior).
-            unsafe = (not self.eta_deadband) or (
-                mean_meta_cost is not None and mean_meta_cost > self.eta_cost_limit
-            )
+            unsafe = (not self.eta_deadband) or (mean_meta_cost is not None and mean_meta_cost > self.eta_cost_limit)
             if self.eta_penalized and pooled is not None and unsafe:
                 mc_diag = self._eta_penalized_meta_step(pooled)
                 mc_diag["fired"] = 1.0
@@ -558,8 +553,15 @@ class MetaOnPolicyRunner(OnPolicyRunner):
 
             if self.log_dir is not None and not self.disable_logs:
                 self._log_meta(
-                    it, tot_iter, task_rewards, task_costs, meta_policy_costs,
-                    meta_policy_rewards, cc_diag, mc_diag, iter_time,
+                    it,
+                    tot_iter,
+                    task_rewards,
+                    task_costs,
+                    meta_policy_costs,
+                    meta_policy_rewards,
+                    cc_diag,
+                    mc_diag,
+                    iter_time,
                 )
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
@@ -573,8 +575,18 @@ class MetaOnPolicyRunner(OnPolicyRunner):
         if self.log_dir is not None and not self.disable_logs:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
-    def _log_meta(self, it, tot_iter, task_rewards, task_costs, meta_policy_costs,
-                  meta_policy_rewards, cc_diag, mc_diag, iter_time):
+    def _log_meta(
+        self,
+        it,
+        tot_iter,
+        task_rewards,
+        task_costs,
+        meta_policy_costs,
+        meta_policy_rewards,
+        cc_diag,
+        mc_diag,
+        iter_time,
+    ):
         mean_r = statistics.mean(task_rewards) if task_rewards else float("nan")
         mean_c = statistics.mean(task_costs) if task_costs else float("nan")
         mean_mc = statistics.mean(meta_policy_costs) if meta_policy_costs else float("nan")

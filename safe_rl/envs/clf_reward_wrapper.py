@@ -19,13 +19,12 @@ through ``env.unwrapped.scene["robot"].data`` and ``env.unwrapped.command_manage
 
 from __future__ import annotations
 
+import torch
 from typing import Any
 
-import torch
-
+from ..utils.clf import build_clf_P, clf_sigma
 from .reference.hlip import DEFAULT_OUTPUTS, HLIPReference
 from .vec_env import VecEnv
-from ..utils.clf import build_clf_P, clf_sigma
 
 
 class CLFRewardWrapper(VecEnv):

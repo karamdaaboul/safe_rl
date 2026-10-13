@@ -46,9 +46,7 @@ class NStepReturnAggregator:
     def _alloc(self, fields: dict[str, torch.Tensor]) -> None:
         for name, val in fields.items():
             if name not in self._bufs:
-                self._bufs[name] = torch.zeros(
-                    (self.n, *val.shape), device=self.device, dtype=val.dtype
-                )
+                self._bufs[name] = torch.zeros((self.n, *val.shape), device=self.device, dtype=val.dtype)
 
     def push(
         self,
@@ -146,7 +144,7 @@ class NStepReturnAggregator:
         is_terminal: torch.Tensor | None,
     ) -> None:
         """Emit a batch of aggregated transitions from ``src_slot`` with horizon ``rem_h``."""
-        rewards_slc = self._bufs["rewards"][src_slot:src_slot + rem_h, idxs, :]  # [h, k, 1]
+        rewards_slc = self._bufs["rewards"][src_slot : src_slot + rem_h, idxs, :]  # [h, k, 1]
         disc = self._discounts[:rem_h].view(rem_h, 1, 1)
         R_n = (disc * rewards_slc).sum(dim=0)  # [k, 1]
 

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-
 import torch
+from collections.abc import Iterable, Sequence
 
 
 def conjugate_gradients(

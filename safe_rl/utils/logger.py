@@ -3,12 +3,12 @@ from __future__ import annotations
 import os
 import statistics
 import time
+import torch
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any
 
-import torch
-
 import safe_rl
+
 from .utils import store_code_state
 
 if TYPE_CHECKING:
@@ -102,9 +102,7 @@ class Logger:
 
             if costs is not None and self.cur_cost_sum is not None:
                 for cost_idx in range(self.num_costs):
-                    self.costbuffers[cost_idx].extend(
-                        self.cur_cost_sum[new_ids, cost_idx].cpu().numpy().tolist()
-                    )
+                    self.costbuffers[cost_idx].extend(self.cur_cost_sum[new_ids, cost_idx].cpu().numpy().tolist())
                 self.cur_cost_sum[new_ids] = 0
 
             self.cur_reward_sum[new_ids] = 0
@@ -192,9 +190,7 @@ class Logger:
                     self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, it)
 
         # Console output
-        self._print_console(
-            it, start_it, total_it, collect_time, learn_time, fps, loss_dict, extras_string, width, pad
-        )
+        self._print_console(it, start_it, total_it, collect_time, learn_time, fps, loss_dict, extras_string, width, pad)
 
         self.ep_infos.clear()
 
@@ -250,9 +246,7 @@ class Logger:
 
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         else:
-            raise ValueError(
-                f"Logger type '{self.logger_type}' not found. Choose 'wandb' or 'tensorboard'."
-            )
+            raise ValueError(f"Logger type '{self.logger_type}' not found. Choose 'wandb' or 'tensorboard'.")
 
     def _store_code_state(self) -> None:
         """Save git diffs and upload them to external loggers."""

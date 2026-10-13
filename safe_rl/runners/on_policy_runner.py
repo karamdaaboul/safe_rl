@@ -9,10 +9,10 @@ from collections import deque
 import safe_rl
 from safe_rl.algorithms import PPO, Distillation
 from safe_rl.algorithms.cpo import CPO
-from safe_rl.algorithms.pcpo import PCPO  # noqa: F401
-from safe_rl.algorithms.p3o import P3O
-from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.fppo import FPPO
+from safe_rl.algorithms.p3o import P3O
+from safe_rl.algorithms.pcpo import PCPO  # noqa: F401
+from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.reppo import REPPO
 from safe_rl.envs import VecEnv
 from safe_rl.modules import (  # noqa: F401
@@ -153,6 +153,7 @@ class OnPolicyRunner:
         self.cbf_filter = None
         if cbf_cfg and cbf_cfg.get("enabled", False):
             from safe_rl.cbf import SafetyGymnasiumCBFFilter
+
             self.cbf_filter = SafetyGymnasiumCBFFilter(
                 alpha=cbf_cfg.get("alpha", 0.5),
                 d_min=cbf_cfg.get("d_min", 0.35),
@@ -217,7 +218,7 @@ class OnPolicyRunner:
         is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CPO, FPPO))
         if is_saferl:
             # Initialize separate cost buffers for each constraint
-            num_costs = len(self.env.cost_limits) if hasattr(self.env, 'cost_limits') else 1
+            num_costs = len(self.env.cost_limits) if hasattr(self.env, "cost_limits") else 1
             if num_costs > 1:
                 costbuffers = [deque(maxlen=100) for _ in range(num_costs)]
                 cur_cost_sum = torch.zeros(self.env.num_envs, num_costs, dtype=torch.float, device=self.device)
@@ -268,9 +269,7 @@ class OnPolicyRunner:
                     if is_saferl:
                         self.alg.process_env_step(rewards, costs, dones, infos)
                     elif isinstance(self.alg, REPPO):
-                        self.alg.process_env_step(
-                            rewards, dones, infos, next_obs=obs, next_critic_obs=privileged_obs
-                        )
+                        self.alg.process_env_step(rewards, dones, infos, next_obs=obs, next_critic_obs=privileged_obs)
                     else:
                         self.alg.process_env_step(rewards, dones, infos)
 
@@ -431,7 +430,9 @@ class OnPolicyRunner:
 
                         # Log individual constraint metrics
                         self.writer.add_scalar(f"SafeRL/mean_cost_constraint_{cost_idx}", mean_cost, locs["it"])
-                        self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, locs["it"])  # For cross-algorithm comparison
+                        self.writer.add_scalar(
+                            f"Train/episode_cost_{cost_idx}", mean_cost, locs["it"]
+                        )  # For cross-algorithm comparison
 
                         if penalty_info:
                             cost_limit = penalty_info["cost_limits"][cost_idx]
@@ -443,7 +444,9 @@ class OnPolicyRunner:
 
                             # Constraint violation for this specific constraint
                             violation = mean_cost > cost_limit
-                            self.writer.add_scalar(f"SafeRL/violation_constraint_{cost_idx}", float(violation), locs["it"])
+                            self.writer.add_scalar(
+                                f"SafeRL/violation_constraint_{cost_idx}", float(violation), locs["it"]
+                            )
 
                             # Normalized cost ratio (cost/limit) - more meaningful than absolute values
                             cost_ratio = mean_cost / cost_limit if cost_limit > 0 else 0
@@ -475,7 +478,9 @@ class OnPolicyRunner:
 
                         # Log integral errors for PID
                         for cost_idx, integral_error in enumerate(penalty_info["integral_errors"]):
-                            self.writer.add_scalar(f"SafeRL/integral_error_constraint_{cost_idx}", integral_error, locs["it"])
+                            self.writer.add_scalar(
+                                f"SafeRL/integral_error_constraint_{cost_idx}", integral_error, locs["it"]
+                            )
             # everything else
             self.writer.add_scalar("Train/episode_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
