@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import sys
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -324,6 +325,8 @@ def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
         runner_class_name = "OnPolicyRunner"
         max_iterations = agent_cfg.max_iterations
 
+    # The runners pop class_name and inject derived sizes; save the config as given so the run can be reloaded.
+    saved_train_cfg = deepcopy(train_cfg)
     alg_name = train_cfg["algorithm"].get("class_name", "PPO")
     if runner_class_name == "OffPolicyRunner" or alg_name in OFF_POLICY_ALGORITHMS:
         if rank == 0:
@@ -345,7 +348,7 @@ def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
 
     if rank == 0:
         _dump_yaml(log_dir / "params" / "env.yaml", asdict(env_cfg))
-        _dump_yaml(log_dir / "params" / "agent.yaml", train_cfg)
+        _dump_yaml(log_dir / "params" / "agent.yaml", saved_train_cfg)
 
     runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
     env.close()

@@ -203,6 +203,8 @@ def main() -> None:
     else:
         print(f"[INFO] Using OnPolicyRunner for algorithm: {alg_name}")
         runner = OnPolicyRunner(vec_env, train_cfg, log_dir=None, device=args.device)
+    # The runner may wrap the env (ROA composes [obs | priv | history]); step what the policy was built for.
+    vec_env = runner.env
     runner.load(str(checkpoint_path), load_optimizer=False)
     policy = runner.get_inference_policy(device=args.device)
 
