@@ -1,0 +1,52 @@
+runner_class_name: OnPolicyRunner
+seed: 1
+
+# ===========================================================================
+# Plain PPO (safe_rl library) for the Unitree G1 flat velocity task.
+#
+# Trains on mjlab's base reward with no CLF shaping and no constrained/safe-RL
+# machinery -- the apples-to-apples on-policy baseline for comparison against
+# the SAC runs (config/unitree_g1_flat_sac_ne4096.yaml). Derived from
+# unitree_g1_flat_ppo_clf.yaml with the `clf:` reward-shaping block removed.
+# ===========================================================================
+
+algorithm:
+  class_name: PPO
+  normalize_advantage_per_mini_batch: false
+  value_loss_coef: 1.0
+  clip_param: 0.2
+  use_clipped_value_loss: true
+  desired_kl: 0.01
+  entropy_coef: 0.005
+  gamma: 0.99
+  lam: 0.95
+  max_grad_norm: 1.0
+  learning_rate: 0.001
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  schedule: adaptive
+
+policy:
+  class_name: ActorCritic
+  actor_type: gaussian
+  critic_type: standard
+  actor_obs_normalization: true
+  critic_obs_normalization: true
+  actor_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+    init_noise_std: 1.0
+    noise_std_type: scalar
+  critic_kwargs:
+    hidden_dims: [512, 256, 128]
+    activation: elu
+
+runner:
+  num_steps_per_env: 24
+  max_iterations: 2000
+  empirical_normalization: false
+  save_interval: 200
+  experiment_name: g1_flat_ppo
+  run_name: ""
+  logger: wandb
+  wandb_project: mjlab
