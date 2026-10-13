@@ -39,11 +39,6 @@ class NStepReturnAggregator:
         self._discounts = (self.gamma ** torch.arange(self.n, device=device)).float()
         self._bufs: dict[str, torch.Tensor] = {}
 
-    @property
-    def effective_gamma(self) -> float:
-        """Discount factor for the n-step Bellman target: ``gamma ** n``."""
-        return self.gamma ** self.n
-
     def reset(self) -> None:
         """Drop all pending transitions (e.g., at the start of a new training run)."""
         self._count.zero_()

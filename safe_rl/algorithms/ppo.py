@@ -41,7 +41,6 @@ class PPO:
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
     ):
-        # device-related parameters
         self.device = device
         self.is_multi_gpu = multi_gpu_cfg is not None
         # Multi-GPU parameters
@@ -56,9 +55,7 @@ class PPO:
         if rnd_cfg is not None:
             # Extract learning rate and remove it from the original dict
             learning_rate = rnd_cfg.pop("learning_rate", 1e-3)
-            # Create RND module
             self.rnd = RandomNetworkDistillation(device=self.device, **rnd_cfg)
-            # Create RND optimizer
             params = self.rnd.predictor.parameters()
             self.rnd_optimizer = optim.Adam(params, lr=learning_rate)
         else:
@@ -67,9 +64,7 @@ class PPO:
 
         # Symmetry components
         if symmetry_cfg is not None:
-            # Check if symmetry is enabled
             use_symmetry = symmetry_cfg["use_data_augmentation"] or symmetry_cfg["use_mirror_loss"]
-            # Print that we are not using symmetry
             if not use_symmetry:
                 print("Symmetry not used for learning. We will use it for logging instead.")
             # If function is a string then resolve it to a function
@@ -81,7 +76,6 @@ class PPO:
                     "Data augmentation enabled but the function is not callable:"
                     f" {symmetry_cfg['data_augmentation_func']}"
                 )
-            # Store symmetry configuration
             self.symmetry = symmetry_cfg
         else:
             self.symmetry = None
@@ -89,9 +83,7 @@ class PPO:
         # PPO components
         self.policy = policy
         self.policy.to(self.device)
-        # Create optimizer
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
-        # Create rollout storage
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
 
@@ -118,7 +110,6 @@ class PPO:
             rnd_state_shape = [self.rnd.num_states]
         else:
             rnd_state_shape = None
-        # create rollout storage
         self.storage = RolloutStorage(
             training_type,
             num_envs,
@@ -133,7 +124,6 @@ class PPO:
     def act(self, obs, critic_obs):
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
-        # compute the actions and values
         self.transition.actions = self.policy.act(obs).detach()
         self.transition.values = self.policy.evaluate(critic_obs).detach()
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
@@ -145,7 +135,6 @@ class PPO:
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos):
-        # Record the rewards and dones
         # Note: we clone here because later on we bootstrap the rewards based on timeouts
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
@@ -154,10 +143,8 @@ class PPO:
         if self.rnd:
             # Obtain curiosity gates / observations from infos
             rnd_state = infos["observations"]["rnd_state"]
-            # Compute the intrinsic rewards
             # note: rnd_state is the gated_state after normalization if normalization is used
             self.intrinsic_rewards, rnd_state = self.rnd.get_intrinsic_reward(rnd_state)
-            # Add intrinsic rewards to extrinsic rewards
             self.transition.rewards += self.intrinsic_rewards
             # Record the curiosity gates
             self.transition.rnd_state = rnd_state.clone()
@@ -168,13 +155,11 @@ class PPO:
                 self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
             )
 
-        # record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.policy.reset(dones)
 
     def compute_returns(self, last_critic_obs):
-        # compute value for the last step
         last_values = self.policy.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(
             last_values, self.gamma, self.lam, normalize_advantage=not self.normalize_advantage_per_mini_batch
@@ -195,13 +180,11 @@ class PPO:
         else:
             mean_symmetry_loss = None
 
-        # generator for mini batches
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
-        # iterate over batches
         for (
             obs_batch,
             critic_obs_batch,
@@ -220,17 +203,14 @@ class PPO:
             # number of augmentations per sample
             # we start with 1 and increase it if we use symmetry augmentation
             num_aug = 1
-            # original batch size
             original_batch_size = obs_batch.shape[0]
 
-            # check if we should normalize advantages per mini batch
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
                     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
 
             # Perform symmetric augmentation
             if self.symmetry and self.symmetry["use_data_augmentation"]:
-                # augmentation using symmetry
                 data_augmentation_func = self.symmetry["data_augmentation_func"]
                 # returned shape: [batch_size * num_aug, ...]
                 obs_batch, actions_batch = data_augmentation_func(
@@ -239,7 +219,6 @@ class PPO:
                 critic_obs_batch, _ = data_augmentation_func(
                     obs=critic_obs_batch, actions=None, env=self.symmetry["_env"], obs_type="critic"
                 )
-                # compute number of augmentations per sample
                 num_aug = int(obs_batch.shape[0] / original_batch_size)
                 # repeat the rest of the batch
                 # -- actor
@@ -329,7 +308,6 @@ class PPO:
                     obs_batch, _ = data_augmentation_func(
                         obs=obs_batch, actions=None, env=self.symmetry["_env"], obs_type="policy"
                     )
-                    # compute number of augmentations per sample
                     num_aug = int(obs_batch.shape[0] / original_batch_size)
 
                 # actions predicted by the actor for symmetrically-augmented observations
@@ -349,7 +327,6 @@ class PPO:
                 symmetry_loss = mse_loss(
                     mean_actions_batch[original_batch_size:], actions_mean_symm_batch.detach()[original_batch_size:]
                 )
-                # add the loss to the total loss
                 if self.symmetry["use_mirror_loss"]:
                     loss += self.symmetry["mirror_loss_coeff"] * symmetry_loss
                 else:
@@ -357,10 +334,8 @@ class PPO:
 
             # Random Network Distillation loss
             if self.rnd:
-                # predict the embedding and the target
                 predicted_embedding = self.rnd.predictor(rnd_state_batch)
                 target_embedding = self.rnd.target(rnd_state_batch).detach()
-                # compute the loss as the mean squared error
                 mseloss = torch.nn.MSELoss()
                 rnd_loss = mseloss(predicted_embedding, target_embedding)
 
@@ -407,10 +382,8 @@ class PPO:
         # -- For Symmetry
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
-        # -- Clear the storage
         self.storage.clear()
 
-        # construct the loss dictionary
         loss_dict = {
             "value_function": mean_value_loss,
             "surrogate": mean_surrogate_loss,
@@ -429,13 +402,10 @@ class PPO:
 
     def broadcast_parameters(self):
         """Broadcast model parameters to all GPUs."""
-        # obtain the model parameters on current GPU
         model_params = [self.policy.state_dict()]
         if self.rnd:
             model_params.append(self.rnd.predictor.state_dict())
-        # broadcast the model parameters
         torch.distributed.broadcast_object_list(model_params, src=0)
-        # load the model parameters on all GPUs from source GPU
         self.policy.load_state_dict(model_params[0])
         if self.rnd:
             self.rnd.predictor.load_state_dict(model_params[1])
@@ -445,7 +415,6 @@ class PPO:
 
         This function is called after the backward pass to synchronize the gradients across all GPUs.
         """
-        # Create a tensor to store the gradients
         grads = [param.grad.view(-1) for param in self.policy.parameters() if param.grad is not None]
         if self.rnd:
             grads += [param.grad.view(-1) for param in self.rnd.parameters() if param.grad is not None]
@@ -455,7 +424,6 @@ class PPO:
         torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
         all_grads /= self.gpu_world_size
 
-        # Get all parameters
         all_params = self.policy.parameters()
         if self.rnd:
             all_params = chain(all_params, self.rnd.parameters())
@@ -467,5 +435,4 @@ class PPO:
                 numel = param.numel()
                 # copy data back from shared buffer
                 param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
-                # update the offset for the next parameter
                 offset += numel

@@ -9,13 +9,13 @@ from collections import deque
 import safe_rl
 from safe_rl.algorithms import PPO, Distillation
 from safe_rl.algorithms.cpo import CPO
-from safe_rl.algorithms.pcpo import PCPO
+from safe_rl.algorithms.pcpo import PCPO  # noqa: F401
 from safe_rl.algorithms.p3o import P3O
 from safe_rl.algorithms.ppol_pid import PPOL_PID
 from safe_rl.algorithms.fppo import FPPO
 from safe_rl.algorithms.reppo import REPPO
 from safe_rl.envs import VecEnv
-from safe_rl.modules import (
+from safe_rl.modules import (  # noqa: F401
     ActorCritic,
     ActorCriticRecurrent,
     EmpiricalNormalization,
@@ -36,7 +36,6 @@ class OnPolicyRunner:
         self.device = device
         self.env = env
 
-        # check if multi-gpu is enabled
         self._configure_multi_gpu()
 
         # resolve training type depending on the algorithm
@@ -105,13 +104,10 @@ class OnPolicyRunner:
 
         # resolve dimension of rnd gated state
         if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
-            # check if rnd gated state is present
             rnd_state = extras["observations"].get("rnd_state")
             if rnd_state is None:
                 raise ValueError("Observations for the key 'rnd_state' not found in infos['observations'].")
-            # get dimension of rnd gated state
             num_rnd_state = rnd_state.shape[1]
-            # add rnd gated state to config
             self.alg_cfg["rnd_cfg"]["num_states"] = num_rnd_state
             # scale down the rnd weight with timestep (similar to how rewards are scaled down in legged_gym envs)
             self.alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt
@@ -141,7 +137,7 @@ class OnPolicyRunner:
         else:
             self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
             self.privileged_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
-        
+
         # init storage and model
         self.alg.init_storage(
             self.training_type,
@@ -195,7 +191,6 @@ class OnPolicyRunner:
             else:
                 raise ValueError("Logger type not found. Please choose 'wandb' or 'tensorboard'.")
 
-        # check if teacher is loaded
         if self.training_type == "distillation" and not self.alg.policy.loaded_teacher:
             raise ValueError("Teacher model parameters not loaded. Please load a teacher model to distill.")
 
@@ -209,7 +204,7 @@ class OnPolicyRunner:
         obs, extras = self.env.get_observations()
         privileged_obs = extras["observations"].get(self.privileged_obs_type, obs)
         obs, privileged_obs = obs.to(self.device), privileged_obs.to(self.device)
-        self.train_mode()  # switch to train mode (for dropout for example)
+        self.train_mode()
 
         # Book keeping
         ep_infos = []
@@ -224,7 +219,6 @@ class OnPolicyRunner:
             # Initialize separate cost buffers for each constraint
             num_costs = len(self.env.cost_limits) if hasattr(self.env, 'cost_limits') else 1
             if num_costs > 1:
-                # Create separate buffers for each constraint
                 costbuffers = [deque(maxlen=100) for _ in range(num_costs)]
                 cur_cost_sum = torch.zeros(self.env.num_envs, num_costs, dtype=torch.float, device=self.device)
             else:
@@ -252,22 +246,17 @@ class OnPolicyRunner:
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
-                    # Sample actions
                     actions = self.alg.act(obs, privileged_obs)
-                    # Apply CBF action filter if enabled
                     if self.cbf_filter is not None:
                         actions = self.cbf_filter.filter(actions, self.env)
-                    # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
-                    # Move to device
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
-                    
+
                     # Extract costs for SafeRL (if available)
                     if is_saferl:
                         # Support both "cost" (singular) and "costs" (plural) keys
                         costs = infos.get("costs", infos.get("cost", torch.zeros_like(rewards)))
                         costs = costs.to(self.device)
-                    # perform normalization
                     obs = self.obs_normalizer(obs)
                     if self.privileged_obs_type is not None:
                         privileged_obs = self.privileged_obs_normalizer(
@@ -276,7 +265,6 @@ class OnPolicyRunner:
                     else:
                         privileged_obs = obs
 
-                    # process the step
                     if is_saferl:
                         self.alg.process_env_step(rewards, costs, dones, infos)
                     elif isinstance(self.alg, REPPO):
@@ -305,7 +293,6 @@ class OnPolicyRunner:
                         # Update costs for SafeRL
                         if is_saferl:
                             cur_cost_sum += costs
-                        # Update episode length
                         cur_episode_length += 1
                         # Clear data for completed episodes
                         # -- common
@@ -316,17 +303,16 @@ class OnPolicyRunner:
                         cur_episode_length[new_ids] = 0
                         # -- costs for SafeRL
                         if is_saferl:
-                            if len(new_ids) > 0:  # Only process if there are finished episodes
+                            if len(new_ids) > 0:
                                 cost_tensor = cur_cost_sum[new_ids].cpu().numpy()
                                 if cost_tensor.ndim == 1:
                                     cost_tensor = cost_tensor[:, None]
-                                
+
                                 # Log each constraint separately
                                 for cost_idx in range(num_costs):
                                     if cost_idx < cost_tensor.shape[1]:  # Ensure we don't exceed dimensions
                                         constraint_costs = cost_tensor[:, cost_idx]
                                         costbuffers[cost_idx].extend(constraint_costs.tolist())
-                                        #print(f"DEBUG: Constraint {cost_idx} episode costs: {constraint_costs.tolist()}")
                             cur_cost_sum[new_ids] = 0
                         # -- intrinsic and extrinsic rewards
                         if self.alg.rnd:
@@ -358,19 +344,14 @@ class OnPolicyRunner:
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
-            # log info
-            if self.log_dir is not None and not self.disable_logs: 
-                # Log information
+            if self.log_dir is not None and not self.disable_logs:
                 self.log(locals())
-                # Save model
                 if it % self.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
-            # Clear episode infos
             ep_infos.clear()
             # Save code state
             if it == start_iter and not self.disable_logs:
-                # obtain all the diff files
                 git_file_paths = store_code_state(self.log_dir, self.git_status_repos)
                 # if possible store them to wandb
                 if self.logger_type == "wandb" and git_file_paths:
@@ -382,9 +363,7 @@ class OnPolicyRunner:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
-        # Compute the collection size
         collection_size = self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
-        # Update total time-steps and time
         self.tot_timesteps += collection_size
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
@@ -441,7 +420,7 @@ class OnPolicyRunner:
             is_saferl = isinstance(self.alg, (P3O, PPOL_PID, CPO, FPPO))
             if is_saferl and "costbuffers" in locs:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
-                
+
                 # Log each constraint separately
                 mean_costs = []
                 total_violations = 0
@@ -449,7 +428,7 @@ class OnPolicyRunner:
                     if len(cost_buffer) > 0:
                         mean_cost = statistics.mean(cost_buffer)
                         mean_costs.append(mean_cost)
-                        
+
                         # Log individual constraint metrics
                         self.writer.add_scalar(f"SafeRL/mean_cost_constraint_{cost_idx}", mean_cost, locs["it"])
                         self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, locs["it"])  # For cross-algorithm comparison
@@ -457,43 +436,43 @@ class OnPolicyRunner:
                         if penalty_info:
                             cost_limit = penalty_info["cost_limits"][cost_idx]
                             kappa = penalty_info["kappa_list"][cost_idx]
-                            
+
                             # Log individual constraint parameters
                             self.writer.add_scalar(f"SafeRL/cost_limit_constraint_{cost_idx}", cost_limit, locs["it"])
                             self.writer.add_scalar(f"SafeRL/penalty_factor_constraint_{cost_idx}", kappa, locs["it"])
-                            
+
                             # Constraint violation for this specific constraint
                             violation = mean_cost > cost_limit
                             self.writer.add_scalar(f"SafeRL/violation_constraint_{cost_idx}", float(violation), locs["it"])
-                            
+
                             # Normalized cost ratio (cost/limit) - more meaningful than absolute values
                             cost_ratio = mean_cost / cost_limit if cost_limit > 0 else 0
                             self.writer.add_scalar(f"SafeRL/cost_ratio_constraint_{cost_idx}", cost_ratio, locs["it"])
-                            
+
                             if violation:
                                 total_violations += 1
-                
+
                 # Log overall constraint violation status
                 if penalty_info:
                     self.writer.add_scalar("SafeRL/total_violations", total_violations, locs["it"])
                     self.writer.add_scalar("SafeRL/penalty_factor_avg", penalty_info["kappa"], locs["it"])
-                
+
                 # Log overall mean cost under Train/ (average across constraints)
                 if mean_costs:
                     self.writer.add_scalar("Train/mean_cost", statistics.mean(mean_costs), locs["it"])
-                    
+
                     # PPOL_PID specific logging
                     if isinstance(self.alg, PPOL_PID) and "pid_gains" in penalty_info:
                         kp, ki, kd = penalty_info["pid_gains"]
                         self.writer.add_scalar("SafeRL/PID_Kp", kp, locs["it"])
                         self.writer.add_scalar("SafeRL/PID_Ki", ki, locs["it"])
                         self.writer.add_scalar("SafeRL/PID_Kd", kd, locs["it"])
-                        
+
                         # Log lambda statistics
                         self.writer.add_scalar("SafeRL/lambda_mean", penalty_info["lambda_mean"], locs["it"])
                         self.writer.add_scalar("SafeRL/lambda_max", penalty_info["lambda_max"], locs["it"])
                         self.writer.add_scalar("SafeRL/lambda_min", penalty_info["lambda_min"], locs["it"])
-                        
+
                         # Log integral errors for PID
                         for cost_idx, integral_error in enumerate(penalty_info["integral_errors"]):
                             self.writer.add_scalar(f"SafeRL/integral_error_constraint_{cost_idx}", integral_error, locs["it"])
@@ -529,21 +508,21 @@ class OnPolicyRunner:
             # -- SafeRL costs (individual constraints)
             if is_saferl and "costbuffers" in locs:
                 penalty_info = self.alg.get_penalty_info() if hasattr(self.alg, "get_penalty_info") else None
-                
+
                 # Display each constraint separately
                 for cost_idx, cost_buffer in enumerate(locs["costbuffers"]):
                     if len(cost_buffer) > 0:
                         mean_cost = statistics.mean(cost_buffer)
-                        
+
                         if penalty_info:
                             cost_limit = penalty_info["cost_limits"][cost_idx]
                             kappa = penalty_info["kappa_list"][cost_idx]
                             violation_status = "VIOLATION" if mean_cost > cost_limit else "OK"
                             cost_ratio = mean_cost / cost_limit if cost_limit > 0 else 0
-                            
+
                             log_string += f"""{'Constraint %d cost:' % cost_idx:>{pad}} {mean_cost:.3f} (ratio: {cost_ratio:.2f})\n"""
                             log_string += f"""{'Constraint %d status:' % cost_idx:>{pad}} {violation_status} (limit: {cost_limit:.2f})\n"""
-                            
+
                             # Display kappa (penalty factor for P3O, lambda for PPOL_PID)
                             if isinstance(self.alg, PPOL_PID):
                                 log_string += f"""{'Constraint %d λ:' % cost_idx:>{pad}} {kappa:.3f}\n"""
@@ -551,18 +530,18 @@ class OnPolicyRunner:
                                 log_string += f"""{'Constraint %d κ:' % cost_idx:>{pad}} {kappa:.3f}\n"""
                         else:
                             log_string += f"""{'Constraint %d cost:' % cost_idx:>{pad}} {mean_cost:.3f}\n"""
-                
+
                 # PPOL_PID specific console logging
                 if isinstance(self.alg, PPOL_PID) and penalty_info and "pid_gains" in penalty_info:
                     kp, ki, kd = penalty_info["pid_gains"]
                     log_string += f"""{'PID gains (Kp,Ki,Kd):':>{pad}} ({kp:.4f}, {ki:.6f}, {kd:.3f})\n"""
                     log_string += f"""{'Lambda (λ) stats:':>{pad}} mean={penalty_info['lambda_mean']:.3f}, max={penalty_info['lambda_max']:.3f}, min={penalty_info['lambda_min']:.3f}\n"""
-                    
+
                     # Show integral errors if available
                     if "integral_errors" in penalty_info and penalty_info["integral_errors"]:
                         integral_str = ", ".join([f"{err:.3f}" for err in penalty_info["integral_errors"]])
                         log_string += f"""{'Integral errors:':>{pad}} [{integral_str}]\n"""
-            
+
             # -- episode info
             log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
         else:
@@ -609,7 +588,6 @@ class OnPolicyRunner:
             saved_dict["obs_norm_state_dict"] = self.obs_normalizer.state_dict()
             saved_dict["privileged_obs_norm_state_dict"] = self.privileged_obs_normalizer.state_dict()
 
-        # save model
         torch.save(saved_dict, path)
 
         # upload model to external logging service
@@ -648,7 +626,7 @@ class OnPolicyRunner:
         return loaded_dict["infos"]
 
     def get_inference_policy(self, device=None):
-        self.eval_mode()  # switch to evaluation mode (dropout for example)
+        self.eval_mode()
         if device is not None:
             self.alg.policy.to(device)
         policy = self.alg.policy.act_inference
@@ -700,11 +678,9 @@ class OnPolicyRunner:
             self.multi_gpu_cfg = None
             return
 
-        # get rank and world size
         self.gpu_local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.gpu_global_rank = int(os.getenv("RANK", "0"))
 
-        # make a configuration dictionary
         self.multi_gpu_cfg = {
             "global_rank": self.gpu_global_rank,  # rank of the main process
             "local_rank": self.gpu_local_rank,  # rank of the current process
@@ -726,7 +702,5 @@ class OnPolicyRunner:
                 f"Global rank '{self.gpu_global_rank}' is greater than or equal to world size '{self.gpu_world_size}'."
             )
 
-        # initialize torch distributed
         torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
-        # set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)

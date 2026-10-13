@@ -64,12 +64,12 @@ class ActorCritic(nn.Module):
         self.num_critics = num_critics
         self.num_costs = num_costs
 
-        # ==================== Actor ====================
+        # Actor
         if actor_type == "deterministic":
             self.is_deterministic_actor = True
             # Extract noise parameters for deterministic actor
-            self.std_max = actor_kwargs.pop("std_max", 1.0)
-            self.std_min = actor_kwargs.pop("std_min", 0.1)
+            actor_kwargs.pop("std_max", 1.0)
+            actor_kwargs.pop("std_min", 0.1)
             init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
 
             self.actor = DeterministicActor(
@@ -96,7 +96,7 @@ class ActorCritic(nn.Module):
         else:
             self.actor_obs_normalizer = nn.Identity()
 
-        # ==================== Critic ====================
+        # Critic
         if critic_type == "standard":
             self.is_distributional_critic = False
             self.critics = nn.ModuleList(
@@ -129,7 +129,7 @@ class ActorCritic(nn.Module):
         else:
             self.critic_obs_normalizer = nn.Identity()
 
-        # ==================== Cost critic (optional) ====================
+        # Cost critic (optional)
         # Built only for safe RL algorithms; runner injects num_costs from len(cost_limits).
         if num_costs > 0:
             loss_type = cost_critic_kwargs.pop("loss_type", "mse")
@@ -186,20 +186,6 @@ class ActorCritic(nn.Module):
         if not self.is_distributional_critic:
             raise RuntimeError("logits only available for distributional critic")
         return self._logits
-
-    @property
-    def value_dist(self) -> torch.Tensor:
-        """Return cached value distribution from last evaluate call (distributional critic only)."""
-        if not self.is_distributional_critic:
-            raise RuntimeError("value_dist only available for distributional critic")
-        return self._value_dist
-
-    @property
-    def cost_logits(self) -> torch.Tensor:
-        """Return cached cost logits from last evaluate_cost call (HL-Gauss cost critic only)."""
-        if self.cost_critic_loss_type != "hlgauss":
-            raise RuntimeError("cost_logits only available when cost_critic loss_type is 'hlgauss'")
-        return self._cost_logits
 
     def update_distribution(self, observations: torch.Tensor) -> None:
         """Update the action distribution (for Gaussian actor only)."""
@@ -280,53 +266,9 @@ class ActorCritic(nn.Module):
             # Always decode as the expected value here. GAE requires an unbiased
             # baseline, so the standard `evaluate_cost` path must not return CVaR
             # (which is the upper-tail expectation and biases A_C globally negative,
-            # closing the P3O ReLU gate). Risk-sensitive callers should call
-            # `evaluate_cost_cvar` explicitly.
+            # closing the P3O ReLU gate).
             return self.cost_critic.expected_value(logits)
         return self.cost_critic(critic_observations)
-
-    def evaluate_cost_cvar(
-        self,
-        critic_observations: torch.Tensor,
-        alpha: float | None = None,
-        **kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        """Risk-sensitive cost-value evaluation (HL-Gauss critic only).
-
-        Decodes the predicted cost-return distribution as CVaR over the worst
-        ``alpha`` tail. Used by safety-gate / κ-adaptation logic that wants to
-        react to predicted catastrophic outcomes; *not* used as the GAE baseline.
-
-        Args:
-            critic_observations: same shape contract as ``evaluate_cost``.
-            alpha: tail fraction in (0, 1]. Defaults to ``self.cost_critic.cvar_alpha``
-                if set on the critic; raises if neither is provided.
-        """
-        if self.cost_critic is None:
-            raise RuntimeError("evaluate_cost_cvar requires num_costs > 0 (no cost_critic was built)")
-        if self.cost_critic_loss_type != "hlgauss":
-            raise RuntimeError(
-                "evaluate_cost_cvar requires the HL-Gauss cost critic; "
-                f"got loss_type={self.cost_critic_loss_type!r}"
-            )
-        if alpha is None:
-            alpha = getattr(self.cost_critic, "cvar_alpha", None)
-        if alpha is None:
-            raise ValueError(
-                "evaluate_cost_cvar called without an alpha; either pass alpha=... "
-                "or set cost_critic.cvar_alpha"
-            )
-        critic_observations = self.critic_obs_normalizer(critic_observations)
-        logits = self.cost_critic(critic_observations)
-        self._cost_logits = logits
-        return self.cost_critic.cvar_value(logits, alpha)
-
-    def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        """Update observation normalizers."""
-        if self.actor_obs_normalization:
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
-            self.critic_obs_normalizer.update(critic_obs)
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load the parameters of the actor-critic model.

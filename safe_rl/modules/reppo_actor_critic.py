@@ -150,7 +150,7 @@ class REPPOActorCritic(nn.Module):
             raise RuntimeError("distribution accessed before act()")
         return self._distribution
 
-    # ---------------- Sampling ----------------
+    # Sampling
 
     def _build_distribution(self, obs: torch.Tensor, target: bool = False) -> Normal:
         actor = self.actor_target if target else self.actor
@@ -201,12 +201,7 @@ class REPPOActorCritic(nn.Module):
             log_prob = dist.log_prob(action).sum(dim=-1)
         return action, log_prob
 
-    def current_distribution_params(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        obs = self.actor_obs_normalizer(obs)
-        dist = self._build_distribution(obs, target=False)
-        return dist.mean, dist.scale
-
-    # ---------------- Q evaluation ----------------
+    # Q evaluation
 
     def evaluate_q(
         self, critic_obs: torch.Tensor, actions: torch.Tensor
@@ -248,7 +243,7 @@ class REPPOActorCritic(nn.Module):
         obs = self.critic_obs_normalizer(critic_obs)
         return self.critic_1(obs, actions), self.critic_2(obs, actions)
 
-    # ---------------- Polyak updates ----------------
+    # Polyak updates
 
     def soft_update_targets(self, tau: float) -> None:
         for critic, target in zip(self.critics, self.critic_targets):
@@ -258,9 +253,3 @@ class REPPOActorCritic(nn.Module):
     def soft_update_actor_target(self, tau: float) -> None:
         for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
             target_param.data.mul_(1.0 - tau).add_(param.data, alpha=tau)
-
-    def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        if self.actor_obs_normalization:
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
-            self.critic_obs_normalizer.update(critic_obs)

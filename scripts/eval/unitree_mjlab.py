@@ -26,7 +26,6 @@ def _add_unitree_repo_to_path() -> None:
 
 _add_unitree_repo_to_path()
 
-import mjlab  # noqa: E402
 import mjlab.tasks  # noqa: E402,F401
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg  # noqa: E402
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks  # noqa: E402
@@ -45,7 +44,6 @@ from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
 
 
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
-
 
 
 def convert_mjlab_ppo_cfg(agent_cfg: Any) -> dict[str, Any]:

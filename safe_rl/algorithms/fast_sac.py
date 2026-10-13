@@ -20,9 +20,7 @@ from safe_rl.modules.sac_actor_critic import SACActorCritic
 from safe_rl.storage.replay_storage import ReplayStorage
 
 
-# ---------------------------------------------------------------------------
 # Compiled loss functions (standalone for maximum torch.compile benefit)
-# ---------------------------------------------------------------------------
 
 
 @torch.compile
@@ -170,9 +168,7 @@ def _actor_loss_fn(
     return actor_loss, log_prob.detach().mean()
 
 
-# ---------------------------------------------------------------------------
 # FastSAC algorithm
-# ---------------------------------------------------------------------------
 
 
 class FastSAC:
@@ -368,7 +364,6 @@ class FastSAC:
         alpha_val = self.alpha
 
         for update_idx in range(self.num_updates_per_step):
-            # Sample batch
             batch = self.storage.sample(self.batch_size)
             obs = batch["observations"]
             critic_obs = batch.get("critic_observations", obs)
@@ -394,7 +389,6 @@ class FastSAC:
                     else:
                         rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
-            # Update critics
             critic_loss = self._update_critic(
                 obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs, alpha_val
             )
@@ -411,13 +405,11 @@ class FastSAC:
                     total_alpha_loss += alpha_loss
                     alpha_val = self.alpha  # refresh
 
-            # Vectorized soft update
             self._soft_update()
 
         num_updates = self.num_updates_per_step
         actor_denom = max(actor_updates, 1)
 
-        # Compute noise_std from the policy
         noise_std = self.policy.std.mean().item()
 
         return {

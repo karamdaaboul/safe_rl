@@ -70,7 +70,7 @@ class SACActorCritic(nn.Module):
         self.critic_type = critic_type
         self.num_critics = num_critics
 
-        # ==================== Actor ====================
+        # Actor
         init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
 
         if actor_type == "stochastic":
@@ -97,7 +97,7 @@ class SACActorCritic(nn.Module):
         else:
             self.actor_obs_normalizer = nn.Identity()
 
-        # ==================== Critics ====================
+        # Critics
         if critic_type == "standard":
             self.is_distributional_critic = False
             critic_kwargs.setdefault("hidden_dims", [256, 256])
@@ -126,7 +126,6 @@ class SACActorCritic(nn.Module):
 
         print(f"SAC Critic: {self.critics[0]}")
 
-        # Create target networks
         self.critic_targets = nn.ModuleList(
             deepcopy(critic) for critic in self.critics
         )
@@ -167,13 +166,6 @@ class SACActorCritic(nn.Module):
         if not self.is_distributional_critic:
             raise RuntimeError("logits only available for distributional critic")
         return self._logits
-
-    @property
-    def value_dist(self) -> torch.Tensor:
-        """Return cached value distribution from last evaluate call (distributional critic only)."""
-        if not self.is_distributional_critic:
-            raise RuntimeError("value_dist only available for distributional critic")
-        return self._value_dist
 
     def act(self, obs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """Sample actions from the policy.
@@ -284,21 +276,6 @@ class SACActorCritic(nn.Module):
 
         return q1_target, q2_target
 
-    def evaluate_q_target_dist(
-        self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate distributional Q-values from target networks.
-
-        Only available when critic_type='distributional'.
-        """
-        if not self.is_distributional_critic:
-            raise RuntimeError("evaluate_q_target_dist only available for distributional critics")
-
-        obs = self.critic_obs_normalizer(obs)
-        logits_1 = self.critic_1_target(obs, actions)
-        logits_2 = self.critic_2_target(obs, actions)
-        return logits_1, logits_2
-
     def soft_update_targets(self, tau: float) -> None:
         """Polyak averaging update for target networks.
 
@@ -327,10 +304,3 @@ class SACActorCritic(nn.Module):
             actor_normalizer=self.actor_obs_normalizer,
             verbose=verbose,
         )
-
-    def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        """Update observation normalizers."""
-        if self.actor_obs_normalization:
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
-            self.critic_obs_normalizer.update(critic_obs)

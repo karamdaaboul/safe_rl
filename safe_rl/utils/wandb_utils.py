@@ -57,7 +57,6 @@ class WandbSummaryWriter(SummaryWriter):
             settings=wandb.Settings(disable_git=True),
         )
 
-        # Add log directory to wandb
         wandb.config.update({"log_dir": log_dir})
 
         self.name_map = {

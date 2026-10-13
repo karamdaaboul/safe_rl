@@ -4,7 +4,6 @@ from typing import Any, Dict, Tuple
 
 import torch
 
-import gymnasium as gym
 import safety_gymnasium
 
 from .vec_env import VecEnv
@@ -217,8 +216,3 @@ class SafetyGymnasiumVecEnv(VecEnv):
                         stacked[i] = np.asarray(fo, dtype=np.float32)
                 extras["final_observation"] = torch.as_tensor(stacked, device=self.device)
         return extras
-
-
-
-
-

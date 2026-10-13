@@ -127,13 +127,11 @@ class StudentTeacher(nn.Module):
             # also load recurrent memory if teacher is recurrent
             if self.is_recurrent and self.teacher_recurrent:
                 raise NotImplementedError("Loading recurrent memory for the teacher is not implemented yet")  # TODO
-            # set flag for successfully loading the parameters
             self.loaded_teacher = True
             self.teacher.eval()
             return False
         elif any("student" in key for key in state_dict.keys()):  # loading parameters from distillation training
             super().load_state_dict(state_dict, strict=strict)
-            # set flag for successfully loading the parameters
             self.loaded_teacher = True
             self.teacher.eval()
             return True

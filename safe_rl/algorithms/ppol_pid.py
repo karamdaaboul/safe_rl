@@ -135,7 +135,6 @@ class PPOL_PID(PPO):
             deque([0.0], maxlen=pid_d_delay) for _ in range(self.num_costs)
         ]
 
-        # Validate cost critic
         self._validate_and_fix_cost_critic()
 
         # CMDP transition replaces PPO's plain RolloutStorage.Transition. The
@@ -163,12 +162,6 @@ class PPOL_PID(PPO):
             num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape,
             training_type=training_type, cost_shape=cost_shape, device=self.device
         )
-
-    def test_mode(self) -> None:
-        self.policy.eval()
-
-    def train_mode(self) -> None:
-        self.policy.train()
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
         # Reuse PPO.act for actions/value/log-prob/obs bookkeeping, then add the
@@ -203,7 +196,6 @@ class PPOL_PID(PPO):
         - pid_d: Delayed difference of EMA-smoothed costs (derivative term)
         """
         for cost_idx in range(self.num_costs):
-            # Get current cost value
             if isinstance(current_costs[cost_idx], torch.Tensor):
                 current_cost = float(current_costs[cost_idx].item())
             else:
@@ -214,18 +206,17 @@ class PPOL_PID(PPO):
             # Calculate error (delta): positive means violation
             delta = current_cost - cost_limit
 
-            # === Integral term (I) ===
+            # Integral term (I)
             # Accumulate Ki * delta directly (OmniSafe style)
             self.pid_i[cost_idx] = max(0.0, self.pid_i[cost_idx] + delta * self.ki)
-            # Apply diff_norm clipping if enabled
             if self.diff_norm:
                 self.pid_i[cost_idx] = max(0.0, min(1.0, self.pid_i[cost_idx]))
 
-            # === Proportional term (P) with EMA smoothing ===
+            # Proportional term (P) with EMA smoothing
             alpha_p = self.pid_delta_p_ema_alpha
             self.delta_p[cost_idx] = alpha_p * self.delta_p[cost_idx] + (1 - alpha_p) * delta
 
-            # === Derivative term (D) with EMA smoothing and delay ===
+            # Derivative term (D) with EMA smoothing and delay
             alpha_d = self.pid_delta_d_ema_alpha
             self.cost_ema[cost_idx] = alpha_d * self.cost_ema[cost_idx] + (1 - alpha_d) * current_cost
 
@@ -235,7 +226,7 @@ class PPOL_PID(PPO):
             else:
                 pid_d = 0.0
 
-            # === Compute PID output (this IS the new lambda, not added to it) ===
+            # Compute PID output (this IS the new lambda, not added to it)
             pid_output = self.kp * self.delta_p[cost_idx] + self.pid_i[cost_idx] + self.kd * pid_d
 
             # Apply constraints
@@ -264,7 +255,6 @@ class PPOL_PID(PPO):
          returns_cost_batch, old_actions_log_prob_batch,
          old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, rnd_state_batch) = batch
 
-        # Normalize advantages per mini-batch if enabled
         if self.normalize_advantage_per_mini_batch:
             with torch.no_grad():
                 advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
@@ -301,17 +291,15 @@ class PPOL_PID(PPO):
                 kl_mean = torch.mean(kl)
                 self._adjust_learning_rate(kl_mean)
 
-        # Importance sampling ratio
         ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
 
-        # === OmniSafe-style normalized surrogate computation ===
+        # OmniSafe-style normalized surrogate computation
         # Compute combined advantage: (adv_r - λ * adv_c) / (1 + λ)
         # This is the key difference from standard PPO-Lagrangian
 
         # Sum of Lagrangian multipliers for normalization
         total_lambda = sum(self.lambdas)
 
-        # Compute weighted cost advantage
         weighted_cost_advantage = torch.zeros_like(torch.squeeze(advantages_batch))
         for cost_idx in range(self.num_costs):
             cost_advantage = torch.squeeze(cost_advantages_batch[:, cost_idx])
@@ -359,17 +347,13 @@ class PPOL_PID(PPO):
 
         total_cost_critic_loss = self.cost_loss_coef * cost_losses_all.sum()
 
-        # Total loss
         critic_loss = self.value_loss_coef * value_loss
         total_loss = policy_loss + critic_loss + total_cost_critic_loss - self.entropy_coef * entropy_batch.mean()
 
-        # Optimization step
         self.optimizer.zero_grad()
         total_loss.backward()
         nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
         self.optimizer.step()
-
-        # Don't update Lagrangian multipliers here - moved to update() method to avoid too frequent updates
 
         return value_loss.item(), total_cost_critic_loss.item(), surrogate_loss.item()
 
@@ -491,10 +475,6 @@ class PPOL_PID(PPO):
             "delta_p": self.delta_p,  # Smoothed proportional term
             "integral_errors": self.pid_i,  # Alias for runner compatibility
         }
-
-    def get_lagrangian_info(self) -> Dict[str, Any]:
-        """Get Lagrangian multiplier information for logging (legacy method)."""
-        return self.get_penalty_info()
 
     def _validate_and_fix_cost_critic(self) -> None:
         """Validate cost critic output dimensions."""

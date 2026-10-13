@@ -275,25 +275,21 @@ class SAC:
                     else:
                         rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
-            # Update critic
             critic_loss = self._update_critic(
                 obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs,
                 bootstrap=bootstrap, effective_n_steps=effective_n_steps,
             )
             total_critic_loss += critic_loss
 
-            # Update actor and alpha
             if self.update_step % self.policy_frequency == 0:
                 actor_loss, alpha_loss = self._update_actor_and_alpha(obs, critic_obs)
                 total_actor_loss += actor_loss
                 total_alpha_loss += alpha_loss
                 actor_updates += 1
 
-            # Soft update target networks
             self.policy.soft_update_targets(self.tau)
             self.update_step += 1
 
-        # Average losses
         num_updates = self.num_updates_per_step
         actor_denominator = actor_updates if actor_updates > 0 else 1
         return {
@@ -410,7 +406,6 @@ class SAC:
         # Critic loss (MSE with 0.5 factor per SAC paper)
         critic_loss = 0.5 * F.mse_loss(q1, target_q) + 0.5 * F.mse_loss(q2, target_q)
 
-        # Optimize critics
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         nn.utils.clip_grad_norm_(
@@ -499,7 +494,6 @@ class SAC:
         critic_loss_2 = -torch.sum(target_dist * log_probs_2, dim=-1).mean()
         critic_loss = critic_loss_1 + critic_loss_2
 
-        # Optimize critics
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         nn.utils.clip_grad_norm_(
@@ -534,7 +528,6 @@ class SAC:
         # Equivalently, minimize α * log π - Q
         actor_loss = (self.alpha.detach() * log_prob - q_min).mean()
 
-        # Optimize actor
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         nn.utils.clip_grad_norm_(

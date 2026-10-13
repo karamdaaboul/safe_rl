@@ -125,9 +125,7 @@ class REPPO:
     def alpha_kl(self) -> torch.Tensor:
         return self.log_alpha_kl.exp()
 
-    # ------------------------------------------------------------------
     # Runner interface
-    # ------------------------------------------------------------------
 
     def init_storage(
         self,
@@ -148,12 +146,6 @@ class REPPO:
             device=self.device,
             store_next_obs=True,
         )
-
-    def test_mode(self) -> None:
-        self.policy.eval()
-
-    def train_mode(self) -> None:
-        self.policy.train()
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
         action = self.policy.act(obs).detach()
@@ -224,9 +216,7 @@ class REPPO:
         self.transition.clear()
         self.policy.reset(dones)
 
-    # ------------------------------------------------------------------
     # Soft-Q λ targets — computed once per update from frozen target actor
-    # ------------------------------------------------------------------
 
     def compute_returns(self, last_critic_obs: torch.Tensor) -> None:
         """Soft-Q λ-target.
@@ -284,9 +274,7 @@ class REPPO:
         # including the last). Keep the runner signature compatible.
         _ = last_critic_obs
 
-    # ------------------------------------------------------------------
     # Update — interleaved critic+actor per minibatch (matches paper).
-    # ------------------------------------------------------------------
 
     def update(self) -> dict[str, float]:
         with torch.no_grad():
@@ -329,9 +317,7 @@ class REPPO:
             "alpha_kl_loss": alpha_kl_loss_sum / max(n, 1),
         }
 
-    # ------------------------------------------------------------------
     # Critic update — HL-Gauss CE (distributional) or MSE (standard)
-    # ------------------------------------------------------------------
 
     def _update_critic(
         self, critic_obs: torch.Tensor, actions: torch.Tensor, returns: torch.Tensor
@@ -379,9 +365,7 @@ class REPPO:
         z = (cdf[..., -1:] - cdf[..., :1]).clamp_min(1e-8)
         return probs / z
 
-    # ------------------------------------------------------------------
     # Actor update — pathwise Q gradient + closed-form Gaussian KL
-    # ------------------------------------------------------------------
 
     def _update_actor(
         self,
@@ -446,9 +430,7 @@ class REPPO:
             "alpha_kl_loss": alpha_kl_loss.item(),
         }
 
-    # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
 
     def _set_critic_grad(self, requires_grad: bool) -> None:
         for param in self.policy.critics.parameters():

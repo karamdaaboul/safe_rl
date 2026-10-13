@@ -260,7 +260,6 @@ class DistributionalCritic(nn.Module):
         self.v_max = v_max
         # Register as buffer so it moves with the model to GPU/CPU
         self.register_buffer("q_support", torch.linspace(v_min, v_max, num_atoms))
-        self._device = device
 
         if network_kwargs is None:
             raise ValueError("`network_kwargs` is not allowed to be None")
@@ -289,7 +288,6 @@ class DistributionalCritic(nn.Module):
     def get_value(self, dist: torch.Tensor) -> torch.Tensor:
         return torch.sum(dist * self.q_support, dim=-1)
 
-    # @torch.compile()
     def project(
         self,
         next_dist: torch.Tensor,  # [batch, num_atoms]

@@ -97,7 +97,7 @@ class SafeSACActorCritic(nn.Module):
         self.num_reward_critics = num_reward_critics
         self.num_cost_critics = num_cost_critics
 
-        # ==================== Actor ====================
+        # Actor
         init_noise_std = actor_kwargs.pop("init_noise_std", 1.0)
 
         if actor_type == "stochastic":
@@ -121,7 +121,7 @@ class SafeSACActorCritic(nn.Module):
         else:
             self.actor_obs_normalizer = nn.Identity()
 
-        # ==================== Reward Critics (Twin Q-networks) ====================
+        # Reward Critics (Twin Q-networks)
         if critic_type != "standard":
             raise ValueError(f"Safe SAC only supports 'standard' critic_type, got: {critic_type}")
 
@@ -139,7 +139,6 @@ class SafeSACActorCritic(nn.Module):
 
         print(f"Safe SAC Reward Critic: {self.reward_critics[0]}")
 
-        # Create target networks for reward critics
         self.reward_critic_targets = nn.ModuleList(
             deepcopy(critic) for critic in self.reward_critics
         )
@@ -155,7 +154,7 @@ class SafeSACActorCritic(nn.Module):
         self.critic_1_target = self.reward_critic_targets[0]
         self.critic_2_target = self.reward_critic_targets[1] if num_reward_critics > 1 else self.reward_critic_targets[0]
 
-        # ==================== Cost Critics ====================
+        # Cost Critics
         cost_critic_kwargs.setdefault("hidden_dims", critic_kwargs.get("hidden_dims", [256, 256]))
         cost_critic_kwargs.setdefault("activation", critic_kwargs.get("activation", "relu"))
         cost_critic_kwargs.setdefault("layer_norm", critic_kwargs.get("layer_norm", False))
@@ -172,7 +171,6 @@ class SafeSACActorCritic(nn.Module):
 
         print(f"Safe SAC Cost Critic (num_costs={num_costs}): {self.cost_critics[0]}")
 
-        # Create target networks for cost critics
         self.cost_critic_targets = nn.ModuleList(
             deepcopy(critic) for critic in self.cost_critics
         )
@@ -330,10 +328,3 @@ class SafeSACActorCritic(nn.Module):
         """Sample random actions for initial exploration."""
         device = next(self.parameters()).device
         return torch.rand(num_envs, self.num_actions, device=device) * 2 - 1
-
-    def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        """Update observation normalizers."""
-        if self.actor_obs_normalization:
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
-            self.critic_obs_normalizer.update(critic_obs)

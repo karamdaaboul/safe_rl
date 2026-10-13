@@ -270,10 +270,3 @@ class SimbaV2(nn.Module):
             x = block(x)
         x = self.predictor(x)
         return x
-
-    def get_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Get intermediate features before the predictor head."""
-        x = self.embedder(x)
-        for block in self.blocks:
-            x = block(x)
-        return x

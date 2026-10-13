@@ -109,7 +109,6 @@ class P3O(PPO):
         else:
             self.kappa = kappa
 
-        # Validate and fix cost critic output dimensions
         self._validate_and_fix_cost_critic()
 
         # CVaR curriculum + gate anchor. cvar_alpha is the constant fallback when
@@ -201,12 +200,6 @@ class P3O(PPO):
             num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape,
             training_type=training_type, cost_shape=cost_shape, device=self.device
         )
-
-    def test_mode(self) -> None:
-        self.policy.eval()
-
-    def train_mode(self) -> None:
-        self.policy.train()
 
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
         # Reuse PPO.act for actions/value/log-prob/obs bookkeeping, then add the
@@ -348,7 +341,6 @@ class P3O(PPO):
                 "adv_cost_positive_frac": (cost_advantages_batch > 0).float().mean().item(),
             }
 
-        # Normalize advantages per mini-batch if enabled
         if self.normalize_advantage_per_mini_batch:
             with torch.no_grad():
                 advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
@@ -412,7 +404,6 @@ class P3O(PPO):
                 kl_mean = torch.mean(kl)
                 self._adjust_learning_rate(kl_mean)
 
-        # Calculate the importance sampling ratio
         ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
 
         # Cost surrogate calculation for multiple costs
@@ -464,7 +455,6 @@ class P3O(PPO):
         )
         surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-        # Total P3O policy loss
         policy_loss = surrogate_loss + total_cost_loss
 
         # Value function loss (standard PPO)
@@ -529,7 +519,6 @@ class P3O(PPO):
             })
             return batch_metrics
 
-        # Gradient step
         self.optimizer.zero_grad()
         total_loss.backward()
         # Clip the actor+value and the cost critic separately. A single
@@ -542,8 +531,6 @@ class P3O(PPO):
         if self.cost_critic_params:
             nn.utils.clip_grad_norm_(self.cost_critic_params, self.max_grad_norm)
         self.optimizer.step()
-
-        # Don't update penalty factors here - moved to update() method to avoid too frequent updates
 
         batch_metrics.update({
             "value_loss": value_loss.item(),
@@ -566,7 +553,6 @@ class P3O(PPO):
             if hasattr(self.policy, "cost_critic") and self.policy.cost_critic is not None:
                 self.policy.cost_critic.cvar_alpha = self._current_cvar_alpha
 
-        # Determine the appropriate generator based on whether the model is recurrent
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
@@ -580,7 +566,6 @@ class P3O(PPO):
                 metrics_sum[key] = metrics_sum.get(key, 0.0) + value
             n_batches += 1
 
-        # Average across mini-batches.
         mean_metrics = {key: value / max(n_batches, 1) for key, value in metrics_sum.items()}
 
         # Update penalty factors once per iteration (not per mini-batch)
@@ -610,7 +595,6 @@ class P3O(PPO):
         """
         self.transition.rewards = rewards.clone()
 
-        # Handle costs tensor formatting
         self.transition.costs = self._format_costs_tensor(costs)
 
         self.transition.dones = dones
@@ -622,14 +606,12 @@ class P3O(PPO):
             )
             # Bootstrap multiple costs with tensor operations
             timeout_mask = infos["time_outs"].unsqueeze(1).to(self.device)
-            # Expand timeout mask to match cost dimensions
             timeout_mask = timeout_mask.expand(-1, self.num_costs)
 
             if self.transition.cost_values is not None:
                 cost_bootstrap = self.gamma_cost * self.transition.cost_values * timeout_mask
                 self.transition.costs += cost_bootstrap
 
-        # Record the transition
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.policy.reset(dones)
@@ -692,7 +674,6 @@ class P3O(PPO):
         Validate that the cost critic outputs the correct number of cost values.
         If not, recreate the cost critic with the correct output dimension.
         """
-        # Check if the policy has a cost_critic attribute
         if not hasattr(self.policy, 'cost_critic'):
             raise ValueError("ActorCritic must have a cost_critic attribute for P3O algorithm")
 

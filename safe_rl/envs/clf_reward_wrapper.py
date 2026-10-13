@@ -104,7 +104,7 @@ class CLFRewardWrapper(VecEnv):
         self._left_pat = cfg.get("left_foot_pattern")
         self._right_pat = cfg.get("right_foot_pattern")
 
-    # -- VecEnv API: delegate everything except step() --------------------------------
+    # VecEnv API: delegate everything except step()
 
     @property
     def unwrapped(self) -> Any:
@@ -129,7 +129,7 @@ class CLFRewardWrapper(VecEnv):
         # the attributes set in __init__.
         return getattr(self.__dict__["env"], name)
 
-    # -- Core: shaped step -----------------------------------------------------------
+    # Core: shaped step
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         obs, base_reward, dones, extras = self.env.step(actions)
@@ -181,7 +181,7 @@ class CLFRewardWrapper(VecEnv):
 
         return obs, shaped, dones, extras
 
-    # -- State extraction ------------------------------------------------------------
+    # State extraction
 
     def _robot(self) -> Any:
         return self.unwrapped.scene[self.robot_name]

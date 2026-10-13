@@ -98,15 +98,11 @@ def store_code_state(logdir, repositories) -> list:
             t = repo.head.commit.tree
         except Exception:
             print(f"Could not find git repository in {repository_file_path}. Skipping.")
-            # skip if not a git repository
             continue
-        # get the name of the repository
         repo_name = pathlib.Path(repo.working_dir).name
         diff_file_name = os.path.join(git_log_dir, f"{repo_name}.diff")
-        # check if the diff file already exists
         if os.path.isfile(diff_file_name):
             continue
-        # write the diff file
         print(f"Storing git diff for '{repo_name}' in: {diff_file_name}")
         with open(diff_file_name, "x", encoding="utf-8") as f:
             content = f"--- git status ---\n{repo.git.status()} \n\n\n--- git diff ---\n{repo.git.diff(t)}"
@@ -133,7 +129,6 @@ def string_to_callable(name: str) -> Callable:
         mod_name, attr_name = name.split(":")
         mod = importlib.import_module(mod_name)
         callable_object = getattr(mod, attr_name)
-        # check if attribute is callable
         if callable(callable_object):
             return callable_object
         else:
@@ -144,55 +139,3 @@ def string_to_callable(name: str) -> Callable:
             f" 'module:attribute_name'\nWhile processing input '{name}', received the error:\n {e}."
         )
         raise ValueError(msg)
-
-
-class TensorAverageMeterDict:
-    """Accumulates tensor metrics and computes running averages.
-
-    Similar to FastSAC implementation - accumulates metrics across multiple
-    update steps, then averages and clears at logging intervals.
-    """
-
-    def __init__(self):
-        self.metrics = {}
-        self.counts = {}
-
-    def add(self, new_metrics: dict):
-        """Add new metric values to the accumulator.
-
-        Args:
-            new_metrics: Dictionary of metric names to values (tensors or scalars)
-        """
-        for key, value in new_metrics.items():
-            if isinstance(value, torch.Tensor):
-                value = value.detach()
-
-            if key not in self.metrics:
-                self.metrics[key] = value
-                self.counts[key] = 1
-            else:
-                self.metrics[key] = self.metrics[key] + value
-                self.counts[key] += 1
-
-    def mean_and_clear(self) -> dict:
-        """Compute mean of accumulated metrics and clear the accumulator.
-
-        Returns:
-            Dictionary of metric names to averaged values
-        """
-        averaged = {}
-        for key in self.metrics:
-            averaged[key] = self.metrics[key] / self.counts[key]
-            if isinstance(averaged[key], torch.Tensor):
-                averaged[key] = averaged[key].item()
-
-        # Clear after computing means
-        self.metrics.clear()
-        self.counts.clear()
-
-        return averaged
-
-    def clear(self):
-        """Clear all accumulated metrics."""
-        self.metrics.clear()
-        self.counts.clear()

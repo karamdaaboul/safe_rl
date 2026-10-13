@@ -66,10 +66,6 @@ class EmpiricalNormalization(nn.Module):
         self._var += rate * (var_x - self._var + delta_mean * (mean_x - self._mean))
         self._std = torch.sqrt(self._var)
 
-    @torch.jit.unused
-    def inverse(self, y):
-        return y * (self._std + self.eps) + self._mean
-
 
 class EmpiricalDiscountedVariationNormalization(nn.Module):
     """Reward normalization from Pathak's large scale study on PPO.
@@ -87,7 +83,6 @@ class EmpiricalDiscountedVariationNormalization(nn.Module):
 
     def forward(self, rew):
         if self.training:
-            # update discounected rewards
             avg = self.disc_avg.update(rew)
 
             # update moments from discounted rewards

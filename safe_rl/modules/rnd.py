@@ -66,10 +66,8 @@ class RandomNetworkDistillation(nn.Module):
                 - "final_step": The step at which the weight parameter is set to the final value.
                 - "final_value": The final value of the weight parameter.
         """
-        # initialize parent class
         super().__init__()
 
-        # Store parameters
         self.num_states = num_states
         self.num_outputs = num_outputs
         self.initial_weight = weight
@@ -88,16 +86,13 @@ class RandomNetworkDistillation(nn.Module):
         else:
             self.reward_normalizer = torch.nn.Identity()
 
-        # counter for the number of updates
         self.update_counter = 0
 
-        # resolve weight schedule
         if weight_schedule is not None:
             self.weight_scheduler_params = weight_schedule
             self.weight_scheduler = getattr(self, f"_{weight_schedule['mode']}_weight_schedule")
         else:
             self.weight_scheduler = None
-        # Create network architecture
         self.predictor = self._build_mlp(num_states, predictor_hidden_dims, num_outputs, activation).to(self.device)
         self.target = self._build_mlp(num_states, target_hidden_dims, num_outputs, activation).to(self.device)
 
@@ -107,22 +102,17 @@ class RandomNetworkDistillation(nn.Module):
     def get_intrinsic_reward(self, rnd_state) -> tuple[torch.Tensor, torch.Tensor]:
         # note: the counter is updated number of env steps per learning iteration
         self.update_counter += 1
-        # Normalize rnd state
         rnd_state = self.state_normalizer(rnd_state)
-        # Obtain the embedding of the rnd state from the target and predictor networks
         target_embedding = self.target(rnd_state).detach()
         predictor_embedding = self.predictor(rnd_state).detach()
         # Compute the intrinsic reward as the distance between the embeddings
         intrinsic_reward = torch.linalg.norm(target_embedding - predictor_embedding, dim=1)
-        # Normalize intrinsic reward
         intrinsic_reward = self.reward_normalizer(intrinsic_reward)
 
-        # Check the weight schedule
         if self.weight_scheduler is not None:
             self.weight = self.weight_scheduler(step=self.update_counter, **self.weight_scheduler_params)
         else:
             self.weight = self.initial_weight
-        # Scale intrinsic reward
         intrinsic_reward *= self.weight
 
         return intrinsic_reward, rnd_state
@@ -131,7 +121,6 @@ class RandomNetworkDistillation(nn.Module):
         raise RuntimeError("Forward method is not implemented. Use get_intrinsic_reward instead.")
 
     def train(self, mode: bool = True):
-        # sets module into training mode
         self.predictor.train(mode)
         if self.state_normalization:
             self.state_normalizer.train(mode)
@@ -151,10 +140,8 @@ class RandomNetworkDistillation(nn.Module):
         """Builds target and predictor networks"""
 
         network_layers = []
-        # resolve hidden dimensions
         # if dims is -1 then we use the number of observations
         hidden_dims = [input_dims if dim == -1 else dim for dim in hidden_dims]
-        # resolve activation function
         activation = resolve_nn_activation(activation_name)
         # first layer
         network_layers.append(nn.Linear(input_dims, hidden_dims[0]))

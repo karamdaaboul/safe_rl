@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import torch
 import yaml

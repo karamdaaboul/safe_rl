@@ -196,7 +196,6 @@ class OffPolicyRunner:
                 "(cost aggregation is not implemented in NStepReturnAggregator)."
             )
 
-        # Create logger
         self.logger = Logger(
             log_dir=log_dir,
             cfg=self.cfg,
@@ -210,7 +209,6 @@ class OffPolicyRunner:
         self.current_learning_iteration = 0
         self.tot_timesteps = 0
 
-        # Reset environment
         _, _ = self.env.reset()
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
@@ -270,7 +268,6 @@ class OffPolicyRunner:
                         else:
                             action = self.actor_critic.act_with_noise(obs_for_policy)
 
-                    # Step environment
                     next_obs, rewards, dones, infos = self.env.step(action.to(self.env.device))
                     next_obs = next_obs.to(self.device)
                     rewards = rewards.to(self.device)
@@ -379,12 +376,10 @@ class OffPolicyRunner:
                             next_critic_obs=next_critic_obs,
                         )
 
-                    # Update current observation
                     obs = next_obs
                     critic_obs = next_critic_obs
                     global_step += self.env.num_envs
 
-                    # Update logger episode buffers
                     self.logger.process_env_step(rewards, dones, infos, costs=costs)
 
             stop = time.time()
@@ -463,7 +458,6 @@ class OffPolicyRunner:
             stop = time.time()
             learn_time = stop - start
 
-            # Update counters
             self.tot_timesteps = global_step
             self.current_learning_iteration = it
 
@@ -644,7 +638,7 @@ class OffPolicyRunner:
                 f"    {'cost_limits:':<28} {alg.cost_limits}",
             ]
             if hasattr(alg, 'lambdas'):
-                lambda_str = ", ".join([f"{l:.4f}" for l in alg.lambdas])
+                lambda_str = ", ".join([f"{lam:.4f}" for lam in alg.lambdas])
                 lines.append(f"    {'lambdas:':<28} [{lambda_str}]")
 
         # Storage

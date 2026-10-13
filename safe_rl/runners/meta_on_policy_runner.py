@@ -125,7 +125,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
         self._init_kappa = list(getattr(self.alg, "kappa", []))
         self._init_lr = float(getattr(self.alg, "learning_rate"))
 
-    # ----- inner/outer-loop helpers -------------------------------------------------
+    # inner/outer-loop helpers
 
     def _load_meta_into_policy(self) -> None:
         """Reset the live policy: actor + cost critic to meta-params, reward critic
@@ -477,7 +477,7 @@ class MetaOnPolicyRunner(OnPolicyRunner):
 
         return last_reward, last_cost, meta_policy_cost, meta_policy_reward, meta_data
 
-    # ----- main loop ----------------------------------------------------------------
+    # main loop
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         if self.log_dir is not None and self.writer is None and not self.disable_logs:

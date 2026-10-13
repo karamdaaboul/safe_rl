@@ -10,11 +10,7 @@ import yaml
 from safe_rl.envs import make_env
 from safe_rl.runners import OffPolicyRunner, OnPolicyRunner
 
-# Algorithms that use off-policy training
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
-
-# Algorithms that use on-policy training
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "Distillation"}
 
 
 def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
@@ -39,7 +35,6 @@ def load_train_cfg(config_path: str) -> Tuple[Dict[str, Any], int, str, str]:
         default_runner = "OnPolicyRunner"
     runner_class_name = cfg.get("runner_class_name", default_runner)
 
-    # Build train_cfg based on runner type
     if runner_class_name == "OffPolicyRunner":
         train_cfg = {
             "algorithm": algorithm_cfg,
@@ -154,7 +149,6 @@ def main() -> None:
 
     # Apply PPOL-PID specific overrides
     if algorithm_cfg.get("class_name") == "PPOL_PID":
-        # Update PID gains if any are provided
         current_pid = algorithm_cfg.get("lagrangian_pid", [0.1, 0.01, 0.01])
         if args.pid_kp is not None:
             current_pid[0] = args.pid_kp
@@ -191,7 +185,6 @@ def main() -> None:
     # Resolve cost_limits: CLI takes precedence, then config, then None
     cost_limits = parse_cost_limits(args.cost_limits)
     if cost_limits is None and "cost_limits" in algorithm_cfg:
-        # Use cost_limits from config if not provided via CLI
         cost_limits = algorithm_cfg["cost_limits"]
 
     # Pass cost_limits to algorithm config for Safe RL algorithms
@@ -223,7 +216,6 @@ def main() -> None:
         else:
             train_cfg["run_name"] = run_name
 
-    # Select runner based on algorithm type
     if runner_class_name == "OffPolicyRunner":
         print(f"[INFO] Using OffPolicyRunner for algorithm: {algorithm_cfg.get('class_name')}")
         runner = OffPolicyRunner(env, train_cfg, log_dir=log_dir, device=args.device)

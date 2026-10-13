@@ -102,7 +102,6 @@ class RolloutStorage:
         self.step = 0
 
     def add_transitions(self, transition: Transition):
-        # check if the transition is valid
         if self.step >= self.num_transitions_per_env:
             raise OverflowError("Rollout buffer overflow! You should call clear() before adding new transitions.")
 
@@ -141,7 +140,6 @@ class RolloutStorage:
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
 
-        # increment the counter
         self.step += 1
 
     def _save_hidden_states(self, hidden_states):
@@ -150,7 +148,6 @@ class RolloutStorage:
         # make a tuple out of GRU hidden state sto match the LSTM format
         hid_a = hidden_states[0] if isinstance(hidden_states[0], tuple) else (hidden_states[0],)
         hid_c = hidden_states[1] if isinstance(hidden_states[1], tuple) else (hidden_states[1],)
-        # initialize if needed
         if self.saved_hidden_states_a is None:
             self.saved_hidden_states_a = [
                 torch.zeros(self.observations.shape[0], *hid_a[i].shape, device=self.device) for i in range(len(hid_a))
@@ -158,7 +155,6 @@ class RolloutStorage:
             self.saved_hidden_states_c = [
                 torch.zeros(self.observations.shape[0], *hid_c[i].shape, device=self.device) for i in range(len(hid_c))
             ]
-        # copy the states
         for i in range(len(hid_a)):
             self.saved_hidden_states_a[i][self.step].copy_(hid_a[i])
             self.saved_hidden_states_c[i][self.step].copy_(hid_c[i])
@@ -183,7 +179,6 @@ class RolloutStorage:
             # Return: R_t = A(s_t, a_t) + V(s_t)
             self.returns[step] = advantage + self.values[step]
 
-        # Compute the advantages
         self.advantages = self.returns - self.values
         # Normalize the advantages if flag is set
         # This is to prevent double normalization (i.e. if per minibatch normalization is used)
@@ -233,7 +228,7 @@ class RolloutStorage:
         if self.rnd_state_shape is not None:
             rnd_state = self.rnd_state.flatten(0, 1)
 
-        for epoch in range(num_epochs):
+        for _ in range(num_epochs):
             for i in range(num_mini_batches):
                 # Select the indices for the mini-batch
                 start = i * mini_batch_size
@@ -260,7 +255,6 @@ class RolloutStorage:
                 else:
                     rnd_state_batch = None
 
-                # yield the mini-batch
                 yield obs_batch, privileged_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,
                     None,
@@ -282,7 +276,7 @@ class RolloutStorage:
             padded_rnd_state_trajectories = None
 
         mini_batch_size = self.num_envs // num_mini_batches
-        for ep in range(num_epochs):
+        for _ in range(num_epochs):
             first_traj = 0
             for i in range(num_mini_batches):
                 start = i * mini_batch_size
@@ -312,25 +306,7 @@ class RolloutStorage:
                 values_batch = self.values[:, start:stop]
                 old_actions_log_prob_batch = self.actions_log_prob[:, start:stop]
 
-                # reshape to [num_envs, time, num layers, hidden dim] (original shape: [time, num_layers, num_envs, hidden_dim])
-                # then take only time steps after dones (flattens num envs and time dimensions),
-                # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
                 last_was_done = last_was_done.permute(1, 0)
-                #hid_a_batch = [
-                #    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
-                #    .transpose(1, 0)
-                #    .contiguous()
-                #    for saved_hidden_states in self.saved_hidden_states_a
-                #]
-                #hid_c_batch = [
-                #    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
-                #    .transpose(1, 0)
-                #    .contiguous()
-                #    for saved_hidden_states in self.saved_hidden_states_c
-                #]
-                ## remove the tuple for GRU
-                #hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
-                #hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
 
                 yield obs_batch, privileged_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,

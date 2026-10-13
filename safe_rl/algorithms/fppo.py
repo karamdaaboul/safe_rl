@@ -138,7 +138,7 @@ class FPPO:
             self._effective_limits = list(constraint_limits_start)
         else:
             self._effective_limits = [
-                2.0 * l if l > 0.0 else 1.0 for l in self.cost_limits
+                2.0 * limit if limit > 0.0 else 1.0 for limit in self.cost_limits
             ]
         self._cost_ema = [0.0] * self.num_costs
         self._iteration_counter = 0
@@ -156,9 +156,7 @@ class FPPO:
         self.gpu_world_size = 1
         self.gpu_global_rank = 0
 
-    # ------------------------------------------------------------------
     # Interface methods — same signatures as P3O
-    # ------------------------------------------------------------------
 
     def init_storage(
         self,
@@ -180,12 +178,6 @@ class FPPO:
             cost_shape=cost_shape,
             device=self.device,
         )
-
-    def test_mode(self):
-        self.policy.eval()
-
-    def train_mode(self):
-        self.policy.train()
 
     def act(self, obs, critic_obs):
         if self.policy.is_recurrent:
@@ -271,9 +263,7 @@ class FPPO:
             "cost_limits": self.cost_limits,
         }
 
-    # ------------------------------------------------------------------
     # Phase 1: Predictor (PPO + cost critic, with per-batch KL abort)
-    # ------------------------------------------------------------------
 
     def _predictor_phase(self):
         mean_value_loss = 0.0
@@ -447,9 +437,7 @@ class FPPO:
             "predictor_aborted": aborted,
         }
 
-    # ------------------------------------------------------------------
     # Phase 2: Corrector (first-order active-set projection + KL backtracking)
-    # ------------------------------------------------------------------
 
     def _corrector_phase(self, current_costs):
         actor_params = list(self.policy.actor.parameters())
@@ -619,9 +607,7 @@ class FPPO:
 
         return accepted, n_back, eta, final_kl
 
-    # ------------------------------------------------------------------
     # Curriculum helpers
-    # ------------------------------------------------------------------
 
     def _update_cost_ema(self, current_costs):
         if current_costs is None:
@@ -639,9 +625,7 @@ class FPPO:
                 new_limit = self._effective_limits[i] * self.constraint_curriculum_shrink
                 self._effective_limits[i] = max(new_limit, self.cost_limits[i])
 
-    # ------------------------------------------------------------------
     # Validation and multi-GPU stubs
-    # ------------------------------------------------------------------
 
     def _validate_and_fix_cost_critic(self):
         if not hasattr(self.policy, "cost_critic"):

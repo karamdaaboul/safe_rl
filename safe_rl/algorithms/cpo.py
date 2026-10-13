@@ -160,12 +160,6 @@ class CPO:
             device=self.device,
         )
 
-    def test_mode(self) -> None:
-        self.policy.eval()
-
-    def train_mode(self) -> None:
-        self.policy.train()
-
     def act(self, obs: torch.Tensor, critic_obs: torch.Tensor) -> torch.Tensor:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
@@ -226,7 +220,7 @@ class CPO:
             normalize_cost_advantage=not self.normalize_advantage_per_mini_batch,
         )
 
-    # ---------- CPO actor update ----------
+    # CPO actor update
 
     def _make_distribution(self, obs_batch: torch.Tensor) -> Normal:
         self.policy.update_distribution(obs_batch)
@@ -534,7 +528,7 @@ class CPO:
             "cost_violation": float(c_hat_tensor.item()),
         }
 
-    # ---------- Value-function update (reward + cost critics) ----------
+    # Value-function update (reward + cost critics)
 
     def _update_value_functions(self) -> Tuple[float, float]:
         mean_value_loss = 0.0

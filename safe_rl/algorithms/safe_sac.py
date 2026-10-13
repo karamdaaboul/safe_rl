@@ -216,9 +216,6 @@ class SafeSAC:
         self.rnd = None
         self.learning_rate = actor_lr
 
-        # Episode cost tracking for PID updates
-        self._episode_costs: list[list[float]] = [[] for _ in range(self.num_costs)]
-
     @property
     def alpha(self) -> torch.Tensor:
         """Current entropy coefficient."""
@@ -275,7 +272,6 @@ class SafeSAC:
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call init_storage() first.")
 
-        # Format cost tensor
         extras = {}
         if cost is not None:
             cost = self._format_costs_tensor(cost)
@@ -320,7 +316,7 @@ class SafeSAC:
             # Calculate error (delta): positive means violation
             delta = current_cost - cost_limit
 
-            # === Integral term (I) with anti-windup ===
+            # Integral term (I) with anti-windup
             self.pid_i[cost_idx] = max(0.0, self.pid_i[cost_idx] + delta * self.ki)
             if self.diff_norm:
                 self.pid_i[cost_idx] = max(0.0, min(1.0, self.pid_i[cost_idx]))
@@ -328,11 +324,11 @@ class SafeSAC:
                 # Prevent integral windup by capping at pid_i_max
                 self.pid_i[cost_idx] = min(self.pid_i[cost_idx], self.pid_i_max)
 
-            # === Proportional term (P) with EMA smoothing ===
+            # Proportional term (P) with EMA smoothing
             alpha_p = self.pid_delta_p_ema_alpha
             self.delta_p[cost_idx] = alpha_p * self.delta_p[cost_idx] + (1 - alpha_p) * delta
 
-            # === Derivative term (D) with EMA smoothing and delay ===
+            # Derivative term (D) with EMA smoothing and delay
             alpha_d = self.pid_delta_d_ema_alpha
             self.cost_ema[cost_idx] = alpha_d * self.cost_ema[cost_idx] + (1 - alpha_d) * current_cost
 
@@ -341,7 +337,7 @@ class SafeSAC:
             else:
                 pid_d = 0.0
 
-            # === Compute PID output ===
+            # Compute PID output
             pid_output = self.kp * self.delta_p[cost_idx] + self.pid_i[cost_idx] + self.kd * pid_d
 
             # Apply constraints
@@ -377,7 +373,6 @@ class SafeSAC:
                 "alpha_loss": 0.0,
             }
 
-        # Update Lagrangian multipliers if costs provided
         if current_costs is not None:
             self.update_lagrangian_multipliers(current_costs)
 
@@ -422,30 +417,25 @@ class SafeSAC:
                     else:
                         rewards = rewards / (reward_normalizer._std + reward_normalizer.eps)
 
-            # Update reward critic
             critic_loss = self._update_reward_critic(
                 obs, critic_obs, actions, rewards, dones, next_obs, next_critic_obs, bootstrap=bootstrap
             )
             total_critic_loss += critic_loss
 
-            # Update cost critic
             cost_critic_loss = self._update_cost_critic(
                 obs, critic_obs, actions, costs, dones, next_obs, next_critic_obs, bootstrap=bootstrap
             )
             total_cost_critic_loss += cost_critic_loss
 
-            # Update actor and alpha
             if self.update_step % self.policy_frequency == 0:
                 actor_loss, alpha_loss = self._update_actor_and_alpha(obs, critic_obs)
                 total_actor_loss += actor_loss
                 total_alpha_loss += alpha_loss
                 actor_updates += 1
 
-            # Soft update target networks
             self.policy.soft_update_targets(self.tau)
             self.update_step += 1
 
-        # Average losses
         num_updates = self.num_updates_per_step
         actor_denominator = actor_updates if actor_updates > 0 else 1
         return {
@@ -505,10 +495,8 @@ class SafeSAC:
         # Compute current Q-values (critic-space obs)
         q1, q2 = self.policy.evaluate_q(critic_obs, actions)
 
-        # Critic loss (MSE)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
-        # Optimize reward critics
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         reward_critic_params = []
@@ -560,10 +548,8 @@ class SafeSAC:
         # Compute current cost Q-values (critic-space obs)
         cost_q = self.policy.evaluate_cost_q(critic_obs, actions)
 
-        # Cost critic loss (MSE)
         cost_critic_loss = F.mse_loss(cost_q, target_cost_q)
 
-        # Optimize cost critics
         self.cost_critic_optimizer.zero_grad()
         cost_critic_loss.backward()
         cost_critic_params = []
@@ -628,7 +614,6 @@ class SafeSAC:
         normalized_q = q_min - normalized_cost_penalty
         actor_loss = (self.alpha.detach() * log_prob - normalized_q).mean()
 
-        # Optimize actor
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
@@ -664,10 +649,6 @@ class SafeSAC:
             "delta_p": self.delta_p.copy(),
             "alpha": self.alpha.item(),
         }
-
-    def get_lagrangian_info(self) -> dict[str, Any]:
-        """Get Lagrangian multiplier information for logging (alias)."""
-        return self.get_penalty_info()
 
     def get_actual_action_std(self) -> float:
         """Get the actual action std from the stochastic actor (not the placeholder).

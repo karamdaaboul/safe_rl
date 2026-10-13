@@ -52,7 +52,7 @@ class TD3ActorCritic(nn.Module):
         self.critic_type = critic_type
         self.num_critics = num_critics
 
-        # -------- Actor --------
+        # Actor
         actor_kwargs.setdefault("num_envs", num_envs)
         self.actor = DeterministicActor(
             num_obs=num_actor_obs,
@@ -73,7 +73,7 @@ class TD3ActorCritic(nn.Module):
         else:
             self.actor_obs_normalizer = nn.Identity()
 
-        # -------- Critics --------
+        # Critics
         if critic_type == "standard":
             self.is_distributional_critic = False
             critic_kwargs.setdefault("hidden_dims", [256, 256])
@@ -150,9 +150,3 @@ class TD3ActorCritic(nn.Module):
             actor_normalizer=self.actor_obs_normalizer,
             verbose=verbose,
         )
-
-    def update_normalization(self, actor_obs: torch.Tensor, critic_obs: torch.Tensor) -> None:
-        if self.actor_obs_normalization:
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
-            self.critic_obs_normalizer.update(critic_obs)

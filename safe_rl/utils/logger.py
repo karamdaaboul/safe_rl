@@ -67,12 +67,9 @@ class Logger:
         self.logger_type = "tensorboard"
         self._init_writer(env_cfg)
 
-        # Store code state on init
         self._store_code_state()
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
 
     def process_env_step(
         self,
@@ -134,7 +131,7 @@ class Logger:
         if self.log_dir is None:
             return
 
-        # -- Timing ----------------------------------------------------------
+        # Timing
         iteration_time = collect_time + learn_time
         self.tot_time += iteration_time
         num_steps_per_env = int(self.runner_cfg.get("num_steps_per_env", 1))
@@ -142,7 +139,7 @@ class Logger:
         self.tot_timesteps += collection_size
         fps = int(collection_size / max(iteration_time, 1e-6))
 
-        # -- Episode extras --------------------------------------------------
+        # Episode extras
         extras_string = ""
         if self.ep_infos:
             for key in self.ep_infos[0]:
@@ -165,7 +162,7 @@ class Logger:
                             self.writer.add_scalar(f"Episode/{key}", value, it)
                     extras_string += f"""{f"Mean episode {key}:":>{pad}} {value:.4f}\n"""
 
-        # -- Scalar logging (convention-based routing) -----------------------
+        # Scalar logging (convention-based routing)
         if self.writer is not None:
             for key, value in loss_dict.items():
                 if isinstance(value, torch.Tensor):
@@ -194,12 +191,11 @@ class Logger:
                     mean_cost = statistics.mean(costbuffer)
                     self.writer.add_scalar(f"Train/episode_cost_{cost_idx}", mean_cost, it)
 
-        # -- Console output --------------------------------------------------
+        # Console output
         self._print_console(
             it, start_it, total_it, collect_time, learn_time, fps, loss_dict, extras_string, width, pad
         )
 
-        # -- Clear episode infos for next iteration --------------------------
         self.ep_infos.clear()
 
     def save_model(self, path: str, it: int) -> None:
@@ -207,9 +203,7 @@ class Logger:
         if self.writer is not None and self.logger_type == "wandb":
             self.writer.save_model(path, it)
 
-    # ------------------------------------------------------------------
     # Private helpers
-    # ------------------------------------------------------------------
 
     def _route_key(self, key: str) -> str:
         """Map a metric key to a TensorBoard tag by convention.

@@ -8,13 +8,6 @@ import torch.nn as nn
 from safe_rl.utils import resolve_nn_activation
 
 
-def get_param(params: float | tuple | list, idx: int) -> float:
-    """Get parameter by index, or return the value if it's a scalar."""
-    if isinstance(params, (tuple, list)):
-        return params[idx] if idx < len(params) else params[-1]
-    return params
-
-
 class MLP(nn.Sequential):
     """Multi-layer perceptron.
 
@@ -48,13 +41,11 @@ class MLP(nn.Sequential):
         """
         super().__init__()
 
-        # Resolve activation functions
         activation_mod = resolve_nn_activation(activation)
         last_activation_mod = resolve_nn_activation(last_activation) if last_activation is not None else None
         # Resolve number of hidden dims if they are -1
         hidden_dims_processed = [input_dim if dim == -1 else dim for dim in hidden_dims]
 
-        # Create layers sequentially
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dims_processed[0]))
         if layer_norm:
@@ -77,26 +68,11 @@ class MLP(nn.Sequential):
             layers.append(nn.Linear(hidden_dims_processed[-1], total_out_dim))
             layers.append(nn.Unflatten(dim=-1, unflattened_size=output_dim))
 
-        # Add last activation function if specified
         if last_activation_mod is not None:
             layers.append(last_activation_mod)
 
-        # Register the layers
         for idx, layer in enumerate(layers):
             self.add_module(f"{idx}", layer)
-
-    def init_weights(self, scales: float | tuple[float]) -> None:
-        """Initialize the weights of the MLP.
-
-        Args:
-            scales: Scale factor for the weights.
-        """
-        linear_idx = 0
-        for module in self:
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=get_param(scales, linear_idx))
-                nn.init.zeros_(module.bias)
-                linear_idx += 1
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass of the MLP."""

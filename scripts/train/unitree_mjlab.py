@@ -4,10 +4,11 @@ import argparse
 import logging
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
 
 def _add_unitree_repo_to_path() -> None:
     explicit_repo = os.environ.get("UNITREE_RL_MJLAB_PATH")
@@ -30,9 +31,7 @@ _add_unitree_repo_to_path()
 # Import mjlab before torch: mjlab transitively loads libicui18n.so.78, which
 # needs CXXABI_1.3.15 from the conda env's newer libstdc++. If torch imports
 # first, it pins the host's older libstdc++ and later mjlab imports fail.
-import mjlab  # noqa: E402
 import mjlab.tasks  # noqa: E402,F401
-import tyro  # noqa: E402
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg  # noqa: E402
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks  # noqa: E402
 from mjlab.tasks.tracking.mdp import MotionCommandCfg  # noqa: E402
@@ -42,7 +41,6 @@ from mjlab.utils.wrappers import VideoRecorder  # noqa: E402
 
 import src.tasks  # noqa: E402,F401
 
-import torch  # noqa: E402
 import yaml  # noqa: E402
 
 from safe_rl.envs import make_env  # noqa: E402
@@ -50,7 +48,6 @@ from safe_rl.runners import OffPolicyRunner, OnPolicyRunner  # noqa: E402
 
 
 OFF_POLICY_ALGORITHMS = {"SAC", "TD3", "SafeSAC", "FastSAC", "FastTD3"}
-ON_POLICY_ALGORITHMS = {"PPO", "P3O", "PPOL_PID", "Distillation"}
 
 
 @dataclass
@@ -358,7 +355,6 @@ def run_train(task_id: str, args: argparse.Namespace, log_dir: Path) -> None:
 
 
 def launch_training(task_id: str, args: argparse.Namespace) -> None:
-    env_cfg = load_env_cfg(task_id)
     agent_cfg = load_rl_cfg(task_id)
     if args.experiment_name is not None:
         agent_cfg.experiment_name = args.experiment_name
